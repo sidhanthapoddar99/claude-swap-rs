@@ -1,41 +1,30 @@
-//! `cswap list` — Default/Active as standalone entity lines (email only),
-//! then every profile with its aliases and usage split across one line per
-//! window (5h / 7d / per-model weekly).
+//! `cswap list` — one row per account in a borderless table:
 //!
-//! Colors mirror the user's statusline convention: <70 green, <90 yellow,
-//! else red; labels and reset times dimmed. Disabled when stdout is not a
-//! terminal or NO_COLOR is set.
+//! ```text
+//! STATUS   ACCOUNT                ALIAS   USAGE
+//! active   work@corp.com          work    5h  96% │ 7d  40%
+//! default  devanshw09@gmail.com   main    5h   3% │ 7d  12%
+//! ```
+//!
+//! Deliberately one line per account: the gate percentages at a glance, no
+//! reset times, no per-model windows. `cswap usage` is the detailed view.
 
 use anyhow::Result;
-use std::io::IsTerminal;
 
 use crate::config::{Account, Config};
-use crate::{oauth, profile};
-
-const DIM: &str = "\x1b[2m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const RED: &str = "\x1b[31m";
-const RESET: &str = "\x1b[0m";
-
-fn color_on() -> bool {
-    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
-}
-
-fn pct_color(pct: f64) -> &'static str {
-    if pct < 70.0 {
-        GREEN
-    } else if pct < 90.0 {
-        YELLOW
-    } else {
-        RED
-    }
-}
+use crate::ui::{self, DIM, RESET};
 
 pub fn run(quick: bool) -> Result<()> {
     print_table(quick)?;
     crate::update_check::nudge();
     Ok(())
+}
+
+struct Row {
+    status: String,
+    account: String,
+    alias: String,
+    usage: String,
 }
 
 pub fn print_table(quick: bool) -> Result<()> {
@@ -44,117 +33,104 @@ pub fn print_table(quick: bool) -> Result<()> {
         println!("No accounts yet. Run: cswap login");
         return Ok(());
     }
-    let color = color_on();
-    let dim = |s: &str| {
-        if color {
-            format!("{DIM}{s}{RESET}")
-        } else {
-            s.to_string()
-        }
-    };
+    let color = ui::color_on();
+    let active_email = active_email(&cfg);
 
-    // Default and Active are entities of their own: email only, no aliases.
-    match &cfg.default {
-        Some(d) => println!("Default: {d}"),
-        None => println!(
-            "Default: {}",
-            dim("(not set — cswap default <alias|email>)")
-        ),
-    }
-    let active_email = std::env::var("CSWAP_ACTIVE")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(|k| cfg.find(&k).map(|a| a.email.clone()).unwrap_or(k));
-    if let Some(email) = &active_email {
-        println!("Active:  {email} {}", dim("[this shell]"));
-    }
-    println!();
-
-    for acct in &cfg.accounts {
-        let mut marker = String::new();
-        if active_email.as_deref() == Some(acct.email.as_str()) {
-            marker.push('*');
-        }
-        if cfg.default.as_deref() == Some(acct.email.as_str()) {
-            marker.push('d');
-        }
-        let aliases = if acct.aliases.is_empty() {
-            dim("(no alias)")
-        } else {
-            acct.aliases.join(", ")
-        };
-        let iso = if acct.isolated {
-            dim(" [isolated]")
-        } else {
-            String::new()
-        };
-        println!("{marker:<2} {aliases:<16} {}{iso}", acct.email);
-        if !quick {
-            for line in usage_lines(acct, color) {
-                println!("     {line}");
+    let rows: Vec<Row> = cfg
+        .accounts
+        .iter()
+        .map(|acct| {
+            let mut status = Vec::new();
+            if active_email.as_deref() == Some(acct.email.as_str()) {
+                status.push("active");
             }
-        }
-    }
-    println!(
-        "{}",
-        dim(if quick {
-            "   (* active in this shell, d default) — usage skipped (--quick)"
-        } else {
-            "   (* active in this shell, d default)"
+            if cfg.default.as_deref() == Some(acct.email.as_str()) {
+                status.push("default");
+            }
+            let usage = if quick {
+                String::new()
+            } else {
+                gates(acct, color)
+            };
+            Row {
+                status: status.join(" "),
+                account: acct.email.clone(),
+                alias: if acct.aliases.is_empty() {
+                    "-".to_string()
+                } else {
+                    acct.aliases.join(", ")
+                },
+                usage,
+            }
         })
+        .collect();
+
+    let w_status = width("STATUS", rows.iter().map(|r| r.status.as_str()));
+    let w_account = width("ACCOUNT", rows.iter().map(|r| r.account.as_str()));
+    let w_alias = width("ALIAS", rows.iter().map(|r| r.alias.as_str()));
+
+    let header = format!(
+        "{:<w_status$}  {:<w_account$}  {:<w_alias$}  {}",
+        "STATUS", "ACCOUNT", "ALIAS", "USAGE"
     );
+    println!("{}", ui::paint(color, DIM, &header));
+
+    for r in &rows {
+        let status = ui::pad(
+            &r.status,
+            &ui::paint(color, ui::ACCENT, &r.status),
+            w_status,
+        );
+        let alias = ui::pad(&r.alias, &ui::paint(color, DIM, &r.alias), w_alias);
+        println!("{status}  {:<w_account$}  {alias}  {}", r.account, r.usage);
+    }
+    if quick {
+        println!("{}", ui::paint(color, DIM, "usage skipped (--quick)"));
+    }
     Ok(())
 }
 
-/// One line per usage window, e.g. ["5h     3%  in 4h39m (02:10)", ...].
-fn usage_lines(acct: &Account, color: bool) -> Vec<String> {
-    match try_usage(acct, color) {
-        Ok(lines) if lines.is_empty() => vec!["no window data".to_string()],
-        Ok(lines) => lines,
-        Err(e) => vec![format!("usage unavailable ({e:#})")],
-    }
+/// Which email this shell has activated, resolved through aliases.
+pub fn active_email(cfg: &Config) -> Option<String> {
+    std::env::var("CSWAP_ACTIVE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|k| cfg.find(&k).map(|a| a.email.clone()).unwrap_or(k))
 }
 
-fn try_usage(acct: &Account, color: bool) -> Result<Vec<String>> {
-    // Live account: read ~/.claude's token as-is, never refresh it (rotation
-    // is claude's job for the live login). Others: profile creds + refresh.
-    let creds = if profile::live_email().as_deref() == Some(acct.email.as_str()) {
-        let text = std::fs::read_to_string(crate::paths::live_credentials())?;
-        let creds: serde_json::Value = serde_json::from_str(&text)?;
-        let fresh = creds
-            .get("claudeAiOauth")
-            .and_then(|o| o.get("expiresAt"))
-            .and_then(serde_json::Value::as_i64)
-            .map(|t| t > oauth::now_ms())
-            .unwrap_or(false);
-        if !fresh {
-            anyhow::bail!("live token expired — run claude once to refresh");
-        }
-        creds
-    } else {
-        profile::current_creds(acct)?
+fn width<'a>(header: &str, cells: impl Iterator<Item = &'a str>) -> usize {
+    cells
+        .map(|c| c.chars().count())
+        .chain(std::iter::once(header.chars().count()))
+        .max()
+        .unwrap_or(0)
+}
+
+/// The 5h and 7d gates on one line — per-model windows belong to `cswap usage`.
+/// Last column, so it never needs padding: only the styled form is built.
+fn gates(acct: &Account, color: bool) -> String {
+    let windows = match ui::fetch_windows(acct) {
+        Ok(w) => w,
+        Err(e) => return ui::paint(color, DIM, &format!("unavailable ({e:#})")),
     };
-    let token = oauth::access_token(&creds).ok_or_else(|| anyhow::anyhow!("no access token"))?;
-    let usage = oauth::fetch_usage(token)?;
-    Ok(oauth::windows(&usage)
-        .iter()
-        .map(|w| {
-            let reset = w
-                .resets_at
-                .as_deref()
-                .and_then(oauth::format_reset)
-                .unwrap_or_default();
-            if color {
-                format!(
-                    "{DIM}{:<6}{RESET}{}{:>4.0}%{RESET}  {DIM}{}{RESET}",
-                    w.label,
-                    pct_color(w.pct),
-                    w.pct,
-                    reset
-                )
-            } else {
-                format!("{:<6}{:>4.0}%  {}", w.label, w.pct, reset)
-            }
-        })
-        .collect())
+    let mut styled = Vec::new();
+    for label in ["5h", "7d"] {
+        let Some(w) = windows.iter().find(|w| w.label == label) else {
+            continue;
+        };
+        let text = format!("{label} {:>3.0}%", w.pct);
+        styled.push(if color {
+            format!(
+                "{DIM}{label} {RESET}{}{:>3.0}%{RESET}",
+                ui::pct_color(w.pct),
+                w.pct
+            )
+        } else {
+            text
+        });
+    }
+    if styled.is_empty() {
+        return ui::paint(color, DIM, "no window data");
+    }
+    styled.join(&ui::paint(color, DIM, " │ "))
 }

@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -15,6 +15,18 @@ pub const USER_AGENT: &str = concat!("claude-swap-rs/", env!("CARGO_PKG_VERSION"
 
 /// Refresh margin: rotate when the access token dies within 5 minutes.
 pub const REFRESH_MARGIN_MS: i64 = 5 * 60 * 1000;
+
+/// Shared HTTP client. Bounded on purpose: `cswap list` fans out one usage
+/// call per account, so an unreachable or hanging endpoint must fail fast
+/// instead of freezing the terminal. Also disables ureq's retries — a usage
+/// number isn't worth waiting through a backoff for.
+fn agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .try_proxy_from_env(true)
+        .build()
+}
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -45,7 +57,8 @@ pub fn refresh_if_needed(creds: &mut Value, margin_ms: i64) -> Result<bool> {
         .context("access token expired and no refreshToken present — re-login this account")?
         .to_string();
 
-    let resp: Value = ureq::post(TOKEN_URL)
+    let resp: Value = agent()
+        .post(TOKEN_URL)
         .set("Content-Type", "application/json")
         .set("User-Agent", USER_AGENT)
         .send_json(json!({
@@ -86,7 +99,11 @@ pub fn refresh_if_needed(creds: &mut Value, margin_ms: i64) -> Result<bool> {
 }
 
 pub fn fetch_usage(token: &str) -> Result<Value> {
-    ureq::get(USAGE_URL)
+    // CSWAP_USAGE_URL redirects the usage call — a debugging/test hook, never
+    // a default. Token refresh always goes to the real endpoint.
+    let url = std::env::var("CSWAP_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string());
+    agent()
+        .get(&url)
         .set("Authorization", &format!("Bearer {token}"))
         .set("anthropic-beta", BETA_HEADER)
         .set("User-Agent", USER_AGENT)
@@ -140,17 +157,24 @@ pub fn windows(usage: &Value) -> Vec<Window> {
     out
 }
 
-/// "in 2h13m (16:00)" from an ISO reset timestamp, local time.
-pub fn format_reset(resets_at: &str) -> Option<String> {
+/// "resets 2h 47m · 20:39" — the detailed form used by `usage`/`watch`.
+/// Two units at most, coarsest first: `5d 3h`, `2h 47m`, `47m`.
+pub fn reset_detail(resets_at: &str) -> Option<String> {
     let dt = DateTime::parse_from_rfc3339(resets_at).ok()?;
-    let local = dt.with_timezone(&Local);
     let mins = (dt.with_timezone(&Utc) - Utc::now()).num_minutes().max(0);
-    let countdown = if mins >= 60 {
-        format!("{}h{:02}m", mins / 60, mins % 60)
+    let clock = dt.with_timezone(&Local).format("%H:%M");
+    Some(format!("resets {} · {clock}", humanize(mins)))
+}
+
+fn humanize(mins: i64) -> String {
+    let (d, h, m) = (mins / 1440, (mins % 1440) / 60, mins % 60);
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m:02}m")
     } else {
-        format!("{mins}m")
-    };
-    Some(format!("in {countdown} ({})", local.format("%H:%M")))
+        format!("{m}m")
+    }
 }
 
 #[cfg(test)]
@@ -202,9 +226,13 @@ mod tests {
     }
 
     #[test]
-    fn format_reset_parses() {
-        let s = format_reset("2999-01-01T00:00:00+00:00").unwrap();
-        assert!(s.starts_with("in "));
-        assert!(format_reset("garbage").is_none());
+    fn reset_detail_formats_two_units() {
+        let s = reset_detail("2999-01-01T00:00:00+00:00").unwrap();
+        assert!(s.starts_with("resets ") && s.contains(" · "), "got {s}");
+        assert!(reset_detail("garbage").is_none());
+        assert_eq!(humanize(0), "0m");
+        assert_eq!(humanize(47), "47m");
+        assert_eq!(humanize(167), "2h 47m");
+        assert_eq!(humanize(7380), "5d 3h");
     }
 }
