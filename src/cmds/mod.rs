@@ -1,4 +1,5 @@
 pub mod activate;
+pub mod alias;
 pub mod default_cmd;
 pub mod list;
 pub mod login;

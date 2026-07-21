@@ -154,10 +154,112 @@ fn login_registers_and_sets_default() {
     assert!(env.data().join("accounts/one.creds.json").exists());
     assert!(env.data().join("accounts/one.meta.json").exists());
 
-    // Same email again = relogin, not a duplicate.
+    // Same email again = relogin, not a duplicate — and it says who loudly.
     let o = env.cswap(&["login"]);
     assert_ok(&o);
-    assert!(stdout(&o).contains("Updated credentials for 'one'"));
+    assert!(stdout(&o).contains("Live ~/.claude login: one@x.com"));
+    assert!(stdout(&o).contains("Refreshed stored credentials for existing account 'one'"));
+}
+
+#[test]
+fn login_name_on_registered_live_account_errors_loudly() {
+    let env = Env::new();
+    assert_ok(&env.cswap(&["login", "--name", "one"]));
+    // The wadhwani scenario: --name for a new account while the live login
+    // is still the already-registered one. Must ERROR, never silently relogin.
+    let o = env.cswap(&["login", "--name", "wadhwani"]);
+    assert!(!o.status.success(), "must not silently ignore --name");
+    let err = stderr(&o);
+    assert!(err.contains("already registered as 'one'"), "got: {err}");
+    assert!(
+        err.contains("cswap login --new"),
+        "must point at the fix: {err}"
+    );
+    // And nothing named wadhwani may exist.
+    let cfg = fs::read_to_string(env.home.path().join(".config/cswap/config.toml")).unwrap();
+    assert!(!cfg.contains("wadhwani"));
+}
+
+#[test]
+fn login_new_captures_fresh_account_via_staging() {
+    let env = Env::new();
+    assert_ok(&env.cswap(&["login", "--name", "one"]));
+
+    // Fake claude that "logs in" as wadhwani inside $CLAUDE_CONFIG_DIR.
+    let fake = env.home.path().join("fake-login.sh");
+    fs::write(
+        &fake,
+        r#"#!/bin/sh
+cat > "$CLAUDE_CONFIG_DIR/.credentials.json" <<'EOF'
+{"claudeAiOauth":{"accessToken":"tok-wad","refreshToken":"r-wad","expiresAt":9999999999999}}
+EOF
+cat > "$CLAUDE_CONFIG_DIR/.claude.json" <<'EOF'
+{"hasCompletedOnboarding":true,"theme":"dark","oauthAccount":{"emailAddress":"wadhwani@x.com"}}
+EOF
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let o = env.cswap_env(
+        &["login", "--new", "--name", "wadhwani"],
+        &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
+    );
+    assert_ok(&o);
+    assert!(stdout(&o).contains("Registered 'wadhwani' (wadhwani@x.com)"));
+
+    // Live login untouched; staging promoted to a real profile.
+    let live: Value = serde_json::from_str(
+        &fs::read_to_string(env.home.path().join(".claude/.credentials.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(live["claudeAiOauth"]["accessToken"], json!("tok-live"));
+    assert!(env.profile("wadhwani").join(".credentials.json").exists());
+    assert!(!env.data().join("staging-login").exists());
+
+    // Logging into an ALREADY-registered account via --new is caught too.
+    let o = env.cswap_env(
+        &["login", "--new", "--name", "dup"],
+        &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
+    );
+    assert!(!o.status.success());
+    assert!(stderr(&o).contains("already registered as 'wadhwani'"));
+}
+
+#[test]
+fn alias_add_resolve_remove() {
+    let env = Env::new();
+    assert_ok(&env.cswap(&["login", "--name", "one"]));
+    env.detach_live();
+
+    assert_ok(&env.cswap(&["alias", "one", "o1"]));
+    // Alias resolves in activate / default / run.
+    let o = env.cswap(&["activate", "--print", "o1"]);
+    assert_ok(&o);
+    assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='one'");
+    assert_ok(&env.cswap(&["default", "o1"]));
+
+    let fake = env.fake_claude();
+    let o = env.cswap_env(
+        &["run", "o1"],
+        &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
+    );
+    assert_ok(&o);
+    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("one").display())));
+
+    // Uniqueness: an alias can't shadow an existing name or alias.
+    let o = env.cswap(&["alias", "one", "o1"]);
+    assert!(!o.status.success());
+    let o = env.cswap(&["alias", "one", "one"]);
+    assert!(!o.status.success());
+
+    // list shows it; removal works.
+    let o = env.cswap(&["list", "--quick"]);
+    assert!(stdout(&o).contains("o1"));
+    assert_ok(&env.cswap(&["alias", "--remove", "o1"]));
+    let o = env.cswap(&["activate", "--print", "o1"]);
+    assert!(!o.status.success());
 }
 
 #[test]
@@ -171,7 +273,7 @@ fn login_rejects_bad_names_and_duplicates() {
     env.switch_live_account("two@x.com", "tok-two");
     let o = env.cswap(&["login", "--name", "one"]);
     assert!(!o.status.success());
-    assert!(stderr(&o).contains("already exists"));
+    assert!(stderr(&o).contains("already used"));
 }
 
 #[test]
@@ -380,10 +482,16 @@ fn list_quick_and_markers() {
     let o = env.cswap_env(&["list", "--quick"], &[("CSWAP_ACTIVE", "two")]);
     assert_ok(&o);
     let out = stdout(&o);
-    assert!(out.contains("one@x.com"));
-    assert!(out.contains("two@x.com"));
-    let one_line = out.lines().find(|l| l.contains("one@x.com")).unwrap();
-    let two_line = out.lines().find(|l| l.contains("two@x.com")).unwrap();
+    // Default and Active are shown as their own entities, with emails.
+    assert!(out.contains("Default: one"), "got: {out}");
+    assert!(out.contains("Active:  two"), "got: {out}");
+    // Table rows (skip the entity header lines).
+    let rows: Vec<&str> = out
+        .lines()
+        .filter(|l| !l.starts_with("Default:") && !l.starts_with("Active:"))
+        .collect();
+    let one_line = rows.iter().find(|l| l.contains("one@x.com")).unwrap();
+    let two_line = rows.iter().find(|l| l.contains("two@x.com")).unwrap();
     assert!(
         one_line.trim_start().starts_with("d "),
         "one is default: {one_line}"

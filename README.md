@@ -81,14 +81,20 @@ Downloads the latest release, verifies its checksum, and atomically replaces the
 ## Usage
 
 ```bash
-# Register accounts: log into Claude Code, capture, repeat.
-claude /login          # log in as account A
-cswap login            # prompts for a name, e.g. "personal"
-claude /login          # switch Claude to account B
-cswap login --name work
+# Register the account you're already logged into:
+cswap login            # captures the live ~/.claude login, prompts for a name
 
-cswap list             # accounts + 5h/7d usage windows, default (d) and active (*)
+# Add MORE accounts from inside cswap (recommended):
+cswap login --new --name work   # launches claude in a clean staging profile;
+                                # log in as the new account, /exit, done.
+                                # Your current login is never touched.
+
+cswap list             # Default/Active as entities + all profiles with colored
+                       # usage windows (<70% green, <90% yellow, else red)
 cswap list --quick     # skip the usage API calls
+
+cswap alias work w     # extra labels: `cswap activate w`, `cswap run w` ...
+cswap alias --remove w
 
 cswap default work     # what bare `claude` uses everywhere
 cswap activate personal  # what `claude` uses in THIS terminal only
@@ -112,8 +118,9 @@ cswap remove old-account   # forget it (never touches ~/.claude data)
 default = "personal"
 
 [[account]]
-name = "personal"
-email = "you@gmail.com"
+name = "personal"           # primary label
+email = "you@gmail.com"     # the unique identity an account is keyed by
+aliases = ["p", "home"]     # extra labels; resolve everywhere a name does
 isolated = false
 
 [[account]]
