@@ -5,4 +5,5 @@ pub mod login;
 pub mod remove;
 pub mod run;
 pub mod shell_init;
+pub mod upgrade;
 pub mod watch;

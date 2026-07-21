@@ -36,7 +36,15 @@ Network: exactly two first-party endpoints (Anthropic's OAuth token refresh and 
 
 ## Install
 
-### From GitHub Releases
+### Installer script (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/sidhanthapoddar99/claude-swap-rs/main/install.sh | bash
+```
+
+Detects your platform, downloads the latest release, verifies the SHA-256 checksum, installs to `~/.local/bin`, and **asks** before adding the shell integration to your `~/.zshrc` / `~/.bashrc` (idempotent marker block; `--yes` to skip the prompt, `--no-modify-rc` to never touch rc files, `--dir <path>` for a custom install dir).
+
+### Manual (GitHub Releases)
 
 ```bash
 curl -fsSL https://github.com/sidhanthapoddar99/claude-swap-rs/releases/latest/download/cswap-x86_64-unknown-linux-musl.tar.gz \
@@ -54,13 +62,21 @@ cargo install --git https://github.com/sidhanthapoddar99/claude-swap-rs
 
 ### Shell integration (required for `activate` and the `claude` wrapper)
 
-Add to `~/.zshrc` or `~/.bashrc`:
+The installer offers to set this up; manually, add to `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 eval "$(cswap shell-init zsh)"   # or: bash
 ```
 
 This defines two functions: `cswap` (so `activate` can export into the current shell) and `claude` (which routes through cswap so the active/default account applies). `command claude` always bypasses everything.
+
+### Updating
+
+```bash
+cswap upgrade
+```
+
+Downloads the latest release, verifies its checksum, and atomically replaces the binary. `cswap list` also nudges (at most once per 24h, cached, only in interactive terminals) when a newer version exists — set `CSWAP_NO_UPDATE_CHECK=1` to disable.
 
 ## Usage
 
