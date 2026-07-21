@@ -754,6 +754,48 @@ fn shell_init_emits_wrappers() {
     assert!(!o.status.success());
 }
 
+/// The regression behind "cswap: no account ''": the old wrapper passed
+/// "${2:-}" — an empty string — for a bare `cswap activate`, which skipped
+/// the picker/default branch. Both layers are pinned here.
+#[test]
+fn bare_activate_through_the_wrapper_means_default_not_empty_account() {
+    let env = Env::new();
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
+
+    // Binary layer: an explicitly empty key behaves like no key at all
+    // (old snippets still sourced in open shells keep working).
+    let o = env.cswap(&["activate", "--print", ""]);
+    assert_ok(&o);
+    assert_eq!(stdout(&o).trim(), "unset CSWAP_ACTIVE");
+
+    // Wrapper layer: run a bare `cswap activate` through the REAL emitted
+    // bash integration and check the eval takes effect in that shell.
+    let snippet = stdout(&env.cswap(&["shell-init", "bash"]));
+    let script = format!(
+        "{snippet}\nexport CSWAP_ACTIVE=one@x.com\ncswap activate\necho \"ACTIVE=${{CSWAP_ACTIVE:-unset}}\"\ncswap activate one\necho \"ACTIVE=${{CSWAP_ACTIVE:-unset}}\"\n"
+    );
+    let o = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env_clear()
+        .env("HOME", env.home.path())
+        .env("PATH", {
+            // Put the built cswap first on PATH so `command cswap` finds it.
+            let bin_dir = Path::new(BIN).parent().unwrap();
+            format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap())
+        })
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "stderr: {}", stderr(&o));
+    let out = stdout(&o);
+    // Bare activate cleared the override; explicit activate set it again.
+    assert!(
+        out.contains("ACTIVE=unset"),
+        "bare = back to default: {out}"
+    );
+    assert!(out.contains("ACTIVE=one@x.com"), "explicit works: {out}");
+}
+
 #[test]
 fn relogin_updates_existing_profile_credentials() {
     let env = Env::new();

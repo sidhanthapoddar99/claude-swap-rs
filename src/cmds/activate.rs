@@ -26,7 +26,10 @@ pub fn run(key: Option<String>, print: bool) -> Result<()> {
         return Ok(());
     }
     let cfg = Config::load()?;
-    let target = match key.as_deref() {
+    // Pre-0.5.1 shell wrappers passed "${2:-}" — an EMPTY string when no
+    // account was given — which made the picker branch unreachable. Treat
+    // empty as absent so old snippets still sourced in open shells work.
+    let target = match key.as_deref().filter(|k| !k.is_empty()) {
         Some("default") | Some("off") => None,
         Some(k) => Some(
             cfg.find(k)
