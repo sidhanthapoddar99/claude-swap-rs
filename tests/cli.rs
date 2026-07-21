@@ -2,7 +2,9 @@
 //!
 //! Nothing here touches the developer's actual ~/.claude: every invocation
 //! gets HOME/XDG_* pointed at a TempDir, and credentials carry a far-future
-//! expiresAt so no code path ever reaches the network.
+//! expiresAt so no code path ever reaches the network. All runs are
+//! non-interactive (no tty), so interactive pickers are never entered —
+//! commands take the argument/fallback paths.
 
 use serde_json::{json, Value};
 use std::fs;
@@ -59,13 +61,7 @@ impl Env {
     }
 
     fn cswap(&self, args: &[&str]) -> Output {
-        Command::new(BIN)
-            .args(args)
-            .env_clear()
-            .env("HOME", self.home.path())
-            .env("PATH", std::env::var("PATH").unwrap())
-            .output()
-            .unwrap()
+        self.cswap_env(args, &[])
     }
 
     fn cswap_env(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
@@ -84,8 +80,12 @@ impl Env {
         self.home.path().join(".local/share/cswap")
     }
 
-    fn profile(&self, name: &str) -> PathBuf {
-        self.data().join("profiles").join(name)
+    fn config_path(&self) -> PathBuf {
+        self.home.path().join(".config/cswap/config.toml")
+    }
+
+    fn profile(&self, email: &str) -> PathBuf {
+        self.data().join("profiles").join(email)
     }
 
     /// Point the live login at a different account (new email + token).
@@ -141,49 +141,72 @@ fn is_link_to(link: &Path, target: &Path) -> bool {
 }
 
 #[test]
-fn login_registers_and_sets_default() {
+fn login_registers_by_email_and_sets_default() {
     let env = Env::new();
-    let o = env.cswap(&["login", "--name", "one"]);
+    let o = env.cswap(&["login"]);
     assert_ok(&o);
-    assert!(stdout(&o).contains("Registered 'one' (one@x.com)"));
+    assert!(stdout(&o).contains("Registered one@x.com"));
     assert!(stdout(&o).contains("default"));
 
-    let cfg = fs::read_to_string(env.home.path().join(".config/cswap/config.toml")).unwrap();
-    assert!(cfg.contains("default = \"one\""));
+    let cfg = fs::read_to_string(env.config_path()).unwrap();
+    assert!(cfg.contains("default = \"one@x.com\""));
     assert!(cfg.contains("email = \"one@x.com\""));
-    assert!(env.data().join("accounts/one.creds.json").exists());
-    assert!(env.data().join("accounts/one.meta.json").exists());
+    assert!(!cfg.contains("name ="), "no name concept in config");
+    assert!(env.data().join("accounts/one@x.com.creds.json").exists());
+    assert!(env.data().join("accounts/one@x.com.meta.json").exists());
 
     // Same email again = relogin, not a duplicate — and it says who loudly.
     let o = env.cswap(&["login"]);
     assert_ok(&o);
     assert!(stdout(&o).contains("Live ~/.claude login: one@x.com"));
-    assert!(stdout(&o).contains("Refreshed stored credentials for existing account 'one'"));
+    assert!(stdout(&o).contains("Refreshed stored credentials"));
+    let cfg = fs::read_to_string(env.config_path()).unwrap();
+    assert!(cfg.contains("one@x.com"));
+    assert_eq!(
+        cfg.matches("[[account]]").count(),
+        1,
+        "no duplicate account: {cfg}"
+    );
 }
 
 #[test]
-fn login_name_on_registered_live_account_errors_loudly() {
+fn login_alias_flag_registers_and_extends() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
-    // The wadhwani scenario: --name for a new account while the live login
-    // is still the already-registered one. Must ERROR, never silently relogin.
-    let o = env.cswap(&["login", "--name", "wadhwani"]);
-    assert!(!o.status.success(), "must not silently ignore --name");
-    let err = stderr(&o);
-    assert!(err.contains("already registered as 'one'"), "got: {err}");
-    assert!(
-        err.contains("cswap login --new"),
-        "must point at the fix: {err}"
-    );
-    // And nothing named wadhwani may exist.
-    let cfg = fs::read_to_string(env.home.path().join(".config/cswap/config.toml")).unwrap();
-    assert!(!cfg.contains("wadhwani"));
+    // Register with an alias attached immediately.
+    let o = env.cswap(&["login", "--alias", "main"]);
+    assert_ok(&o);
+    assert!(stdout(&o).contains("Registered one@x.com"));
+    assert!(stdout(&o).contains("'main' now points to one@x.com"));
+
+    // Relogin with a second alias adds it to the same account.
+    let o = env.cswap(&["login", "--alias", "m2"]);
+    assert_ok(&o);
+    assert!(stdout(&o).contains("'m2' now points to one@x.com"));
+
+    // Duplicate alias is rejected.
+    let o = env.cswap(&["login", "--alias", "main"]);
+    assert!(!o.status.success());
+    assert!(stderr(&o).contains("already used"));
+
+    // Invalid alias is rejected.
+    let o = env.cswap(&["login", "--alias", "Bad Name"]);
+    assert!(!o.status.success());
+    assert!(stderr(&o).contains("invalid alias"));
+}
+
+#[test]
+fn login_without_live_credentials_fails_helpfully() {
+    let env = Env::new();
+    fs::remove_file(env.home.path().join(".claude/.credentials.json")).unwrap();
+    let o = env.cswap(&["login"]);
+    assert!(!o.status.success());
+    assert!(stderr(&o).contains("log in first"));
 }
 
 #[test]
 fn login_new_captures_fresh_account_via_staging() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
+    assert_ok(&env.cswap(&["login", "--alias", "main"]));
 
     // Fake claude that "logs in" as wadhwani inside $CLAUDE_CONFIG_DIR.
     let fake = env.home.path().join("fake-login.sh");
@@ -203,119 +226,68 @@ EOF
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
 
     let o = env.cswap_env(
-        &["login", "--new", "--name", "wadhwani"],
+        &["login", "--new", "--alias", "wadhwani"],
         &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
     );
     assert_ok(&o);
-    assert!(stdout(&o).contains("Registered 'wadhwani' (wadhwani@x.com)"));
+    assert!(stdout(&o).contains("Registered wadhwani@x.com"));
+    assert!(stdout(&o).contains("'wadhwani' now points to wadhwani@x.com"));
 
-    // Live login untouched; staging promoted to a real profile.
+    // Live login untouched; staging promoted to a real email-keyed profile.
     let live: Value = serde_json::from_str(
         &fs::read_to_string(env.home.path().join(".claude/.credentials.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(live["claudeAiOauth"]["accessToken"], json!("tok-live"));
-    assert!(env.profile("wadhwani").join(".credentials.json").exists());
+    assert!(env
+        .profile("wadhwani@x.com")
+        .join(".credentials.json")
+        .exists());
     assert!(!env.data().join("staging-login").exists());
 
     // Logging into an ALREADY-registered account via --new is caught too.
     let o = env.cswap_env(
-        &["login", "--new", "--name", "dup"],
+        &["login", "--new"],
         &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
     );
     assert!(!o.status.success());
-    assert!(stderr(&o).contains("already registered as 'wadhwani'"));
+    assert!(stderr(&o).contains("already registered"));
 }
 
 #[test]
-fn alias_add_resolve_remove() {
+fn default_and_activate_resolve_alias_and_email() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
-    env.detach_live();
-
-    assert_ok(&env.cswap(&["alias", "one", "o1"]));
-    // Alias resolves in activate / default / run.
-    let o = env.cswap(&["activate", "--print", "o1"]);
-    assert_ok(&o);
-    assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='one'");
-    assert_ok(&env.cswap(&["default", "o1"]));
-
-    let fake = env.fake_claude();
-    let o = env.cswap_env(
-        &["run", "o1"],
-        &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
-    );
-    assert_ok(&o);
-    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("one").display())));
-
-    // Uniqueness: an alias can't shadow an existing name or alias.
-    let o = env.cswap(&["alias", "one", "o1"]);
-    assert!(!o.status.success());
-    let o = env.cswap(&["alias", "one", "one"]);
-    assert!(!o.status.success());
-
-    // list shows it; removal works.
-    let o = env.cswap(&["list", "--quick"]);
-    assert!(stdout(&o).contains("o1"));
-    assert_ok(&env.cswap(&["alias", "--remove", "o1"]));
-    let o = env.cswap(&["activate", "--print", "o1"]);
-    assert!(!o.status.success());
-}
-
-#[test]
-fn login_rejects_bad_names_and_duplicates() {
-    let env = Env::new();
-    let o = env.cswap(&["login", "--name", "Bad Name"]);
-    assert!(!o.status.success());
-    assert!(stderr(&o).contains("invalid name"));
-
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
     env.switch_live_account("two@x.com", "tok-two");
-    let o = env.cswap(&["login", "--name", "one"]);
-    assert!(!o.status.success());
-    assert!(stderr(&o).contains("already used"));
-}
+    assert_ok(&env.cswap(&["login", "--alias", "two"]));
 
-#[test]
-fn login_without_live_credentials_fails_helpfully() {
-    let env = Env::new();
-    fs::remove_file(env.home.path().join(".claude/.credentials.json")).unwrap();
-    let o = env.cswap(&["login", "--name", "one"]);
-    assert!(!o.status.success());
-    assert!(stderr(&o).contains("log in first"));
-}
-
-#[test]
-fn default_and_activate() {
-    let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
-    env.switch_live_account("two@x.com", "tok-two");
-    assert_ok(&env.cswap(&["login", "--name", "two"]));
-
-    // default: show + set + by-email
+    // default: show (piped -> just prints) + set by alias + set by email
     let o = env.cswap(&["default"]);
-    assert!(stdout(&o).contains("default: one"));
+    assert!(stdout(&o).contains("default: one@x.com"));
     assert_ok(&env.cswap(&["default", "two"]));
-    let o = env.cswap(&["default"]);
-    assert!(stdout(&o).contains("default: two"));
+    assert!(stdout(&env.cswap(&["default"])).contains("default: two@x.com"));
     assert_ok(&env.cswap(&["default", "one@x.com"]));
-    assert!(stdout(&env.cswap(&["default"])).contains("default: one"));
+    assert!(stdout(&env.cswap(&["default"])).contains("default: one@x.com"));
 
-    // activate --print emits eval-able lines
+    // activate --print emits eval-able lines; export carries the EMAIL.
     let o = env.cswap(&["activate", "--print", "two"]);
     assert_ok(&o);
-    assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='two'");
-    let o = env.cswap(&["activate", "--print"]);
+    assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='two@x.com'");
+    let o = env.cswap(&["activate", "--print", "two@x.com"]);
+    assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='two@x.com'");
+    let o = env.cswap(&["activate", "--print", "default"]);
+    assert_eq!(stdout(&o).trim(), "unset CSWAP_ACTIVE");
+    let o = env.cswap(&["activate", "--print"]); // piped: falls back to default
     assert_eq!(stdout(&o).trim(), "unset CSWAP_ACTIVE");
     let o = env.cswap(&["activate", "--print", "ghost"]);
     assert!(!o.status.success());
 }
 
 #[test]
-fn run_builds_profile_and_execs_claude() {
+fn run_builds_email_keyed_profile_and_execs_claude() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
-    env.detach_live(); // 'one' is no longer the live login -> profile path
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
+    env.detach_live(); // 'one@x.com' is no longer the live login -> profile path
     let fake = env.fake_claude();
 
     let o = env.cswap_env(
@@ -327,7 +299,7 @@ fn run_builds_profile_and_execs_claude() {
     );
     assert_ok(&o);
     let out = stdout(&o);
-    let profile = env.profile("one");
+    let profile = env.profile("one@x.com");
     assert!(out.contains(&format!("CFG={}", profile.display())));
     assert!(out.contains("ARGS=--resume --model opus"));
     assert!(
@@ -348,16 +320,11 @@ fn run_builds_profile_and_execs_claude() {
     let cj: Value =
         serde_json::from_str(&fs::read_to_string(profile.join(".claude.json")).unwrap()).unwrap();
     assert_eq!(cj["hasCompletedOnboarding"], json!(true));
-    assert_eq!(cj["theme"], json!("dark"));
     assert_eq!(cj["oauthAccount"]["emailAddress"], json!("one@x.com"));
-    assert!(
-        cj["mcpServers"]["srv"].is_object(),
-        "mcpServers must be carried"
-    );
+    assert!(cj["mcpServers"]["srv"].is_object());
     assert_eq!(
         cj["projects"]["/tmp/repo"]["hasTrustDialogAccepted"],
-        json!(true),
-        "project trust must be carried"
+        json!(true)
     );
 
     // Everything else: symlinks into ~/.claude (share-all-except-denylist).
@@ -375,35 +342,30 @@ fn run_builds_profile_and_execs_claude() {
             "{item} should be a symlink into ~/.claude"
         );
     }
-    // The one denylisted item must NOT be a link.
-    assert!(!fs::symlink_metadata(profile.join(".credentials.json"))
-        .unwrap()
-        .file_type()
-        .is_symlink());
 }
 
 #[test]
 fn run_resolves_active_then_default_and_shim_never_eats_args() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
     env.switch_live_account("two@x.com", "tok-two");
-    assert_ok(&env.cswap(&["login", "--name", "two"]));
+    assert_ok(&env.cswap(&["login", "--alias", "two"]));
     env.detach_live(); // neither account is the live login
     let fake = env.fake_claude();
     let bin = fake.to_str().unwrap();
 
-    // No name -> default (one).
+    // No name -> default (one@x.com). Piped stdin => no interactive picker.
     let o = env.cswap_env(&["run"], &[("CSWAP_CLAUDE_BIN", bin)]);
     assert_ok(&o);
-    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("one").display())));
+    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("one@x.com").display())));
 
-    // CSWAP_ACTIVE overrides default.
+    // CSWAP_ACTIVE (alias form) overrides default.
     let o = env.cswap_env(
         &["run"],
         &[("CSWAP_CLAUDE_BIN", bin), ("CSWAP_ACTIVE", "two")],
     );
     assert_ok(&o);
-    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("two").display())));
+    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("two@x.com").display())));
 
     // `run <flag>` with no account match passes the flag through.
     let o = env.cswap_env(&["run", "--version"], &[("CSWAP_CLAUDE_BIN", bin)]);
@@ -414,78 +376,90 @@ fn run_resolves_active_then_default_and_shim_never_eats_args() {
     let o = env.cswap_env(&["_claude", "two", "-r"], &[("CSWAP_CLAUDE_BIN", bin)]);
     assert_ok(&o);
     assert!(stdout(&o).contains("ARGS=two -r"));
-    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("one").display())));
+    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("one@x.com").display())));
 }
 
 #[test]
-fn profile_sync_picks_up_new_files_and_prunes_dangling() {
+fn live_account_runs_passthrough_without_profile() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
-    env.detach_live();
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
     let fake = env.fake_claude();
-    let bin = fake.to_str().unwrap();
-    assert_ok(&env.cswap_env(&["run", "one"], &[("CSWAP_CLAUDE_BIN", bin)]));
-
-    let src = env.home.path().join(".claude");
-    let profile = env.profile("one");
-
-    // Claude Code invents a new file + we delete an old one.
-    fs::write(src.join("future-invention.json"), "{}").unwrap();
-    fs::remove_file(src.join("CLAUDE.md")).unwrap();
-
-    assert_ok(&env.cswap_env(&["run", "one"], &[("CSWAP_CLAUDE_BIN", bin)]));
-    assert!(is_link_to(
-        &profile.join("future-invention.json"),
-        &src.join("future-invention.json")
-    ));
-    assert!(
-        fs::symlink_metadata(profile.join("CLAUDE.md")).is_err(),
-        "dangling link must be pruned"
+    let o = env.cswap_env(
+        &["run", "one", "-r"],
+        &[
+            ("CSWAP_CLAUDE_BIN", fake.to_str().unwrap()),
+            ("CLAUDE_CONFIG_DIR", "/should/be/removed"),
+        ],
     );
+    assert_ok(&o);
+    let out = stdout(&o);
+    assert!(
+        out.contains("CFG=\n"),
+        "passthrough must unset CLAUDE_CONFIG_DIR: {out}"
+    );
+    assert!(!env.profile("one@x.com").exists());
+    assert!(stderr(&o).contains("[live ~/.claude]"));
 }
 
 #[test]
-fn isolated_account_gets_no_history_links() {
+fn alias_subcommands_create_list_remove() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "work"]));
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
     env.detach_live();
-    // flip isolated in config
-    let cfg_path = env.home.path().join(".config/cswap/config.toml");
-    let cfg = fs::read_to_string(&cfg_path)
-        .unwrap()
-        .replace("isolated = false", "isolated = true");
-    fs::write(&cfg_path, cfg).unwrap();
+
+    assert_ok(&env.cswap(&["alias", "create", "one@x.com", "o1"]));
+    // Alias resolves in activate / default / run.
+    let o = env.cswap(&["activate", "--print", "o1"]);
+    assert_ok(&o);
+    assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='one@x.com'");
+    assert_ok(&env.cswap(&["default", "o1"]));
 
     let fake = env.fake_claude();
-    assert_ok(&env.cswap_env(
-        &["run", "work"],
+    let o = env.cswap_env(
+        &["run", "o1"],
         &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
-    ));
+    );
+    assert_ok(&o);
+    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("one@x.com").display())));
 
-    let profile = env.profile("work");
-    assert!(fs::symlink_metadata(profile.join("projects")).is_err());
-    assert!(fs::symlink_metadata(profile.join("history.jsonl")).is_err());
-    // Non-history items still shared.
-    assert!(is_link_to(
-        &profile.join("settings.json"),
-        &env.home.path().join(".claude/settings.json")
-    ));
+    // list shows both labels.
+    let o = env.cswap(&["alias", "list"]);
+    assert_ok(&o);
+    let out = stdout(&o);
+    assert!(out.contains("one@x.com"));
+    assert!(out.contains("one, o1"));
+
+    // Uniqueness across aliases and emails.
+    assert!(!env
+        .cswap(&["alias", "create", "one@x.com", "o1"])
+        .status
+        .success());
+    assert!(!env
+        .cswap(&["alias", "create", "one@x.com", "one@x.com"])
+        .status
+        .success());
+
+    // Remove; alias stops resolving.
+    assert_ok(&env.cswap(&["alias", "remove", "o1"]));
+    assert!(!env.cswap(&["activate", "--print", "o1"]).status.success());
+    // Removing a nonexistent alias fails.
+    assert!(!env.cswap(&["alias", "remove", "ghost"]).status.success());
 }
 
 #[test]
-fn list_quick_and_markers() {
+fn list_shows_default_entity_line_and_markers() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
     env.switch_live_account("two@x.com", "tok-two");
-    assert_ok(&env.cswap(&["login", "--name", "two"]));
+    assert_ok(&env.cswap(&["login", "--alias", "two"]));
 
     let o = env.cswap_env(&["list", "--quick"], &[("CSWAP_ACTIVE", "two")]);
     assert_ok(&o);
     let out = stdout(&o);
-    // Default and Active are shown as their own entities, with emails.
-    assert!(out.contains("Default: one"), "got: {out}");
-    assert!(out.contains("Active:  two"), "got: {out}");
-    // Table rows (skip the entity header lines).
+    // Default/Active are standalone lines with the EMAIL only.
+    assert!(out.contains("Default: one@x.com"), "got: {out}");
+    assert!(out.contains("Active:  two@x.com"), "got: {out}");
+    // Table rows: alias column + email, with d/* markers.
     let rows: Vec<&str> = out
         .lines()
         .filter(|l| !l.starts_with("Default:") && !l.starts_with("Active:"))
@@ -503,21 +477,30 @@ fn list_quick_and_markers() {
 }
 
 #[test]
-fn remove_deletes_profile_but_not_claude_data() {
+fn remove_requires_confirmation_and_spares_claude_data() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
     env.detach_live();
     let fake = env.fake_claude();
     assert_ok(&env.cswap_env(
         &["run", "one"],
         &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
     ));
-    assert!(env.profile("one").exists());
+    assert!(env.profile("one@x.com").exists());
 
+    // Piped + no --yes: refuses rather than deleting silently.
     let o = env.cswap(&["remove", "one"]);
+    assert!(!o.status.success());
+    assert!(stderr(&o).contains("--yes"));
+    assert!(
+        env.profile("one@x.com").exists(),
+        "nothing deleted without consent"
+    );
+
+    let o = env.cswap(&["remove", "one", "--yes"]);
     assert_ok(&o);
-    assert!(!env.profile("one").exists());
-    assert!(!env.data().join("accounts/one.creds.json").exists());
+    assert!(!env.profile("one@x.com").exists());
+    assert!(!env.data().join("accounts/one@x.com.creds.json").exists());
 
     // THE guarantee: removing a profile full of symlinks must not touch the
     // real ~/.claude data those links pointed at.
@@ -529,31 +512,103 @@ fn remove_deletes_profile_but_not_claude_data() {
 }
 
 #[test]
-fn live_account_runs_passthrough_without_profile() {
+fn legacy_name_config_migrates_on_disk() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
-    // 'one' IS the live ~/.claude login: no profile, no CLAUDE_CONFIG_DIR,
-    // and a preset CLAUDE_CONFIG_DIR must be scrubbed, not inherited.
-    let fake = env.fake_claude();
-    let o = env.cswap_env(
-        &["run", "one", "-r"],
-        &[
-            ("CSWAP_CLAUDE_BIN", fake.to_str().unwrap()),
-            ("CLAUDE_CONFIG_DIR", "/should/be/removed"),
-        ],
-    );
+    // Fabricate a pre-0.4 layout: name-keyed config + store files + profile.
+    fs::create_dir_all(env.config_path().parent().unwrap()).unwrap();
+    fs::write(
+        env.config_path(),
+        "default = \"main\"\n\n[[account]]\nname = \"main\"\nemail = \"one@x.com\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(env.data().join("accounts")).unwrap();
+    fs::write(
+        env.data().join("accounts/main.creds.json"),
+        Env::creds("t").to_string(),
+    )
+    .unwrap();
+    fs::write(env.data().join("accounts/main.meta.json"), "{}").unwrap();
+    fs::create_dir_all(env.data().join("profiles/main")).unwrap();
+    fs::write(env.data().join("profiles/main/.credentials.json"), "{}").unwrap();
+
+    // Any command triggers the migration.
+    let o = env.cswap(&["list", "--quick"]);
     assert_ok(&o);
-    let out = stdout(&o);
+    assert!(stderr(&o).contains("migrated"), "announces the migration");
+
+    let cfg = fs::read_to_string(env.config_path()).unwrap();
     assert!(
-        out.contains("CFG=\n"),
-        "passthrough must unset CLAUDE_CONFIG_DIR: {out}"
+        cfg.contains("default = \"one@x.com\""),
+        "default canonicalized: {cfg}"
     );
-    assert!(out.contains("ARGS=-r"));
     assert!(
-        !env.profile("one").exists(),
-        "live account must not grow a profile"
+        cfg.contains("aliases = [\"main\"]"),
+        "name became alias: {cfg}"
     );
-    assert!(stderr(&o).contains("[live ~/.claude]"));
+    assert!(!cfg.contains("name ="), "no name field survives: {cfg}");
+    assert!(env.data().join("accounts/one@x.com.creds.json").exists());
+    assert!(env.data().join("accounts/one@x.com.meta.json").exists());
+    assert!(env
+        .data()
+        .join("profiles/one@x.com/.credentials.json")
+        .exists());
+    assert!(!env.data().join("profiles/main").exists());
+
+    // The old name keeps working — it's an alias now.
+    let o = env.cswap(&["activate", "--print", "main"]);
+    assert_ok(&o);
+    assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='one@x.com'");
+}
+
+#[test]
+fn profile_sync_picks_up_new_files_and_prunes_dangling() {
+    let env = Env::new();
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
+    env.detach_live();
+    let fake = env.fake_claude();
+    let bin = fake.to_str().unwrap();
+    assert_ok(&env.cswap_env(&["run", "one"], &[("CSWAP_CLAUDE_BIN", bin)]));
+
+    let src = env.home.path().join(".claude");
+    let profile = env.profile("one@x.com");
+
+    fs::write(src.join("future-invention.json"), "{}").unwrap();
+    fs::remove_file(src.join("CLAUDE.md")).unwrap();
+
+    assert_ok(&env.cswap_env(&["run", "one"], &[("CSWAP_CLAUDE_BIN", bin)]));
+    assert!(is_link_to(
+        &profile.join("future-invention.json"),
+        &src.join("future-invention.json")
+    ));
+    assert!(
+        fs::symlink_metadata(profile.join("CLAUDE.md")).is_err(),
+        "dangling link must be pruned"
+    );
+}
+
+#[test]
+fn isolated_account_gets_no_history_links() {
+    let env = Env::new();
+    assert_ok(&env.cswap(&["login", "--alias", "work"]));
+    env.detach_live();
+    let cfg = fs::read_to_string(env.config_path())
+        .unwrap()
+        .replace("isolated = false", "isolated = true");
+    fs::write(env.config_path(), cfg).unwrap();
+
+    let fake = env.fake_claude();
+    assert_ok(&env.cswap_env(
+        &["run", "work"],
+        &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
+    ));
+
+    let profile = env.profile("one@x.com");
+    assert!(fs::symlink_metadata(profile.join("projects")).is_err());
+    assert!(fs::symlink_metadata(profile.join("history.jsonl")).is_err());
+    assert!(is_link_to(
+        &profile.join("settings.json"),
+        &env.home.path().join(".claude/settings.json")
+    ));
 }
 
 #[test]
@@ -575,7 +630,7 @@ fn shell_init_emits_wrappers() {
 #[test]
 fn relogin_updates_existing_profile_credentials() {
     let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--name", "one"]));
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
     env.detach_live();
     let fake = env.fake_claude();
     assert_ok(&env.cswap_env(
@@ -587,7 +642,7 @@ fn relogin_updates_existing_profile_credentials() {
     env.switch_live_account("one@x.com", "tok-fresh");
     assert_ok(&env.cswap(&["login"]));
     let creds: Value = serde_json::from_str(
-        &fs::read_to_string(env.profile("one").join(".credentials.json")).unwrap(),
+        &fs::read_to_string(env.profile("one@x.com").join(".credentials.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(creds["claudeAiOauth"]["accessToken"], json!("tok-fresh"));

@@ -1,10 +1,9 @@
-//! `cswap login` — register or refresh accounts.
+//! `cswap login` — register or refresh accounts. Accounts are keyed by
+//! email; there is no separate name (aliases are the labels).
 //!
 //! Default: capture whoever is logged into the live ~/.claude.
 //!   known email   -> relogin: refresh that account's stored tokens
-//!   unknown email -> register: name it, add to config
-//! `--name` on an already-registered live login is an ERROR, not a silent
-//! relogin — the name you typed must never be quietly discarded.
+//!   unknown email -> register under the email (+ optional alias)
 //!
 //! `--new`: log into a DIFFERENT account from inside cswap. Launches claude
 //! in an empty staging profile (own CLAUDE_CONFIG_DIR): claude sees no
@@ -15,15 +14,14 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{self, IsTerminal, Write};
 use std::process::Command;
 
-use crate::config::{valid_name, Account, Config};
-use crate::{paths, profile};
+use crate::config::{valid_label, Account, Config};
+use crate::{interactive, paths, profile};
 
-pub fn run(name_arg: Option<String>, new: bool) -> Result<()> {
+pub fn run(alias_arg: Option<String>, new: bool) -> Result<()> {
     if new {
-        return login_new(name_arg);
+        return login_new(alias_arg);
     }
 
     let creds_path = paths::live_credentials();
@@ -38,45 +36,31 @@ pub fn run(name_arg: Option<String>, new: bool) -> Result<()> {
 
     let mut cfg = Config::load()?;
 
-    if let Some(acct) = cfg.find(&email).cloned() {
-        // The live login is already registered. A --name here is a mistake we
-        // must not swallow: the user thinks they're adding a new account.
-        if let Some(requested) = &name_arg {
-            if *requested != acct.name {
-                bail!(
-                    "the live ~/.claude login is {email}, which is already registered as \
-                     '{}' — `--name {requested}` would not add a new account.\n\
-                     To register a different account, log into it first:\n  \
-                     cswap login --new --name {requested}   (log in inside cswap; \
-                     live login untouched)\n\
-                     or run `claude /login`, switch accounts, then `cswap login --name {requested}`.",
-                    acct.name
-                );
-            }
-        }
-        save_capture(&acct.name, &creds_text, &oa)?;
-        let profile_creds = paths::profile_dir(&acct.name).join(".credentials.json");
+    if cfg.find(&email).is_some() {
+        // Relogin: refresh tokens; an --alias here simply adds the label.
+        save_capture(&email, &creds_text, &oa)?;
+        let profile_creds = paths::profile_dir(&email).join(".credentials.json");
         if profile_creds.exists() {
             profile::write_private(&profile_creds, &creds_text)?;
         }
         println!("Live ~/.claude login: {email}");
-        println!(
-            "Refreshed stored credentials for existing account '{}'.",
-            acct.name
-        );
-        println!("(To add a different account: cswap login --new)");
+        println!("Refreshed stored credentials for this already-registered account.");
+        if let Some(alias) = alias_arg {
+            add_alias(&mut cfg, &email, &alias)?;
+        } else {
+            println!("(To add a different account: cswap login --new)");
+        }
         return Ok(());
     }
 
-    // New email -> register.
-    let name = resolve_name(name_arg, &email, &cfg)?;
-    save_capture(&name, &creds_text, &oa)?;
-    register(&mut cfg, &name, &email)?;
+    // New email -> register under it.
+    save_capture(&email, &creds_text, &oa)?;
+    register(&mut cfg, &email, alias_arg)?;
     Ok(())
 }
 
 /// `cswap login --new`: interactive login into a staging profile.
-fn login_new(name_arg: Option<String>) -> Result<()> {
+fn login_new(alias_arg: Option<String>) -> Result<()> {
     let staging = paths::data_dir().join("staging-login");
     let _ = fs::remove_dir_all(&staging); // leftovers from an aborted attempt
     fs::create_dir_all(&staging)?;
@@ -113,7 +97,6 @@ fn login_new(name_arg: Option<String>) -> Result<()> {
     }
     let status = cmd.status().context("failed to launch claude")?;
     if !status.success() {
-        // claude exits 0 on normal /exit; nonzero usually means aborted.
         eprintln!("(claude exited with {status} — checking whether a login was captured anyway)");
     }
 
@@ -124,27 +107,66 @@ fn login_new(name_arg: Option<String>) -> Result<()> {
     let (email, oa) = identity_of(&creds_text, &staging_claude_json(&staging))?;
 
     let mut cfg = Config::load()?;
-    if let Some(existing) = cfg.find(&email) {
-        let name = existing.name.clone();
+    if cfg.find(&email).is_some() {
         let _ = fs::remove_dir_all(&staging);
-        bail!("you logged in as {email}, which is already registered as '{name}'");
+        bail!("you logged in as {email}, which is already registered (see `cswap list --quick`)");
     }
 
-    let name = resolve_name(name_arg, &email, &cfg).inspect_err(|_| {
-        let _ = fs::remove_dir_all(&staging);
-    })?;
-    save_capture(&name, &creds_text, &oa)?;
+    save_capture(&email, &creds_text, &oa)?;
 
     // Promote staging to the real profile: credentials + .claude.json are
     // already in place; ensure() will add the share symlinks on first run.
-    let profile_dir = paths::profile_dir(&name);
+    let profile_dir = paths::profile_dir(&email);
     if let Some(parent) = profile_dir.parent() {
         fs::create_dir_all(parent)?;
     }
     let _ = fs::remove_dir_all(&profile_dir);
     fs::rename(&staging, &profile_dir).context("failed to promote staging profile")?;
 
-    register(&mut cfg, &name, &email)?;
+    register(&mut cfg, &email, alias_arg)?;
+    Ok(())
+}
+
+fn register(cfg: &mut Config, email: &str, alias_arg: Option<String>) -> Result<()> {
+    let first = cfg.accounts.is_empty();
+    cfg.accounts.push(Account::new(email.to_string()));
+    if first {
+        cfg.default = Some(email.to_string());
+    }
+    cfg.save()?;
+    println!("Registered {email}");
+    if first {
+        println!("Set as default account.");
+    }
+    match alias_arg {
+        Some(alias) => add_alias(cfg, email, &alias)?,
+        // Offer an alias right away — select/input TUI, skippable with Enter.
+        None if interactive::on_tty() => {
+            let alias = interactive::input_optional(&format!("Alias for {email} (Enter to skip)"))?;
+            if let Some(alias) = alias {
+                add_alias(cfg, email, &alias)?;
+            }
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn add_alias(cfg: &mut Config, email: &str, alias: &str) -> Result<()> {
+    if !valid_label(alias) {
+        bail!("invalid alias '{alias}' (use lowercase letters, digits, '-', '_', '.')");
+    }
+    if cfg.label_taken(alias) {
+        bail!("'{alias}' is already used as an alias or email");
+    }
+    cfg.accounts
+        .iter_mut()
+        .find(|a| a.email == email)
+        .expect("caller resolved")
+        .aliases
+        .push(alias.to_string());
+    cfg.save()?;
+    println!("'{alias}' now points to {email}.");
     Ok(())
 }
 
@@ -192,58 +214,14 @@ fn staging_claude_json(staging: &std::path::Path) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
-fn resolve_name(name_arg: Option<String>, email: &str, cfg: &Config) -> Result<String> {
-    let name = match name_arg {
-        Some(n) => n,
-        None => prompt_name(email)?,
-    };
-    if !valid_name(&name) {
-        bail!("invalid name '{name}' (use lowercase letters, digits, '-', '_', '.')");
-    }
-    if cfg.label_taken(&name) {
-        bail!("'{name}' is already used as an account name or alias (see `cswap list`)");
-    }
-    Ok(name)
-}
-
-fn register(cfg: &mut Config, name: &str, email: &str) -> Result<()> {
-    let first = cfg.accounts.is_empty();
-    cfg.accounts.push(Account {
-        name: name.to_string(),
-        email: email.to_string(),
-        aliases: Vec::new(),
-        isolated: false,
-    });
-    if first {
-        cfg.default = Some(name.to_string());
-    }
-    cfg.save()?;
-    println!("Registered '{name}' ({email})");
-    if first {
-        println!("Set as default account.");
-    }
-    Ok(())
-}
-
-fn save_capture(name: &str, creds_text: &str, oa: &Value) -> Result<()> {
-    profile::write_private(&paths::store_creds(name), creds_text)?;
+fn save_capture(email: &str, creds_text: &str, oa: &Value) -> Result<()> {
+    profile::write_private(&paths::store_creds(email), creds_text)?;
     let meta = json!({
         "oauthAccount": oa,
         "theme": live_claude_json().get("theme").and_then(Value::as_str).unwrap_or("dark"),
     });
     profile::write_private(
-        &paths::store_meta(name),
+        &paths::store_meta(email),
         &serde_json::to_string_pretty(&meta)?,
     )
-}
-
-fn prompt_name(email: &str) -> Result<String> {
-    if !io::stdin().is_terminal() {
-        bail!("not a terminal — pass the account name: cswap login --name <name>");
-    }
-    print!("Name for {email} (e.g. personal, dev, work): ");
-    io::stdout().flush()?;
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    Ok(line.trim().to_string())
 }
