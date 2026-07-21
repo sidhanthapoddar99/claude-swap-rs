@@ -1,11 +1,16 @@
 //! ~/.config/cswap/config.toml — the account registry.
 //!
+//! An account is keyed by its email (the unique identity); `name` is the
+//! primary label and `aliases` are additional labels — all three resolve
+//! everywhere an account is referenced (activate/run/default/alias/remove).
+//!
 //! ```toml
 //! default = "personal"
 //!
 //! [[account]]
 //! name = "personal"
 //! email = "you@gmail.com"
+//! aliases = ["p", "home"]
 //!
 //! [[account]]
 //! name = "work"
@@ -31,6 +36,8 @@ pub struct Config {
 pub struct Account {
     pub name: String,
     pub email: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     #[serde(default)]
     pub isolated: bool,
 }
@@ -67,12 +74,24 @@ impl Config {
         Ok(())
     }
 
-    /// Look up by name first, then by email.
+    /// Look up by name first, then alias, then email.
     pub fn find(&self, key: &str) -> Option<&Account> {
         self.accounts
             .iter()
             .find(|a| a.name == key)
+            .or_else(|| {
+                self.accounts
+                    .iter()
+                    .find(|a| a.aliases.iter().any(|al| al == key))
+            })
             .or_else(|| self.accounts.iter().find(|a| a.email == key))
+    }
+
+    /// Is this label already used as any account's name or alias?
+    pub fn label_taken(&self, label: &str) -> bool {
+        self.accounts
+            .iter()
+            .any(|a| a.name == label || a.aliases.iter().any(|al| al == label))
     }
 
     /// The account a bare `claude` should run as: $CSWAP_ACTIVE > default.
@@ -117,18 +136,24 @@ mod tests {
                 Account {
                     name: "a".into(),
                     email: "a@x.com".into(),
+                    aliases: vec!["alpha".into()],
                     isolated: false,
                 },
                 Account {
                     name: "b".into(),
                     email: "b@x.com".into(),
+                    aliases: vec![],
                     isolated: true,
                 },
             ],
         };
         assert_eq!(cfg.find("b").unwrap().email, "b@x.com");
         assert_eq!(cfg.find("a@x.com").unwrap().name, "a");
+        assert_eq!(cfg.find("alpha").unwrap().name, "a", "alias resolves");
         assert!(cfg.find("zzz").is_none());
+        assert!(cfg.label_taken("a"));
+        assert!(cfg.label_taken("alpha"));
+        assert!(!cfg.label_taken("a@x.com"), "emails are not labels");
     }
 
     #[test]
@@ -138,6 +163,7 @@ mod tests {
             accounts: vec![Account {
                 name: "dev".into(),
                 email: "d@x.com".into(),
+                aliases: vec!["d".into()],
                 isolated: false,
             }],
         };

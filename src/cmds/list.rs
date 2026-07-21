@@ -1,9 +1,35 @@
-//! `cswap list` — accounts, default/active markers, and usage windows.
+//! `cswap list` — default/active shown as their own entities, then all
+//! profiles (keyed by email) with aliases and colored usage windows.
+//!
+//! Colors mirror the user's statusline convention: <70 green, <90 yellow,
+//! else red; labels and reset times dimmed. Disabled when stdout is not a
+//! terminal or NO_COLOR is set.
 
 use anyhow::Result;
+use std::io::IsTerminal;
 
 use crate::config::{Account, Config};
 use crate::{oauth, profile};
+
+const DIM: &str = "\x1b[2m";
+const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
+const RED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
+
+fn color_on() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+fn pct_color(pct: f64) -> &'static str {
+    if pct < 70.0 {
+        GREEN
+    } else if pct < 90.0 {
+        YELLOW
+    } else {
+        RED
+    }
+}
 
 pub fn run(quick: bool) -> Result<()> {
     print_table(quick)?;
@@ -17,45 +43,94 @@ pub fn print_table(quick: bool) -> Result<()> {
         println!("No accounts yet. Log into Claude Code, then run: cswap login");
         return Ok(());
     }
-    let active = std::env::var("CSWAP_ACTIVE").ok().filter(|s| !s.is_empty());
+    let color = color_on();
+    let dim = |s: &str| {
+        if color {
+            format!("{DIM}{s}{RESET}")
+        } else {
+            s.to_string()
+        }
+    };
 
-    println!("{:<2} {:<14} {:<30} USAGE", "", "NAME", "EMAIL");
+    // The default and this shell's active account are entities of their own.
+    match cfg.default.as_deref().and_then(|d| cfg.find(d)) {
+        Some(a) => println!("Default: {} {}", a.name, dim(&format!("({})", a.email))),
+        None => println!("Default: {}", dim("(not set — cswap default <name>)")),
+    }
+    let active = std::env::var("CSWAP_ACTIVE").ok().filter(|s| !s.is_empty());
+    if let Some(active_name) = &active {
+        match cfg.find(active_name) {
+            Some(a) => println!(
+                "Active:  {} {} {}",
+                a.name,
+                dim(&format!("({})", a.email)),
+                dim("[this shell]")
+            ),
+            None => println!("Active:  {active_name} {}", dim("[unknown account!]")),
+        }
+    }
+    println!();
+
+    println!(
+        "{}",
+        dim(&format!(
+            "{:<2} {:<14} {:<12} {:<30} USAGE",
+            "", "NAME", "ALIASES", "EMAIL"
+        ))
+    );
     for acct in &cfg.accounts {
         let mut marker = String::new();
-        if active.as_deref() == Some(acct.name.as_str()) {
+        if active.as_deref() == Some(acct.name.as_str())
+            || active
+                .as_deref()
+                .map(|k| acct.aliases.iter().any(|al| al == k))
+                .unwrap_or(false)
+        {
             marker.push('*');
         }
         if cfg.default.as_deref() == Some(acct.name.as_str()) {
             marker.push('d');
         }
-        let usage = if quick {
+        let aliases = if acct.aliases.is_empty() {
             "-".to_string()
         } else {
-            usage_line(acct)
+            acct.aliases.join(",")
         };
-        let iso = if acct.isolated { " [isolated]" } else { "" };
+        let usage = if quick {
+            dim("-")
+        } else {
+            usage_line(acct, color)
+        };
+        let iso = if acct.isolated {
+            dim(" [isolated]")
+        } else {
+            String::new()
+        };
         println!(
-            "{marker:<2} {:<14} {:<30} {usage}{iso}",
+            "{marker:<2} {:<14} {aliases:<12} {:<30} {usage}{iso}",
             acct.name, acct.email
         );
     }
-    let mut legend = String::from("   (* active in this shell, d default)");
-    if quick {
-        legend.push_str("  — usage skipped (--quick)");
-    }
-    println!("{legend}");
+    println!(
+        "{}",
+        dim(if quick {
+            "   (* active in this shell, d default) — usage skipped (--quick)"
+        } else {
+            "   (* active in this shell, d default)"
+        })
+    );
     Ok(())
 }
 
-fn usage_line(acct: &Account) -> String {
-    match try_usage(acct) {
+fn usage_line(acct: &Account, color: bool) -> String {
+    match try_usage(acct, color) {
         Ok(line) if line.is_empty() => "no window data".to_string(),
         Ok(line) => line,
         Err(e) => format!("usage unavailable ({e:#})"),
     }
 }
 
-fn try_usage(acct: &Account) -> Result<String> {
+fn try_usage(acct: &Account, color: bool) -> Result<String> {
     // Live account: read ~/.claude's token as-is, never refresh it (rotation
     // is claude's job for the live login). Others: profile creds + refresh.
     let creds = if profile::live_email().as_deref() == Some(acct.email.as_str()) {
@@ -85,8 +160,18 @@ fn try_usage(acct: &Account) -> Result<String> {
                 .and_then(oauth::format_reset)
                 .map(|r| format!(" {r}"))
                 .unwrap_or_default();
-            format!("{} {:.0}%{}", w.label, w.pct, reset)
+            if color {
+                format!(
+                    "{DIM}{}{RESET} {}{:.0}%{RESET}{DIM}{}{RESET}",
+                    w.label,
+                    pct_color(w.pct),
+                    w.pct,
+                    reset
+                )
+            } else {
+                format!("{} {:.0}%{}", w.label, w.pct, reset)
+            }
         })
         .collect();
-    Ok(parts.join(" | "))
+    Ok(parts.join(if color { " \x1b[2m|\x1b[0m " } else { " | " }))
 }

@@ -50,6 +50,10 @@ cswap login --name work               # scripted"
         /// Account name (prompted interactively when omitted)
         #[arg(long)]
         name: Option<String>,
+        /// Log into a NEW account inside cswap (staging profile; the live
+        /// ~/.claude login is not touched)
+        #[arg(long)]
+        new: bool,
     },
 
     /// Set the account for THIS terminal (no name = back to default)
@@ -137,6 +141,23 @@ CSWAP_NO_UPDATE_CHECK=1 to disable that check."
     )]
     Upgrade,
 
+    /// Manage account aliases (extra labels usable everywhere a name is)
+    #[command(
+        long_about = "Manage aliases — additional labels for accounts. The email is the\n\
+unique identity; the name and every alias resolve to it in activate, run,\n\
+default, and remove.\n\n\
+EXAMPLES:\n  cswap alias                # list aliases\n  \
+cswap alias work w         # `cswap activate w` now works\n  \
+cswap alias --remove w"
+    )]
+    Alias {
+        account: Option<String>,
+        alias: Option<String>,
+        /// Remove the given alias instead of adding one
+        #[arg(long)]
+        remove: bool,
+    },
+
     /// Forget an account (config + stored tokens + profile dir)
     #[command(
         long_about = "Remove an account: its config entry, stored credentials,\n\
@@ -158,7 +179,7 @@ default, the first remaining account becomes default."
 fn main() {
     let cli = Cli::parse();
     let result = match cli.cmd {
-        Cmd::Login { name } => cmds::login::run(name),
+        Cmd::Login { name, new } => cmds::login::run(name, new),
         Cmd::Activate { name, print } => cmds::activate::run(name, print),
         Cmd::List { quick } => cmds::list::run(quick),
         Cmd::Default { name } => cmds::default_cmd::run(name),
@@ -166,6 +187,11 @@ fn main() {
         Cmd::Watch { interval } => cmds::watch::run(interval),
         Cmd::ShellInit { shell } => cmds::shell_init::run(&shell),
         Cmd::Upgrade => cmds::upgrade::run(),
+        Cmd::Alias {
+            account,
+            alias,
+            remove,
+        } => cmds::alias::run(account, alias, remove),
         Cmd::Remove { name } => cmds::remove::run(name),
         Cmd::ClaudeShim { args } => cmds::run::shim(args),
     };

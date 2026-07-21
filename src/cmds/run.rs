@@ -21,7 +21,7 @@ use crate::profile;
 
 /// Env vars that make claude bypass account OAuth entirely — scrubbed so a
 /// stray API key in the shell can't silently hijack a session's identity.
-const SCRUBBED: &[&str] = &[
+pub const SCRUBBED: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
@@ -92,7 +92,7 @@ fn exec_claude(config_dir: Option<PathBuf>, args: &[String]) -> Result<()> {
     Err(err).with_context(|| format!("failed to exec {}", claude.display()))
 }
 
-fn find_claude() -> Result<PathBuf> {
+pub fn find_claude() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("CSWAP_CLAUDE_BIN") {
         let p = PathBuf::from(p);
         if p.is_file() {
