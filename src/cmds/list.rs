@@ -6,7 +6,9 @@ use crate::config::{Account, Config};
 use crate::{oauth, profile};
 
 pub fn run(quick: bool) -> Result<()> {
-    print_table(quick)
+    print_table(quick)?;
+    crate::update_check::nudge();
+    Ok(())
 }
 
 pub fn print_table(quick: bool) -> Result<()> {

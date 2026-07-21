@@ -21,3 +21,5 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests
         run: cargo test
+      - name: Installer syntax check
+        run: bash -n install.sh
