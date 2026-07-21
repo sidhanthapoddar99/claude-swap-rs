@@ -12,9 +12,17 @@ use crate::interactive;
 
 pub fn run(key: Option<String>, print: bool) -> Result<()> {
     if !print {
+        // Reaching the binary directly means the cswap() shell function did
+        // not intercept — the integration isn't loaded in THIS shell. A picker
+        // here would be a lie: a child process can't set the parent's env.
         eprintln!("cswap: activate needs the shell integration to take effect.");
-        eprintln!("Add this to your ~/.zshrc or ~/.bashrc, then open a new terminal:");
-        eprintln!("  eval \"$(cswap shell-init zsh)\"   # or: bash");
+        if rc_has_integration() {
+            eprintln!("It's already in your shell rc — this terminal just predates it.");
+            eprintln!("Open a new terminal, or run: source ~/.zshrc   (or ~/.bashrc)");
+        } else {
+            eprintln!("Add this to your ~/.zshrc or ~/.bashrc, then open a new terminal:");
+            eprintln!("  eval \"$(cswap shell-init zsh)\"   # or: bash");
+        }
         return Ok(());
     }
     let cfg = Config::load()?;
@@ -46,4 +54,16 @@ pub fn run(key: Option<String>, print: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Is the shell-init eval block already present in ~/.zshrc or ~/.bashrc?
+/// (The installer writes it inside `# >>> cswap shell integration >>>`
+/// markers, but any hand-added `cswap shell-init` eval counts too.)
+fn rc_has_integration() -> bool {
+    let home = crate::paths::home();
+    [".zshrc", ".bashrc"].iter().any(|rc| {
+        std::fs::read_to_string(home.join(rc))
+            .map(|text| text.contains("cswap shell-init"))
+            .unwrap_or(false)
+    })
 }

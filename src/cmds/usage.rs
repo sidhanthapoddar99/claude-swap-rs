@@ -85,9 +85,6 @@ pub fn render(cfg: &Config, only: Option<&str>) {
         if active.as_deref() == Some(acct.email.as_str()) {
             tags.push_str(&format!("  {}", ui::paint(color, ACCENT, "● active")));
         }
-        if acct.isolated {
-            tags.push_str(&format!("  {}", ui::paint(color, DIM, "● isolated")));
-        }
         let aliases = if acct.aliases.is_empty() {
             String::new()
         } else {

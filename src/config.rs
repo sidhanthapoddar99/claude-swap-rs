@@ -18,7 +18,6 @@
 //! [[account]]
 //! email = "you@corp.com"
 //! aliases = ["work"]
-//! isolated = true   # own projects/ + history.jsonl (no shared history)
 //! ```
 
 use anyhow::{Context, Result};
@@ -38,8 +37,6 @@ pub struct Account {
     pub email: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
-    #[serde(default)]
-    pub isolated: bool,
     /// Legacy (pre-0.4) primary name — migrated into aliases on load,
     /// never written back.
     #[serde(default, skip_serializing)]
@@ -51,7 +48,6 @@ impl Account {
         Account {
             email,
             aliases: Vec::new(),
-            isolated: false,
             name: None,
         }
     }
@@ -181,7 +177,13 @@ pub fn migrate_on_disk() -> Result<()> {
     let has_stale_default = text
         .lines()
         .any(|l| l.trim_start().starts_with("default ="));
-    if !names_migrated && !has_stale_default {
+    // Pre-removal configs carry per-account `isolated = ...` lines that the
+    // model no longer stores; a rewrite drops them since Account has no such
+    // field. (Unknown keys parse fine — serde ignores them on load.)
+    let has_stale_isolated = text
+        .lines()
+        .any(|l| l.trim_start().starts_with("isolated ="));
+    if !names_migrated && !has_stale_default && !has_stale_isolated {
         return Ok(());
     }
     for (old, email) in legacy {
@@ -198,8 +200,10 @@ pub fn migrate_on_disk() -> Result<()> {
     cfg.save()?;
     let what = if names_migrated {
         "the email-keyed layout (aliases replace names)"
-    } else {
+    } else if has_stale_default {
         "the derived-default layout (the default is now the live ~/.claude login)"
+    } else {
+        "drop obsolete fields"
     };
     eprintln!("cswap: migrated config to {what}.");
     Ok(())
@@ -213,7 +217,6 @@ mod tests {
         Account {
             email: email.into(),
             aliases: aliases.iter().map(|s| s.to_string()).collect(),
-            isolated: false,
             name: None,
         }
     }

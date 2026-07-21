@@ -23,9 +23,6 @@ use crate::{oauth, paths};
 /// not inside ~/.claude, so it never appears in the scan at all.)
 const DENYLIST: &[&str] = &[".credentials.json"];
 
-/// Additionally skipped for `isolated = true` accounts.
-const HISTORY_ITEMS: &[&str] = &["projects", "history.jsonl"];
-
 /// Keys copied once from the live ~/.claude.json into a fresh profile's
 /// .claude.json: user-scope MCP servers and per-project trust/allowlists.
 const SEEDED_KEYS: &[&str] = &["mcpServers", "projects"];
@@ -156,7 +153,7 @@ pub fn ensure(acct: &Account) -> Result<PathBuf> {
         seed_claude_json(&claude_json, acct)?;
     }
 
-    sync_links(&dir, acct.isolated)?;
+    sync_links(&dir)?;
     Ok(dir)
 }
 
@@ -193,11 +190,10 @@ fn seed_claude_json(path: &Path, acct: &Account) -> Result<()> {
 }
 
 /// Mirror ~/.claude into the profile as symlinks: everything except the
-/// denylist (and history items for isolated accounts). Re-run every launch so
-/// files Claude Code invents in future versions are picked up automatically.
-/// Existing real files in the profile are left untouched; dangling links into
-/// ~/.claude are pruned.
-pub fn sync_links(profile: &Path, isolated: bool) -> Result<()> {
+/// denylist. Re-run every launch so files Claude Code invents in future
+/// versions are picked up automatically. Existing real files in the profile
+/// are left untouched; dangling links into ~/.claude are pruned.
+pub fn sync_links(profile: &Path) -> Result<()> {
     let src_root = paths::claude_dir();
     if !src_root.is_dir() {
         return Ok(()); // nothing to share yet
@@ -223,9 +219,6 @@ pub fn sync_links(profile: &Path, isolated: bool) -> Result<()> {
         if DENYLIST.contains(&name_str.as_ref()) {
             continue;
         }
-        if isolated && HISTORY_ITEMS.contains(&name_str.as_ref()) {
-            continue;
-        }
         let target = src_root.join(&name);
         let link = profile.join(&name);
         match fs::symlink_metadata(&link) {
@@ -237,19 +230,6 @@ pub fn sync_links(profile: &Path, isolated: bool) -> Result<()> {
             }
             Ok(_) => {} // real file/dir the profile grew on its own — never clobber
             Err(_) => symlink(&target, &link)?,
-        }
-    }
-
-    // Flipping an account to isolated: drop previously-created history links.
-    if isolated {
-        for item in HISTORY_ITEMS {
-            let link = profile.join(item);
-            if fs::symlink_metadata(&link)
-                .map(|md| md.file_type().is_symlink())
-                .unwrap_or(false)
-            {
-                fs::remove_file(&link)?;
-            }
         }
     }
     Ok(())
