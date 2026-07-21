@@ -29,8 +29,9 @@ Consequences:
 - **History is shared by default**: `claude -r` lists the same conversations on every account, so you can hit a rate limit, switch accounts, and resume the same conversation. Transcripts are keyed by project path, never account — this matches stock Claude Code behavior. Set `isolated = true` on an account to give it its own `projects/` + `history.jsonl` instead (e.g. an employer seat).
 - **Files future Claude versions invent are picked up automatically** — the symlink sync rescans `~/.claude` on every launch instead of maintaining a hardcoded list.
 - **The account logged into the live `~/.claude` runs via passthrough**: no profile, no `CLAUDE_CONFIG_DIR`, cswap never touches its tokens. One credential copy means cswap can never rotate the refresh-token family out from under the login your VS Code extension uses.
+- **The default is not stored — it's derived.** The default account IS whoever is logged into the live `~/.claude`. `cswap default <account>` swaps that login; `cswap activate` overrides it for one terminal without touching it.
 
-cswap **never writes into `~/.claude` or `~/.claude.json`** — it only reads them. All cswap state lives in `~/.config/cswap/` and `~/.local/share/cswap/`. Uninstalling is `rm -rf` of those two directories.
+cswap writes into `~/.claude` / `~/.claude.json` from exactly **one** command — `cswap default <account>`, which swaps the live login (and backs up the displaced account's tokens first). Everything else only reads them. All cswap state lives in `~/.config/cswap/` and `~/.local/share/cswap/`; uninstalling is `rm -rf` of those two directories.
 
 Network: exactly two first-party endpoints (Anthropic's OAuth token refresh and usage API). No telemetry of any kind.
 
@@ -89,15 +90,15 @@ cswap login --new --alias work  # launches claude in a clean staging profile;
                                 # log in as the new account, /exit, done.
                                 # Your current login is never touched.
 
-cswap list             # one row per account: status, email, aliases,
-                       # and the 5h/7d gates at a glance
+cswap list             # Default line (live login + registration status), then
+                       # one row per account: status, email, aliases, 5h/7d gates
 cswap list --quick     # skip the usage API calls
 
 # Anywhere an account is expected: pass an alias or email — or pass nothing
 # on a terminal and pick from an interactive menu.
 cswap activate         # interactive picker (this shell only)
 cswap run              # interactive picker, one-off run
-cswap default          # interactive picker
+cswap default          # show the default; on a terminal, offers the swap picker
 
 cswap alias list
 cswap alias create     # pick account, type alias (or: cswap alias create work w)
@@ -170,8 +171,8 @@ Releases are built by CI from version tags on `main`:
 # 1. bump version in Cargo.toml (on dev), PR into main
 # 2. tag the merge commit on main:
 git checkout main && git pull
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 The `Release` workflow builds static binaries for Linux (x86_64/aarch64 musl) and macOS (x86_64/aarch64), and publishes them to GitHub Releases with SHA-256 checksums and auto-generated notes.

@@ -17,9 +17,11 @@ use clap::{Parser, Subcommand};
     long_about = "Fast multi-account switcher for Claude Code.\n\n\
 Accounts are keyed by email; aliases are the labels you type. Anywhere an\n\
 account is expected you can pass an alias or the email — or pass nothing on\n\
-a terminal and pick from an interactive menu.\n\
-cswap never writes into ~/.claude — all its state lives in ~/.config/cswap\n\
-and ~/.local/share/cswap.",
+a terminal and pick from an interactive menu.\n\n\
+The default is not stored, it's derived: whoever is logged into the live\n\
+~/.claude IS the default. `cswap default <account>` swaps that login — the\n\
+one command that writes into ~/.claude; everything else only reads it. All\n\
+cswap state lives in ~/.config/cswap and ~/.local/share/cswap.",
     arg_required_else_help = true,
     // clap 4 can't group subcommands into sections, so the command list is
     // hand-written here instead of via {subcommands}. Keep these one-liners
