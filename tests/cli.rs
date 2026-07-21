@@ -687,6 +687,32 @@ fn legacy_name_config_migrates_on_disk() {
 }
 
 #[test]
+fn isolated_field_is_stripped_on_disk() {
+    let env = Env::new();
+    // A config carrying the obsolete per-account `isolated` field.
+    fs::create_dir_all(env.config_path().parent().unwrap()).unwrap();
+    fs::write(
+        env.config_path(),
+        "[[account]]\nemail = \"one@x.com\"\naliases = [\"work\"]\nisolated = true\n",
+    )
+    .unwrap();
+
+    // Any command triggers the rewrite that drops the obsolete field.
+    let o = env.cswap(&["list", "--quick"]);
+    assert_ok(&o);
+
+    let cfg = fs::read_to_string(env.config_path()).unwrap();
+    assert!(
+        !cfg.contains("isolated"),
+        "obsolete isolated field stripped: {cfg}"
+    );
+    assert!(
+        cfg.contains("aliases = [\"work\"]"),
+        "aliases survive: {cfg}"
+    );
+}
+
+#[test]
 fn profile_sync_picks_up_new_files_and_prunes_dangling() {
     let env = Env::new();
     assert_ok(&env.cswap(&["login", "--alias", "one"]));
@@ -710,31 +736,6 @@ fn profile_sync_picks_up_new_files_and_prunes_dangling() {
         fs::symlink_metadata(profile.join("CLAUDE.md")).is_err(),
         "dangling link must be pruned"
     );
-}
-
-#[test]
-fn isolated_account_gets_no_history_links() {
-    let env = Env::new();
-    assert_ok(&env.cswap(&["login", "--alias", "work"]));
-    env.detach_live();
-    let cfg = fs::read_to_string(env.config_path())
-        .unwrap()
-        .replace("isolated = false", "isolated = true");
-    fs::write(env.config_path(), cfg).unwrap();
-
-    let fake = env.fake_claude();
-    assert_ok(&env.cswap_env(
-        &["run", "work"],
-        &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
-    ));
-
-    let profile = env.profile("one@x.com");
-    assert!(fs::symlink_metadata(profile.join("projects")).is_err());
-    assert!(fs::symlink_metadata(profile.join("history.jsonl")).is_err());
-    assert!(is_link_to(
-        &profile.join("settings.json"),
-        &env.home.path().join(".claude/settings.json")
-    ));
 }
 
 #[test]

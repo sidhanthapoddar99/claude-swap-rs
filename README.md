@@ -26,7 +26,7 @@ So a cswap profile is your `~/.claude` wearing a different identity card:
 Consequences:
 
 - **Settings, plugins, MCP servers, skills, agents are installed once, visible everywhere** — a plugin installed while on `work` is instantly available on `personal` (one real directory on disk).
-- **History is shared by default**: `claude -r` lists the same conversations on every account, so you can hit a rate limit, switch accounts, and resume the same conversation. Transcripts are keyed by project path, never account — this matches stock Claude Code behavior. Set `isolated = true` on an account to give it its own `projects/` + `history.jsonl` instead (e.g. an employer seat).
+- **History is shared by default**: `claude -r` lists the same conversations on every account, so you can hit a rate limit, switch accounts, and resume the same conversation. Transcripts are keyed by project path, never account — this matches stock Claude Code behavior.
 - **Files future Claude versions invent are picked up automatically** — the symlink sync rescans `~/.claude` on every launch instead of maintaining a hardcoded list.
 - **The account logged into the live `~/.claude` runs via passthrough**: no profile, no `CLAUDE_CONFIG_DIR`, cswap never touches its tokens. One credential copy means cswap can never rotate the refresh-token family out from under the login your VS Code extension uses.
 - **The default is not stored — it's derived.** The default account IS whoever is logged into the live `~/.claude`. `cswap default <account>` swaps that login; `cswap activate` overrides it for one terminal without touching it.
@@ -134,12 +134,10 @@ There is no stored default: **the default IS whoever is logged into the live `~/
 [[account]]
 email = "you@gmail.com"     # the unique identity — there is no separate "name"
 aliases = ["personal", "p"] # the labels you type; all resolve everywhere
-isolated = false
 
 [[account]]
 email = "you@corp.com"
 aliases = ["work"]
-isolated = true    # own projects/ + history.jsonl — not shared with other accounts
 ```
 
 Pre-0.4 configs migrate automatically on the first run: a `name = ...` becomes the primary alias (store/profile files re-keyed by email), and a stored `default = ...` line is dropped — the default is now derived from the live login.
