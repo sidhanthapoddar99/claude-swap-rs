@@ -38,9 +38,6 @@ pub fn run(key: Option<String>, yes: bool) -> Result<()> {
     }
 
     cfg.accounts.retain(|a| a.email != acct.email);
-    if cfg.default.as_deref() == Some(acct.email.as_str()) {
-        cfg.default = cfg.accounts.first().map(|a| a.email.clone());
-    }
     cfg.save()?;
 
     for path in [
@@ -56,9 +53,14 @@ pub fn run(key: Option<String>, yes: bool) -> Result<()> {
     }
 
     println!("Removed {} ({})", acct.label(), acct.email);
-    match &cfg.default {
-        Some(d) => println!("default is now: {d}"),
-        None => println!("no accounts left"),
+    // Forgetting a profile never changes the default — the default is the live
+    // ~/.claude login, which this command doesn't touch. Flag the overlap
+    // though: the removed account may still be the one bare `claude` uses.
+    if crate::profile::live_email().as_deref() == Some(acct.email.as_str()) {
+        println!(
+            "note: {} is still the live ~/.claude login (the default) — it just isn't registered anymore.",
+            acct.email
+        );
     }
     Ok(())
 }

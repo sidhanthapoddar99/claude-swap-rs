@@ -5,8 +5,10 @@
 //!   .claude.json        real file — oauthAccount + onboarding seed (0600)
 //!   <everything else>   symlink into ~/.claude, auto-discovered per launch
 //!
-//! Safety contract: this module NEVER writes into ~/.claude or ~/.claude.json.
-//! It reads them; all writes land under ~/.local/share/cswap/.
+//! Safety contract: this module writes into ~/.claude / ~/.claude.json from
+//! exactly ONE function — `promote_to_live`, reached only by an explicit
+//! `cswap default <x>`. Everything else reads them; all other writes land
+//! under ~/.local/share/cswap/.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -75,6 +77,55 @@ pub fn current_creds(acct: &Account) -> Result<Value> {
         }
     }
     Ok(creds)
+}
+
+/// Snapshot the live ~/.claude credentials into `email`'s store (and profile
+/// copy, if one exists). Used before a `cswap default` swap displaces a
+/// registered live login: claude rotates refresh tokens in ~/.claude while an
+/// account is live, so the login-time store copy may be a dead ancestor —
+/// the live file holds the only guaranteed-fresh tokens.
+pub fn capture_live_into_store(email: &str) -> Result<()> {
+    let text = fs::read_to_string(paths::live_credentials())
+        .context("cannot read the live ~/.claude credentials")?;
+    write_private(&paths::store_creds(email), &text)?;
+    let profile_creds = paths::profile_dir(email).join(".credentials.json");
+    if profile_creds.exists() {
+        write_private(&profile_creds, &text)?;
+    }
+    Ok(())
+}
+
+/// Swap the live ~/.claude login to `acct` — make it the default.
+///
+/// THE ONLY place cswap writes into ~/.claude, reached solely from an explicit
+/// `cswap default <x>`. Copies the account's freshly-refreshed credentials into
+/// ~/.claude/.credentials.json and rewrites ~/.claude.json's `oauthAccount` so
+/// bare `claude`, the VS Code extension, and `live_email()` all see the new
+/// identity. Every other key in ~/.claude.json is preserved.
+pub fn promote_to_live(acct: &Account) -> Result<()> {
+    let creds = current_creds(acct)?; // refresh + persist to the store/profile
+    write_private(&paths::live_credentials(), &serde_json::to_string(&creds)?)?;
+
+    let meta: Value = fs::read_to_string(paths::store_meta(&acct.email))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| json!({}));
+    let oa = meta
+        .get("oauthAccount")
+        .cloned()
+        .unwrap_or_else(|| json!({ "emailAddress": acct.email }));
+
+    let path = paths::claude_json();
+    let mut live: Value = fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| json!({}));
+    live["oauthAccount"] = oa;
+    // ~/.claude.json is not a secret file (it holds no tokens) — keep its
+    // normal perms rather than forcing 0600 like the credential stores.
+    fs::write(&path, serde_json::to_string_pretty(&live)?)
+        .with_context(|| format!("failed to update {}", path.display()))?;
+    Ok(())
 }
 
 /// Make the profile launch-ready and return its path.

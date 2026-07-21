@@ -1,31 +1,31 @@
-//! `cswap usage` — the detailed card view, one block per account:
+//! `cswap usage` — the detailed card view. The Default (live ~/.claude) card
+//! comes first, then one block per registered account:
 //!
 //! ```text
-//!   devanshw09@gmail.com  [main]   ● active
-//!   5h    ━━━━━╸──────────────   26%  resets 2h 47m · 02:10
-//!   7d    ━━━━━━━━━━━━╸───────   59%  resets 5d 3h · 14:00
-//!   Fable ━━━━━━━━━╸──────────   41%  resets 5d 3h · 14:00
+//! Default — developer@neuralabs.org  [not registered]  ● active
+//!   5h    ━━━━━╸──────────────   12%  resets 2h 47m · 02:10
+//!   7d    ━━━━━━━━━━━━╸───────   30%  resets 5d 3h · 14:00
+//!
+//!   devanshw09@gmail.com  [wadhwani, 2]
+//!   5h    ━━━━━━━━━╸──────────   41%  resets 5d 3h · 14:00
 //! ```
 //!
 //! Same data `cswap list` summarises, with every window, a bar, and reset
-//! times. `cswap watch` re-renders exactly this on an interval.
+//! times. The default is derived (whoever is live in ~/.claude) and carries
+//! `● active` when nothing is activated. `cswap watch` re-renders this.
 
 use anyhow::Result;
 
 use crate::cmds::list::active_email;
-use crate::config::Config;
+use crate::config::{Account, Config};
 use crate::oauth;
-use crate::ui::{self, ACCENT, BOLD, DIM, RESET};
+use crate::ui::{self, ACCENT, BOLD, DIM, RESET, YELLOW};
 
 /// Bar cells. Wide enough to read a few percent, narrow enough for 80 cols.
 const BAR_WIDTH: usize = 24;
 
 pub fn run(key: Option<String>) -> Result<()> {
     let cfg = Config::load()?;
-    if cfg.accounts.is_empty() {
-        println!("No accounts yet. Run: cswap login");
-        return Ok(());
-    }
     let only = match key {
         Some(k) => Some(
             cfg.find(&k)
@@ -40,11 +40,37 @@ pub fn run(key: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Print every account's card. `only` limits it to one email.
+/// Print the Default card and every account's card. `only` limits it to one
+/// email (and, when it doesn't match the live login, hides the Default card).
 pub fn render(cfg: &Config, only: Option<&str>) {
     let color = ui::color_on();
     let active = active_email(cfg);
     let mut first = true;
+
+    // Default card — the live ~/.claude login, registered or not.
+    if let Some(email) = crate::profile::live_email() {
+        if only.is_none_or(|e| e == email) {
+            let reg = if cfg.find(&email).is_some() {
+                ui::paint(color, DIM, "[registered]")
+            } else {
+                ui::paint(color, YELLOW, "[not registered]")
+            };
+            let marker = if active.is_none() {
+                format!("  {}", ui::paint(color, ACCENT, "● active"))
+            } else {
+                String::new()
+            };
+            println!(
+                "{} {}  {reg}{marker}",
+                ui::paint(color, DIM, "Default —"),
+                ui::paint(color, BOLD, &email)
+            );
+            for line in card_lines(&Account::new(email), color) {
+                println!("  {line}");
+            }
+            first = false;
+        }
+    }
 
     for acct in cfg.accounts.iter() {
         if only.is_some_and(|e| e != acct.email) {
@@ -58,9 +84,6 @@ pub fn render(cfg: &Config, only: Option<&str>) {
         let mut tags = String::new();
         if active.as_deref() == Some(acct.email.as_str()) {
             tags.push_str(&format!("  {}", ui::paint(color, ACCENT, "● active")));
-        }
-        if cfg.default.as_deref() == Some(acct.email.as_str()) {
-            tags.push_str(&format!("  {}", ui::paint(color, DIM, "● default")));
         }
         if acct.isolated {
             tags.push_str(&format!("  {}", ui::paint(color, DIM, "● isolated")));
@@ -79,9 +102,16 @@ pub fn render(cfg: &Config, only: Option<&str>) {
             println!("  {line}");
         }
     }
+
+    if first {
+        println!(
+            "{}",
+            ui::paint(color, DIM, "Nothing to show. Run: cswap login")
+        );
+    }
 }
 
-fn card_lines(acct: &crate::config::Account, color: bool) -> Vec<String> {
+fn card_lines(acct: &Account, color: bool) -> Vec<String> {
     let windows = match ui::fetch_windows(acct) {
         Ok(w) if w.is_empty() => return vec![ui::paint(color, DIM, "no window data")],
         Ok(w) => w,

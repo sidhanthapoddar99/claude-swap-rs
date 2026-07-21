@@ -36,7 +36,7 @@ Setup:
 Accounts:
   list        Table of all accounts: status, email, aliases, usage
   alias       Manage aliases: list, create, remove
-  default     Show or set the default account (menu when no argument)
+  default     Show or swap the default account (the live ~/.claude login)
   remove      Forget an account (menu when no argument; always confirms)
 
 Session:
@@ -144,16 +144,25 @@ cswap alias remove w"
         action: AliasCmd,
     },
 
-    /// Show or set the default account (menu when no argument)
+    /// Show or swap the default account (the live ~/.claude login)
     #[command(
-        long_about = "Show or set the default account — what a bare `claude` uses\n\
-in any terminal that hasn't activated anything. Stored as the email.\n\n\
-EXAMPLES:\n  cswap default             # menu (or show current when piped)\n  \
-cswap default work        # by alias\n  cswap default me@corp.com # by email"
+        long_about = "The default is not stored — it IS whoever is logged into the\n\
+live ~/.claude, i.e. what a bare `claude` uses when nothing is activated.\n\n\
+With no argument: report the live login and whether it's registered.\n\
+With an account: SWAP the live login by copying that account's credentials\n\
+into ~/.claude (the only command that writes there). If the account being\n\
+displaced isn't registered its credentials would be lost, so you must type\n\
+`yes` (or pass --yes) — `cswap login` it first to keep it.\n\n\
+EXAMPLES:\n  cswap default             # who is live? (menu when on a tty)\n  \
+cswap default work        # make work the live ~/.claude login\n  \
+cswap default me@corp.com --yes"
     )]
     Default {
         /// Alias or email (interactive menu when omitted)
         key: Option<String>,
+        /// Overwrite an unregistered live login without the typed confirmation
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Forget an account (menu when no argument; always confirms)
@@ -263,7 +272,7 @@ fn main() {
         Cmd::Login { alias, new } => cmds::login::run(alias, new),
         Cmd::Activate { key, print } => cmds::activate::run(key, print),
         Cmd::List { quick } => cmds::list::run(quick),
-        Cmd::Default { key } => cmds::default_cmd::run(key),
+        Cmd::Default { key, yes } => cmds::default_cmd::run(key, yes),
         Cmd::Run { args } => cmds::run::run(args),
         Cmd::Usage { key } => cmds::usage::run(key),
         Cmd::Watch { interval } => cmds::watch::run(interval),
