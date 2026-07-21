@@ -43,7 +43,7 @@ pub fn run(mut args: Vec<String>) -> Result<()> {
                 .expect("no extra items")
                 .clone()
         }
-        _ => cfg.resolve_active()?.clone(),
+        _ => cfg.resolve_active()?,
     };
     launch(&acct, &args, true)
 }
@@ -53,7 +53,7 @@ pub fn run(mut args: Vec<String>) -> Result<()> {
 /// `claude` should feel exactly like claude.
 pub fn shim(args: Vec<String>) -> Result<()> {
     let cfg = Config::load()?;
-    let acct = cfg.resolve_active()?.clone();
+    let acct = cfg.resolve_active()?;
     launch(&acct, &args, false)
 }
 

@@ -141,15 +141,15 @@ fn is_link_to(link: &Path, target: &Path) -> bool {
 }
 
 #[test]
-fn login_registers_by_email_and_sets_default() {
+fn login_registers_by_email_without_storing_a_default() {
     let env = Env::new();
     let o = env.cswap(&["login"]);
     assert_ok(&o);
     assert!(stdout(&o).contains("Registered one@x.com"));
-    assert!(stdout(&o).contains("default"));
 
     let cfg = fs::read_to_string(env.config_path()).unwrap();
-    assert!(cfg.contains("default = \"one@x.com\""));
+    // The default is derived from the live login, never written to config.
+    assert!(!cfg.contains("default ="), "no stored default: {cfg}");
     assert!(cfg.contains("email = \"one@x.com\""));
     assert!(!cfg.contains("name ="), "no name concept in config");
     assert!(env.data().join("accounts/one@x.com.creds.json").exists());
@@ -261,13 +261,38 @@ fn default_and_activate_resolve_alias_and_email() {
     env.switch_live_account("two@x.com", "tok-two");
     assert_ok(&env.cswap(&["login", "--alias", "two"]));
 
-    // default: show (piped -> just prints) + set by alias + set by email
+    // The default IS the live ~/.claude login — here, two (just registered).
     let o = env.cswap(&["default"]);
-    assert!(stdout(&o).contains("default: one@x.com"));
-    assert_ok(&env.cswap(&["default", "two"]));
-    assert!(stdout(&env.cswap(&["default"])).contains("default: two@x.com"));
-    assert_ok(&env.cswap(&["default", "one@x.com"]));
-    assert!(stdout(&env.cswap(&["default"])).contains("default: one@x.com"));
+    assert!(
+        stdout(&o).contains("default: two@x.com (registered)"),
+        "shows live login + registration: {}",
+        stdout(&o)
+    );
+    // Simulate claude rotating two's tokens while live: the store still holds
+    // the login-time copy, only ~/.claude has the fresh one.
+    fs::write(
+        env.home.path().join(".claude/.credentials.json"),
+        Env::creds("tok-two-rotated").to_string(),
+    )
+    .unwrap();
+
+    // Swap to one (outgoing two is registered -> no confirmation needed).
+    // The swap rewrites ~/.claude, so the live login really changes.
+    assert_ok(&env.cswap(&["default", "one"]));
+    // The displaced login's FRESH tokens were captured into its store first.
+    let stored = fs::read_to_string(env.data().join("accounts/two@x.com.creds.json")).unwrap();
+    assert!(
+        stored.contains("tok-two-rotated"),
+        "outgoing live tokens backed up before overwrite: {stored}"
+    );
+    assert!(stdout(&env.cswap(&["default"])).contains("default: one@x.com (registered)"));
+    let live: Value =
+        serde_json::from_str(&fs::read_to_string(env.home.path().join(".claude.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["oauthAccount"]["emailAddress"], "one@x.com");
+    // Swap back by email form.
+    assert_ok(&env.cswap(&["default", "two@x.com"]));
+    assert!(stdout(&env.cswap(&["default"])).contains("default: two@x.com (registered)"));
 
     // activate --print emits eval-able lines; export carries the EMAIL.
     let o = env.cswap(&["activate", "--print", "two"]);
@@ -281,6 +306,42 @@ fn default_and_activate_resolve_alias_and_email() {
     assert_eq!(stdout(&o).trim(), "unset CSWAP_ACTIVE");
     let o = env.cswap(&["activate", "--print", "ghost"]);
     assert!(!o.status.success());
+}
+
+#[test]
+fn default_swap_guards_an_unregistered_outgoing_login() {
+    let env = Env::new();
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
+    // Make the live login an account cswap doesn't know — its creds are stored
+    // nowhere, so overwriting it would be unrecoverable.
+    env.switch_live_account("stranger@x.com", "tok-stranger");
+
+    // Non-interactive without --yes: refuse rather than silently clobber.
+    let o = env.cswap(&["default", "one"]);
+    assert!(!o.status.success(), "must not clobber: {}", stdout(&o));
+    assert!(
+        stderr(&o).contains("NOT registered"),
+        "warns: {}",
+        stderr(&o)
+    );
+    // ~/.claude is untouched — stranger is still the live login.
+    let live: Value =
+        serde_json::from_str(&fs::read_to_string(env.home.path().join(".claude.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["oauthAccount"]["emailAddress"], "stranger@x.com");
+
+    // --yes proceeds and performs the swap.
+    assert_ok(&env.cswap(&["default", "one", "--yes"]));
+    let live: Value =
+        serde_json::from_str(&fs::read_to_string(env.home.path().join(".claude.json")).unwrap())
+            .unwrap();
+    assert_eq!(live["oauthAccount"]["emailAddress"], "one@x.com");
+    // The live credentials now belong to one.
+    let creds = fs::read_to_string(env.home.path().join(".claude/.credentials.json")).unwrap();
+    assert!(
+        creds.contains("tok-live"),
+        "one's token is live now: {creds}"
+    );
 }
 
 #[test]
@@ -350,33 +411,40 @@ fn run_resolves_active_then_default_and_shim_never_eats_args() {
     assert_ok(&env.cswap(&["login", "--alias", "one"]));
     env.switch_live_account("two@x.com", "tok-two");
     assert_ok(&env.cswap(&["login", "--alias", "two"]));
-    env.detach_live(); // neither account is the live login
+    // Live login is now two@x.com — that IS the default.
     let fake = env.fake_claude();
     let bin = fake.to_str().unwrap();
 
-    // No name -> default (one@x.com). Piped stdin => no interactive picker.
+    // No account, nothing active -> default = live (two) -> passthrough, so
+    // CLAUDE_CONFIG_DIR is removed (empty CFG line), no profile involved.
     let o = env.cswap_env(&["run"], &[("CSWAP_CLAUDE_BIN", bin)]);
     assert_ok(&o);
-    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("one@x.com").display())));
+    assert!(stdout(&o).contains("CFG=\n"), "passthrough: {}", stdout(&o));
 
-    // CSWAP_ACTIVE (alias form) overrides default.
+    // CSWAP_ACTIVE (alias form) overrides the default and is NOT the live
+    // account, so it runs through that account's profile.
     let o = env.cswap_env(
         &["run"],
-        &[("CSWAP_CLAUDE_BIN", bin), ("CSWAP_ACTIVE", "two")],
+        &[("CSWAP_CLAUDE_BIN", bin), ("CSWAP_ACTIVE", "one")],
     );
     assert_ok(&o);
-    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("two@x.com").display())));
+    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("one@x.com").display())));
 
     // `run <flag>` with no account match passes the flag through.
     let o = env.cswap_env(&["run", "--version"], &[("CSWAP_CLAUDE_BIN", bin)]);
     assert_ok(&o);
     assert!(stdout(&o).contains("ARGS=--version"));
 
-    // The _claude shim passes even account-shaped words through verbatim.
-    let o = env.cswap_env(&["_claude", "two", "-r"], &[("CSWAP_CLAUDE_BIN", bin)]);
+    // The _claude shim passes even account-shaped words through verbatim, and
+    // still resolves the account itself (live default -> passthrough here).
+    let o = env.cswap_env(&["_claude", "one", "-r"], &[("CSWAP_CLAUDE_BIN", bin)]);
     assert_ok(&o);
-    assert!(stdout(&o).contains("ARGS=two -r"));
-    assert!(stdout(&o).contains(&format!("CFG={}", env.profile("one@x.com").display())));
+    assert!(stdout(&o).contains("ARGS=one -r"));
+    assert!(
+        stdout(&o).contains("CFG=\n"),
+        "shim uses live default: {}",
+        stdout(&o)
+    );
 }
 
 #[test]
@@ -408,11 +476,11 @@ fn alias_subcommands_create_list_remove() {
     env.detach_live();
 
     assert_ok(&env.cswap(&["alias", "create", "one@x.com", "o1"]));
-    // Alias resolves in activate / default / run.
+    // Alias resolves in activate / run (default swap is covered separately —
+    // it mutates ~/.claude, which would defeat the profile check below).
     let o = env.cswap(&["activate", "--print", "o1"]);
     assert_ok(&o);
     assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='one@x.com'");
-    assert_ok(&env.cswap(&["default", "o1"]));
 
     let fake = env.fake_claude();
     let o = env.cswap_env(
@@ -447,34 +515,57 @@ fn alias_subcommands_create_list_remove() {
 }
 
 #[test]
-fn list_is_one_table_row_per_account_with_status() {
+fn list_shows_default_line_then_one_row_per_account() {
     let env = Env::new();
     assert_ok(&env.cswap(&["login", "--alias", "one"]));
     env.switch_live_account("two@x.com", "tok-two");
     assert_ok(&env.cswap(&["login", "--alias", "two"]));
+    // Live login is two@x.com — the derived default, and it is registered.
 
-    let o = env.cswap_env(&["list", "--quick"], &[("CSWAP_ACTIVE", "two")]);
+    // Nothing activated: the default (live two) is what's in effect.
+    let o = env.cswap(&["list", "--quick"]);
     assert_ok(&o);
     let out = stdout(&o);
+    let default_line = out.lines().next().unwrap();
+    assert!(default_line.starts_with("Default"), "default first: {out}");
+    assert!(default_line.contains("two@x.com"), "live login: {out}");
+    assert!(default_line.contains("registered"), "reg status: {out}");
     assert!(
-        out.lines()
-            .next()
-            .is_some_and(|l| l.starts_with("STATUS") && l.contains("ACCOUNT")),
-        "header row: {out}"
+        default_line.contains("● active"),
+        "default in effect: {out}"
     );
+    // Header + a row per account; no `default` status word in the table.
+    assert!(out.contains("STATUS"), "header: {out}");
     let row = |email: &str| {
         out.lines()
-            .find(|l| l.contains(email))
+            .find(|l| l.contains(email) && !l.starts_with("Default"))
             .unwrap_or_else(|| panic!("no row for {email}: {out}"))
     };
-    // One line per account, carrying status + alias + email.
-    let one = row("one@x.com");
-    assert!(one.starts_with("default"), "one is the default: {one}");
-    assert!(one.contains(" one "), "alias column: {one}");
-    let two = row("two@x.com");
-    assert!(two.starts_with("active"), "two is active here: {two}");
-    // Usage stays on the account's own row, never spilled onto extra lines.
-    assert_eq!(out.lines().filter(|l| l.contains('@')).count(), 2, "{out}");
+    assert!(row("one@x.com").contains(" one "), "alias column: {out}");
+    assert!(
+        row("two@x.com").trim_start().starts_with("two@x.com"),
+        "no status word while nothing is active: {out}"
+    );
+
+    // Activating one makes ONLY its row active; the default keeps no marker.
+    let o = env.cswap_env(&["list", "--quick"], &[("CSWAP_ACTIVE", "one")]);
+    let out = stdout(&o);
+    assert!(
+        !out.lines().next().unwrap().contains("● active"),
+        "default not in effect when a shell activated something: {out}"
+    );
+    assert!(row_in(&out, "one@x.com").starts_with("active"), "{out}");
+    assert!(
+        !row_in(&out, "two@x.com").starts_with("active"),
+        "live-but-not-activated account shows no active: {out}"
+    );
+}
+
+fn row_in(out: &str, email: &str) -> String {
+    out.lines()
+        .find(|l| l.contains(email) && !l.starts_with("Default"))
+        .unwrap_or_else(|| panic!("no row for {email}: {out}"))
+        .to_string()
 }
 
 #[test]
@@ -494,11 +585,15 @@ fn usage_renders_a_card_per_account_and_survives_a_dead_endpoint() {
         "{out}"
     );
     assert!(out.contains("[one]"), "aliases in the header: {out}");
-    assert!(out.contains("● default"), "default tag: {out}");
-    // A dead endpoint degrades to a note, never a failed command.
-    assert_eq!(out.matches("usage unavailable").count(), 2, "{out}");
+    // Default card leads, tagged with registration + active (nothing activated).
+    let first = out.lines().next().unwrap();
+    assert!(first.starts_with("Default —"), "default card first: {out}");
+    assert!(first.contains("[registered]"), "reg status: {out}");
+    assert!(first.contains("● active"), "default in effect: {out}");
+    // Three cards (default two + account one + account two), each unavailable.
+    assert_eq!(out.matches("usage unavailable").count(), 3, "{out}");
 
-    // Scoped to one account.
+    // Scoped to one account hides the other (and the default card here is two).
     let o = env.cswap_env(&["usage", "two"], &dead);
     assert_ok(&o);
     assert!(!stdout(&o).contains("one@x.com"), "{}", stdout(&o));
@@ -569,8 +664,8 @@ fn legacy_name_config_migrates_on_disk() {
 
     let cfg = fs::read_to_string(env.config_path()).unwrap();
     assert!(
-        cfg.contains("default = \"one@x.com\""),
-        "default canonicalized: {cfg}"
+        !cfg.contains("default ="),
+        "stale default line stripped (default is now the live login): {cfg}"
     );
     assert!(
         cfg.contains("aliases = [\"main\"]"),

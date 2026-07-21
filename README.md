@@ -105,9 +105,10 @@ cswap alias remove     # pick from a menu       (or: cswap alias remove w)
 
 cswap remove           # interactive picker + confirmation (--yes to skip)
 
-cswap default work     # what bare `claude` uses everywhere
+cswap default          # who is the default? (= the live ~/.claude login)
+cswap default work     # swap the live login: `work` becomes the default everywhere
 cswap activate personal  # what `claude` uses in THIS terminal only
-cswap activate         # back to default
+cswap activate         # back to the default
 
 claude                 # runs as active/default account — all flags pass through
 claude -r              # same shared history from any account
@@ -124,11 +125,11 @@ cswap remove old-account   # forget it (never touches ~/.claude data)
 
 ### Configuration
 
-`~/.config/cswap/config.toml` — written by `cswap login` / `cswap default`, editable by hand:
+There is no stored default: **the default IS whoever is logged into the live `~/.claude`**. `cswap default <account>` swaps that login by copying the account's credentials into `~/.claude` — the only command that ever writes there. If the login being displaced isn't registered, cswap refuses until you type `yes` (or pass `--yes`), since its credentials are stored nowhere else.
+
+`~/.config/cswap/config.toml` — written by `cswap login`, editable by hand:
 
 ```toml
-default = "you@gmail.com"   # always the email
-
 [[account]]
 email = "you@gmail.com"     # the unique identity — there is no separate "name"
 aliases = ["personal", "p"] # the labels you type; all resolve everywhere
@@ -140,7 +141,7 @@ aliases = ["work"]
 isolated = true    # own projects/ + history.jsonl — not shared with other accounts
 ```
 
-Pre-0.3.1 configs (with `name = ...`) migrate automatically on the first run: the name becomes the primary alias and store/profile files are re-keyed by email.
+Pre-0.4 configs migrate automatically on the first run: a `name = ...` becomes the primary alias (store/profile files re-keyed by email), and a stored `default = ...` line is dropped — the default is now derived from the live login.
 
 ### Notes
 

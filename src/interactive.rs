@@ -82,6 +82,20 @@ pub fn input_optional(prompt: &str) -> Result<Option<String>> {
     Ok(if text.is_empty() { None } else { Some(text) })
 }
 
+/// Require the user to literally type `word` (case-insensitive) to proceed —
+/// a heavier gate than y/n for irreversible actions. Anything else = no.
+pub fn type_to_confirm(prompt: &str, word: &str) -> Result<bool> {
+    if !on_tty() {
+        bail!("not a terminal — pass --yes to confirm non-interactively");
+    }
+    let ans = Input::<String>::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .allow_empty(true)
+        .interact_text_on(&Term::stderr())
+        .context("confirmation cancelled")?;
+    Ok(ans.trim().eq_ignore_ascii_case(word))
+}
+
 pub fn confirm(prompt: &str) -> Result<bool> {
     if !on_tty() {
         bail!("not a terminal — pass --yes to confirm non-interactively");

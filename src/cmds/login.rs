@@ -128,16 +128,9 @@ fn login_new(alias_arg: Option<String>) -> Result<()> {
 }
 
 fn register(cfg: &mut Config, email: &str, alias_arg: Option<String>) -> Result<()> {
-    let first = cfg.accounts.is_empty();
     cfg.accounts.push(Account::new(email.to_string()));
-    if first {
-        cfg.default = Some(email.to_string());
-    }
     cfg.save()?;
     println!("Registered {email}");
-    if first {
-        println!("Set as default account.");
-    }
     match alias_arg {
         Some(alias) => add_alias(cfg, email, &alias)?,
         // Offer an alias right away — select/input TUI, skippable with Enter.
