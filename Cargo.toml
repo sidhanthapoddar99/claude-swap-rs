@@ -1,0 +1,27 @@
+[package]
+name = "claude-swap-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Fast multi-account switcher for Claude Code: named profiles, per-terminal activation, shared history"
+license = "MIT"
+repository = "https://github.com/sidhanthapoddar99/claude-swap-rs"
+
+[[bin]]
+name = "cswap"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+ureq = { version = "2", features = ["json"] }
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true
