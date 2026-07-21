@@ -447,7 +447,7 @@ fn alias_subcommands_create_list_remove() {
 }
 
 #[test]
-fn list_shows_default_entity_line_and_markers() {
+fn list_is_one_table_row_per_account_with_status() {
     let env = Env::new();
     assert_ok(&env.cswap(&["login", "--alias", "one"]));
     env.switch_live_account("two@x.com", "tok-two");
@@ -456,24 +456,55 @@ fn list_shows_default_entity_line_and_markers() {
     let o = env.cswap_env(&["list", "--quick"], &[("CSWAP_ACTIVE", "two")]);
     assert_ok(&o);
     let out = stdout(&o);
-    // Default/Active are standalone lines with the EMAIL only.
-    assert!(out.contains("Default: one@x.com"), "got: {out}");
-    assert!(out.contains("Active:  two@x.com"), "got: {out}");
-    // Table rows: alias column + email, with d/* markers.
-    let rows: Vec<&str> = out
-        .lines()
-        .filter(|l| !l.starts_with("Default:") && !l.starts_with("Active:"))
-        .collect();
-    let one_line = rows.iter().find(|l| l.contains("one@x.com")).unwrap();
-    let two_line = rows.iter().find(|l| l.contains("two@x.com")).unwrap();
     assert!(
-        one_line.trim_start().starts_with("d "),
-        "one is default: {one_line}"
+        out.lines()
+            .next()
+            .is_some_and(|l| l.starts_with("STATUS") && l.contains("ACCOUNT")),
+        "header row: {out}"
     );
+    let row = |email: &str| {
+        out.lines()
+            .find(|l| l.contains(email))
+            .unwrap_or_else(|| panic!("no row for {email}: {out}"))
+    };
+    // One line per account, carrying status + alias + email.
+    let one = row("one@x.com");
+    assert!(one.starts_with("default"), "one is the default: {one}");
+    assert!(one.contains(" one "), "alias column: {one}");
+    let two = row("two@x.com");
+    assert!(two.starts_with("active"), "two is active here: {two}");
+    // Usage stays on the account's own row, never spilled onto extra lines.
+    assert_eq!(out.lines().filter(|l| l.contains('@')).count(), 2, "{out}");
+}
+
+#[test]
+fn usage_renders_a_card_per_account_and_survives_a_dead_endpoint() {
+    let env = Env::new();
+    assert_ok(&env.cswap(&["login", "--alias", "one"]));
+    env.switch_live_account("two@x.com", "tok-two");
+    assert_ok(&env.cswap(&["login", "--alias", "two"]));
+
+    // Port 1 refuses instantly: exercises the error path without a network.
+    let dead = [("CSWAP_USAGE_URL", "http://127.0.0.1:1/usage")];
+    let o = env.cswap_env(&["usage"], &dead);
+    assert_ok(&o);
+    let out = stdout(&o);
     assert!(
-        two_line.trim_start().starts_with("* "),
-        "two is active: {two_line}"
+        out.contains("one@x.com") && out.contains("two@x.com"),
+        "{out}"
     );
+    assert!(out.contains("[one]"), "aliases in the header: {out}");
+    assert!(out.contains("● default"), "default tag: {out}");
+    // A dead endpoint degrades to a note, never a failed command.
+    assert_eq!(out.matches("usage unavailable").count(), 2, "{out}");
+
+    // Scoped to one account.
+    let o = env.cswap_env(&["usage", "two"], &dead);
+    assert_ok(&o);
+    assert!(!stdout(&o).contains("one@x.com"), "{}", stdout(&o));
+
+    // An unknown key is an error, not a silently empty render.
+    assert!(!env.cswap_env(&["usage", "ghost"], &dead).status.success());
 }
 
 #[test]

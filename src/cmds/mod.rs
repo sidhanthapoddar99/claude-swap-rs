@@ -7,4 +7,5 @@ pub mod remove;
 pub mod run;
 pub mod shell_init;
 pub mod upgrade;
+pub mod usage;
 pub mod watch;

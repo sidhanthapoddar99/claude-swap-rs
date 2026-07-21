@@ -89,8 +89,8 @@ cswap login --new --alias work  # launches claude in a clean staging profile;
                                 # log in as the new account, /exit, done.
                                 # Your current login is never touched.
 
-cswap list             # Default/Active entity lines + profiles with one
-                       # colored line per usage window (5h / 7d / per-model)
+cswap list             # one row per account: status, email, aliases,
+                       # and the 5h/7d gates at a glance
 cswap list --quick     # skip the usage API calls
 
 # Anywhere an account is expected: pass an alias or email — or pass nothing
@@ -113,7 +113,10 @@ claude                 # runs as active/default account — all flags pass throu
 claude -r              # same shared history from any account
 cswap run work -r      # one-off as a specific account, ignoring active/default
 
-cswap watch            # live usage dashboard (refreshes every 300s)
+cswap usage            # bars, per-model windows and reset times
+cswap usage work       # just one account
+
+cswap watch            # the same view, redrawn every 300s ([r] refresh, [q] quit)
 cswap watch -i 120
 
 cswap remove old-account   # forget it (never touches ~/.claude data)
