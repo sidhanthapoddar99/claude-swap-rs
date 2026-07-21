@@ -1,6 +1,6 @@
 [package]
 name = "claude-swap-rs"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Fast multi-account switcher for Claude Code: named profiles, per-terminal activation, shared history"
 license = "MIT"
@@ -19,6 +19,7 @@ toml = "0.8"
 ureq = { version = "2", features = ["json"] }
 chrono = "0.4"
 sha2 = "0.10"
+dialoguer = "0.11"
 
 [dev-dependencies]
 tempfile = "3"

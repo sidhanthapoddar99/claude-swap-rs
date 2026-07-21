@@ -1,5 +1,6 @@
-//! `cswap list` — default/active shown as their own entities, then all
-//! profiles (keyed by email) with aliases and colored usage windows.
+//! `cswap list` — Default/Active as standalone entity lines (email only),
+//! then every profile with its aliases and usage split across one line per
+//! window (5h / 7d / per-model weekly).
 //!
 //! Colors mirror the user's statusline convention: <70 green, <90 yellow,
 //! else red; labels and reset times dimmed. Disabled when stdout is not a
@@ -40,7 +41,7 @@ pub fn run(quick: bool) -> Result<()> {
 pub fn print_table(quick: bool) -> Result<()> {
     let cfg = Config::load()?;
     if cfg.accounts.is_empty() {
-        println!("No accounts yet. Log into Claude Code, then run: cswap login");
+        println!("No accounts yet. Run: cswap login");
         return Ok(());
     }
     let color = color_on();
@@ -52,64 +53,47 @@ pub fn print_table(quick: bool) -> Result<()> {
         }
     };
 
-    // The default and this shell's active account are entities of their own.
-    match cfg.default.as_deref().and_then(|d| cfg.find(d)) {
-        Some(a) => println!("Default: {} {}", a.name, dim(&format!("({})", a.email))),
-        None => println!("Default: {}", dim("(not set — cswap default <name>)")),
+    // Default and Active are entities of their own: email only, no aliases.
+    match &cfg.default {
+        Some(d) => println!("Default: {d}"),
+        None => println!(
+            "Default: {}",
+            dim("(not set — cswap default <alias|email>)")
+        ),
     }
-    let active = std::env::var("CSWAP_ACTIVE").ok().filter(|s| !s.is_empty());
-    if let Some(active_name) = &active {
-        match cfg.find(active_name) {
-            Some(a) => println!(
-                "Active:  {} {} {}",
-                a.name,
-                dim(&format!("({})", a.email)),
-                dim("[this shell]")
-            ),
-            None => println!("Active:  {active_name} {}", dim("[unknown account!]")),
-        }
+    let active_email = std::env::var("CSWAP_ACTIVE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|k| cfg.find(&k).map(|a| a.email.clone()).unwrap_or(k));
+    if let Some(email) = &active_email {
+        println!("Active:  {email} {}", dim("[this shell]"));
     }
     println!();
 
-    println!(
-        "{}",
-        dim(&format!(
-            "{:<2} {:<14} {:<12} {:<30} USAGE",
-            "", "NAME", "ALIASES", "EMAIL"
-        ))
-    );
     for acct in &cfg.accounts {
         let mut marker = String::new();
-        if active.as_deref() == Some(acct.name.as_str())
-            || active
-                .as_deref()
-                .map(|k| acct.aliases.iter().any(|al| al == k))
-                .unwrap_or(false)
-        {
+        if active_email.as_deref() == Some(acct.email.as_str()) {
             marker.push('*');
         }
-        if cfg.default.as_deref() == Some(acct.name.as_str()) {
+        if cfg.default.as_deref() == Some(acct.email.as_str()) {
             marker.push('d');
         }
         let aliases = if acct.aliases.is_empty() {
-            "-".to_string()
+            dim("(no alias)")
         } else {
-            acct.aliases.join(",")
-        };
-        let usage = if quick {
-            dim("-")
-        } else {
-            usage_line(acct, color)
+            acct.aliases.join(", ")
         };
         let iso = if acct.isolated {
             dim(" [isolated]")
         } else {
             String::new()
         };
-        println!(
-            "{marker:<2} {:<14} {aliases:<12} {:<30} {usage}{iso}",
-            acct.name, acct.email
-        );
+        println!("{marker:<2} {aliases:<16} {}{iso}", acct.email);
+        if !quick {
+            for line in usage_lines(acct, color) {
+                println!("     {line}");
+            }
+        }
     }
     println!(
         "{}",
@@ -122,15 +106,16 @@ pub fn print_table(quick: bool) -> Result<()> {
     Ok(())
 }
 
-fn usage_line(acct: &Account, color: bool) -> String {
+/// One line per usage window, e.g. ["5h     3%  in 4h39m (02:10)", ...].
+fn usage_lines(acct: &Account, color: bool) -> Vec<String> {
     match try_usage(acct, color) {
-        Ok(line) if line.is_empty() => "no window data".to_string(),
-        Ok(line) => line,
-        Err(e) => format!("usage unavailable ({e:#})"),
+        Ok(lines) if lines.is_empty() => vec!["no window data".to_string()],
+        Ok(lines) => lines,
+        Err(e) => vec![format!("usage unavailable ({e:#})")],
     }
 }
 
-fn try_usage(acct: &Account, color: bool) -> Result<String> {
+fn try_usage(acct: &Account, color: bool) -> Result<Vec<String>> {
     // Live account: read ~/.claude's token as-is, never refresh it (rotation
     // is claude's job for the live login). Others: profile creds + refresh.
     let creds = if profile::live_email().as_deref() == Some(acct.email.as_str()) {
@@ -151,27 +136,25 @@ fn try_usage(acct: &Account, color: bool) -> Result<String> {
     };
     let token = oauth::access_token(&creds).ok_or_else(|| anyhow::anyhow!("no access token"))?;
     let usage = oauth::fetch_usage(token)?;
-    let parts: Vec<String> = oauth::windows(&usage)
+    Ok(oauth::windows(&usage)
         .iter()
         .map(|w| {
             let reset = w
                 .resets_at
                 .as_deref()
                 .and_then(oauth::format_reset)
-                .map(|r| format!(" {r}"))
                 .unwrap_or_default();
             if color {
                 format!(
-                    "{DIM}{}{RESET} {}{:.0}%{RESET}{DIM}{}{RESET}",
+                    "{DIM}{:<6}{RESET}{}{:>4.0}%{RESET}  {DIM}{}{RESET}",
                     w.label,
                     pct_color(w.pct),
                     w.pct,
                     reset
                 )
             } else {
-                format!("{} {:.0}%{}", w.label, w.pct, reset)
+                format!("{:<6}{:>4.0}%  {}", w.label, w.pct, reset)
             }
         })
-        .collect();
-    Ok(parts.join(if color { " \x1b[2m|\x1b[0m " } else { " | " }))
+        .collect())
 }

@@ -52,8 +52,8 @@ pub fn write_private(path: &Path, contents: &str) -> Result<()> {
 /// exists — it is the live store — else the login-time backup), refresh the
 /// token if it is about to expire, and persist any rotation everywhere.
 pub fn current_creds(acct: &Account) -> Result<Value> {
-    let profile_creds = paths::profile_dir(&acct.name).join(".credentials.json");
-    let store = paths::store_creds(&acct.name);
+    let profile_creds = paths::profile_dir(&acct.email).join(".credentials.json");
+    let store = paths::store_creds(&acct.email);
     let source = if profile_creds.exists() {
         &profile_creds
     } else {
@@ -62,7 +62,7 @@ pub fn current_creds(acct: &Account) -> Result<Value> {
     let text = fs::read_to_string(source).with_context(|| {
         format!(
             "no stored credentials for '{}' — log in with `claude`, then run `cswap login`",
-            acct.name
+            acct.email
         )
     })?;
     let mut creds: Value = serde_json::from_str(&text)
@@ -79,7 +79,7 @@ pub fn current_creds(acct: &Account) -> Result<Value> {
 
 /// Make the profile launch-ready and return its path.
 pub fn ensure(acct: &Account) -> Result<PathBuf> {
-    let dir = paths::profile_dir(&acct.name);
+    let dir = paths::profile_dir(&acct.email);
     fs::create_dir_all(&dir)?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
 
@@ -87,10 +87,10 @@ pub fn ensure(acct: &Account) -> Result<PathBuf> {
     // copy is the source of truth (Claude rotates tokens in place there).
     let creds_path = dir.join(".credentials.json");
     if !creds_path.exists() {
-        let stored = fs::read_to_string(paths::store_creds(&acct.name)).with_context(|| {
+        let stored = fs::read_to_string(paths::store_creds(&acct.email)).with_context(|| {
             format!(
                 "no stored credentials for '{}' — log in with `claude`, then run `cswap login`",
-                acct.name
+                acct.email
             )
         })?;
         write_private(&creds_path, &stored)?;
@@ -114,7 +114,7 @@ pub fn ensure(acct: &Account) -> Result<PathBuf> {
 /// hasCompletedOnboarding is missing), plus one-time copies of user-scope
 /// MCP servers and per-project trust from the live config.
 fn seed_claude_json(path: &Path, acct: &Account) -> Result<()> {
-    let meta: Value = fs::read_to_string(paths::store_meta(&acct.name))
+    let meta: Value = fs::read_to_string(paths::store_meta(&acct.email))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_else(|| json!({}));

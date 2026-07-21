@@ -27,8 +27,9 @@ pub const SCRUBBED: &[&str] = &[
     "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
 ];
 
-/// `cswap run`: first arg is an account name if it matches one, otherwise
-/// every arg passes to claude and the active/default account is used.
+/// `cswap run`: first arg is an account (alias|email) if it matches one,
+/// otherwise every arg passes to claude and the active/default account is
+/// used. With no args at all on a terminal, an interactive picker asks.
 pub fn run(mut args: Vec<String>) -> Result<()> {
     let cfg = Config::load()?;
     let acct = match args.first() {
@@ -36,6 +37,11 @@ pub fn run(mut args: Vec<String>) -> Result<()> {
             let acct = cfg.find(first).expect("just checked").clone();
             args.remove(0);
             acct
+        }
+        None if crate::interactive::on_tty() && !cfg.accounts.is_empty() => {
+            crate::interactive::pick_account(&cfg, "Run claude as which account?", &[])?
+                .expect("no extra items")
+                .clone()
         }
         _ => cfg.resolve_active()?.clone(),
     };
@@ -55,15 +61,16 @@ fn launch(acct: &crate::config::Account, args: &[String], announce: bool) -> Res
     let config_dir = if profile::live_email().as_deref() == Some(acct.email.as_str()) {
         if announce {
             eprintln!(
-                "cswap: running claude as '{}' ({}) [live ~/.claude]",
-                acct.name, acct.email
+                "cswap: running claude as {} ({}) [live ~/.claude]",
+                acct.label(),
+                acct.email
             );
         }
         None
     } else {
         let dir = profile::ensure(acct)?;
         if announce {
-            eprintln!("cswap: running claude as '{}' ({})", acct.name, acct.email);
+            eprintln!("cswap: running claude as {} ({})", acct.label(), acct.email);
         }
         Some(dir)
     };

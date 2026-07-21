@@ -81,20 +81,29 @@ Downloads the latest release, verifies its checksum, and atomically replaces the
 ## Usage
 
 ```bash
-# Register the account you're already logged into:
-cswap login            # captures the live ~/.claude login, prompts for a name
+# Register the account you're already logged into (keyed by its email):
+cswap login                     # offers an optional alias right away
 
 # Add MORE accounts from inside cswap (recommended):
-cswap login --new --name work   # launches claude in a clean staging profile;
+cswap login --new --alias work  # launches claude in a clean staging profile;
                                 # log in as the new account, /exit, done.
                                 # Your current login is never touched.
 
-cswap list             # Default/Active as entities + all profiles with colored
-                       # usage windows (<70% green, <90% yellow, else red)
+cswap list             # Default/Active entity lines + profiles with one
+                       # colored line per usage window (5h / 7d / per-model)
 cswap list --quick     # skip the usage API calls
 
-cswap alias work w     # extra labels: `cswap activate w`, `cswap run w` ...
-cswap alias --remove w
+# Anywhere an account is expected: pass an alias or email — or pass nothing
+# on a terminal and pick from an interactive menu.
+cswap activate         # interactive picker (this shell only)
+cswap run              # interactive picker, one-off run
+cswap default          # interactive picker
+
+cswap alias list
+cswap alias create     # pick account, type alias (or: cswap alias create work w)
+cswap alias remove     # pick from a menu       (or: cswap alias remove w)
+
+cswap remove           # interactive picker + confirmation (--yes to skip)
 
 cswap default work     # what bare `claude` uses everywhere
 cswap activate personal  # what `claude` uses in THIS terminal only
@@ -115,19 +124,20 @@ cswap remove old-account   # forget it (never touches ~/.claude data)
 `~/.config/cswap/config.toml` — written by `cswap login` / `cswap default`, editable by hand:
 
 ```toml
-default = "personal"
+default = "you@gmail.com"   # always the email
 
 [[account]]
-name = "personal"           # primary label
-email = "you@gmail.com"     # the unique identity an account is keyed by
-aliases = ["p", "home"]     # extra labels; resolve everywhere a name does
+email = "you@gmail.com"     # the unique identity — there is no separate "name"
+aliases = ["personal", "p"] # the labels you type; all resolve everywhere
 isolated = false
 
 [[account]]
-name = "work"
 email = "you@corp.com"
+aliases = ["work"]
 isolated = true    # own projects/ + history.jsonl — not shared with other accounts
 ```
+
+Pre-0.3.1 configs (with `name = ...`) migrate automatically on the first run: the name becomes the primary alias and store/profile files are re-keyed by email.
 
 ### Notes
 
