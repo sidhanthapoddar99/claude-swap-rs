@@ -14,7 +14,7 @@ const POSIX_SNIPPET: &str = r#"# cswap shell integration (bash/zsh)
 cswap() {
   if [ "$1" = "activate" ]; then
     local __cswap_out
-    if __cswap_out="$(command cswap activate --print "${2:-}")"; then
+    if __cswap_out="$(command cswap activate --print ${2:+"$2"})"; then
       eval "$__cswap_out"
     else
       return 1
