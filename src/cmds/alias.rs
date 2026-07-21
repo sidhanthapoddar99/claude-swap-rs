@@ -22,7 +22,7 @@ pub fn run(account: Option<String>, alias: Option<String>, remove: bool) -> Resu
         let acct = cfg
             .accounts
             .iter_mut()
-            .find(|a| a.aliases.iter().any(|al| *al == target))
+            .find(|a| a.aliases.contains(&target))
             .with_context(|| format!("no account has the alias '{target}'"))?;
         acct.aliases.retain(|al| *al != target);
         let name = acct.name.clone();
