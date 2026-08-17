@@ -2,7 +2,7 @@
 //!
 //! Exactly three endpoints, all first-party. No telemetry, ever.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local, Utc};
 use serde_json::{json, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -26,6 +26,58 @@ fn agent() -> ureq::Agent {
         .timeout(Duration::from_secs(20))
         .try_proxy_from_env(true)
         .build()
+}
+
+/// Split a ureq failure into (HTTP status, body or transport message).
+///
+/// ureq hands back the response object on a 4xx/5xx, so the body has to be
+/// drained here or the status is all that survives.
+fn http_fail(err: ureq::Error) -> (Option<u16>, String) {
+    match err {
+        ureq::Error::Status(code, resp) => (Some(code), resp.into_string().unwrap_or_default()),
+        ureq::Error::Transport(t) => (None, t.to_string()),
+    }
+}
+
+/// The API's own error text, when the body carries one.
+fn api_message(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let parsed: Option<Value> = serde_json::from_str(trimmed).ok();
+    let text = parsed
+        .as_ref()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .and_then(Value::as_str)
+                .or_else(|| v.get("error_description").and_then(Value::as_str))
+                .or_else(|| v.get("error").and_then(Value::as_str))
+                .map(String::from)
+        })
+        .unwrap_or_else(|| trimmed.chars().take(120).collect());
+    format!(" ({text})")
+}
+
+/// Turn a failed request into something the reader can act on.
+///
+/// The status code IS the diagnosis: 401 means log in again, 429 means wait.
+/// Collapsing both into "request failed" is what made `cswap usage` look like
+/// it failed at random.
+///
+/// The diagnosis only — no "usage" or "refresh" prefix. Every caller already
+/// frames it ("usage unavailable (…)"), and framing it twice reads as noise.
+fn describe(status: Option<u16>, body: &str) -> anyhow::Error {
+    let Some(code) = status else {
+        return anyhow::anyhow!("{body}");
+    };
+    let hint = match code {
+        401 | 403 => " — token rejected; log this account in again",
+        429 => " — rate limited; this endpoint allows ~20-30 requests/hour per token",
+        500..=599 => " — Anthropic server error, transient",
+        _ => "",
+    };
+    anyhow::anyhow!("HTTP {code}{hint}{}", api_message(body))
 }
 
 pub fn now_ms() -> i64 {
@@ -57,7 +109,7 @@ pub fn refresh_if_needed(creds: &mut Value, margin_ms: i64) -> Result<bool> {
         .context("access token expired and no refreshToken present — re-login this account")?
         .to_string();
 
-    let resp: Value = agent()
+    let sent = agent()
         .post(TOKEN_URL)
         .set("Content-Type", "application/json")
         .set("User-Agent", USER_AGENT)
@@ -65,10 +117,25 @@ pub fn refresh_if_needed(creds: &mut Value, margin_ms: i64) -> Result<bool> {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "client_id": CLIENT_ID,
-        }))
-        .context("OAuth token refresh failed (network or server rejected the grant)")?
-        .into_json()
-        .context("OAuth token refresh: unparseable response")?;
+        }));
+    let resp: Value = match sent {
+        Ok(r) => r
+            .into_json()
+            .context("OAuth token refresh: unparseable response")?,
+        Err(e) => {
+            let (status, body) = http_fail(e);
+            // `invalid_grant` is terminal, not transient: this refresh-token
+            // family is dead and no amount of retrying revives it. Usually it
+            // means a second copy of the same family refreshed after this one.
+            if body.contains("invalid_grant") {
+                bail!(
+                    "refresh token rejected (invalid_grant) — this account's token family is \
+                     dead and it has to log in again"
+                );
+            }
+            return Err(describe(status, &body).context("OAuth token refresh failed"));
+        }
+    };
 
     let access = resp
         .get("access_token")
@@ -102,15 +169,19 @@ pub fn fetch_usage(token: &str) -> Result<Value> {
     // CSWAP_USAGE_URL redirects the usage call — a debugging/test hook, never
     // a default. Token refresh always goes to the real endpoint.
     let url = std::env::var("CSWAP_USAGE_URL").unwrap_or_else(|_| USAGE_URL.to_string());
-    agent()
+    match agent()
         .get(&url)
         .set("Authorization", &format!("Bearer {token}"))
         .set("anthropic-beta", BETA_HEADER)
         .set("User-Agent", USER_AGENT)
         .call()
-        .context("usage API request failed")?
-        .into_json()
-        .context("usage API: unparseable response")
+    {
+        Ok(r) => r.into_json().context("usage API: unparseable response"),
+        Err(e) => {
+            let (status, body) = http_fail(e);
+            Err(describe(status, &body))
+        }
+    }
 }
 
 pub struct Window {

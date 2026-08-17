@@ -227,7 +227,27 @@ impl Config {
     }
 }
 
-/// One-time on-disk migration to the 0.6.1 layout.
+/// Does the config on disk still use a pre-0.6.1 shape?
+///
+/// Cheap and read-only. Nothing in cswap migrates on its own any more, so this
+/// is what tells the user there is something to run.
+pub fn needs_migration() -> bool {
+    let path = paths::config_file();
+    let Ok(text) = fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(raw) = toml::from_str::<RawConfig>(&text) else {
+        return false;
+    };
+    !raw.accounts.is_empty()
+        || raw
+            .profiles
+            .iter()
+            .any(|e| e.name.as_ref().is_some_and(|n| !n.is_empty()))
+}
+
+/// One-time on-disk migration to the 0.6.1 layout. Returns whether it changed
+/// anything.
 ///
 /// Two shapes get folded in, both keyed by email in the end:
 ///   * 0.5 `[[account]]` — already email-keyed on disk, so only the TOML key
@@ -239,15 +259,20 @@ impl Config {
 /// lived in the old store (it was the live login, so it never had a profile)
 /// comes out with no credentials, and `cswap login <email>` gives it its own.
 /// Seeding it from the store would hand two entities one refresh-token family.
-pub fn migrate_on_disk() -> Result<()> {
+///
+/// This is only ever reached through `cswap migrate`. It used to run from
+/// `main()` before the arguments were even parsed, which meant `cswap --version`
+/// rewrote the config and moved directories — including out from under live
+/// claude sessions, which cost real transcript data.
+pub fn migrate_on_disk() -> Result<bool> {
     let path = paths::config_file();
     if !path.exists() {
-        return Ok(());
+        return Ok(false);
     }
     let text = fs::read_to_string(&path)?;
     let raw: RawConfig = match toml::from_str(&text) {
         Ok(c) => c,
-        Err(_) => return Ok(()), // load() will surface the real error later
+        Err(_) => return Ok(false), // load() will surface the real error later
     };
     let from_0_5 = !raw.accounts.is_empty();
     let named = raw
@@ -256,7 +281,29 @@ pub fn migrate_on_disk() -> Result<()> {
         .filter(|e| e.name.as_ref().is_some_and(|n| !n.is_empty()))
         .count();
     if !from_0_5 && named == 0 {
-        return Ok(());
+        return Ok(false);
+    }
+
+    // A directory cannot be renamed under a running claude: the process holds
+    // the old path and keeps writing to it, so its session data lands outside
+    // every profile. Refuse rather than damage it.
+    let mut busy = Vec::new();
+    for entry in raw.profiles.iter() {
+        let Some(name) = entry.name.as_ref().filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        let dir = paths::profile_dir(name);
+        for pid in crate::profile::live_sessions(&dir) {
+            busy.push(format!("{name} (pid {pid})"));
+        }
+    }
+    if !busy.is_empty() {
+        bail!(
+            "claude is running in {} — exit those sessions first.\n\
+             Renaming a profile directory under a live session makes it write \
+             its transcripts to a path nothing else can see.",
+            busy.join(", ")
+        );
     }
 
     // 0.6.0 keyed directories by name; put them back under the email.
@@ -336,7 +383,7 @@ pub fn migrate_on_disk() -> Result<()> {
             parked.display()
         );
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Reject a second profile for an account someone already holds. The default

@@ -1,8 +1,10 @@
 pub mod activate;
 pub mod alias;
 pub mod default_cmd;
+pub mod doctor;
 pub mod list;
 pub mod login;
+pub mod migrate;
 pub mod remove;
 pub mod run;
 pub mod shell_init;

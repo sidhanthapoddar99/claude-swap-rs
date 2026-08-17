@@ -99,6 +99,17 @@ pub fn render(cfg: &Config, only: Option<&str>) {
 }
 
 fn card_lines(target: &Target, color: bool) -> Vec<String> {
+    // A profile that never logged in has no token to spend on a call whose only
+    // possible answer is "not logged in".
+    if let Target::Profile(p) = target {
+        if !crate::profile::has_login(&p.email) {
+            return vec![ui::paint(
+                color,
+                DIM,
+                &format!("not logged in — run: cswap login {}", p.email),
+            )];
+        }
+    }
     let windows = match ui::fetch_windows(target) {
         Ok(w) if w.is_empty() => return vec![ui::paint(color, DIM, "no window data")],
         Ok(w) => w,
