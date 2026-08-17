@@ -547,8 +547,13 @@ fn run_on_a_profile_that_never_logged_in_says_what_to_do() {
     let o = env.run_cmd(&["run", "work@x.com"], &[]);
     assert!(!o.status.success());
     assert!(
-        stderr(&o).contains("has no login yet") && stderr(&o).contains("cswap login work@x.com"),
+        stderr(&o).contains("not logged in") && stderr(&o).contains("cswap login work@x.com"),
         "{}",
+        stderr(&o)
+    );
+    assert!(
+        !stderr(&o).contains("os error"),
+        "the errno is not the useful half of 'not logged in': {}",
         stderr(&o)
     );
 }
@@ -815,7 +820,21 @@ fn migrates_a_0_5_account_config_without_moving_anything() {
     fs::create_dir_all(&store).unwrap();
     fs::write(store.join("me@gmail.com.creds.json"), "{}").unwrap();
 
-    let o = env.cswap(&["list", "--quick"]);
+    // Reading commands never migrate. They say there is something to run.
+    let nagged = env.cswap(&["list", "--quick"]);
+    assert_ok(&nagged);
+    assert!(
+        stderr(&nagged).contains("cswap migrate"),
+        "{}",
+        stderr(&nagged)
+    );
+    assert!(
+        env.config_text().contains("[[account]]"),
+        "the config is untouched until migrate runs: {}",
+        env.config_text()
+    );
+
+    let o = env.cswap(&["migrate", "--yes"]);
     assert_ok(&o);
     assert!(
         stderr(&o).contains("migrated to the 0.6.1 model"),
@@ -855,10 +874,18 @@ fn migrates_a_0_5_account_config_without_moving_anything() {
         stderr(&o)
     );
 
-    // Idempotent.
+    // Idempotent, and the nag stops once there is nothing left to do.
     let o2 = env.cswap(&["list", "--quick"]);
     assert_ok(&o2);
     assert!(!stderr(&o2).contains("migrated"), "{}", stderr(&o2));
+    assert!(!stderr(&o2).contains("cswap migrate"), "{}", stderr(&o2));
+    let o3 = env.cswap(&["migrate", "--yes"]);
+    assert_ok(&o3);
+    assert!(
+        stdout(&o3).contains("already in the current format"),
+        "{}",
+        stdout(&o3)
+    );
 }
 
 /// 0.6.0 briefly keyed profiles by a separate `name`, which renamed the
@@ -883,7 +910,7 @@ fn migrates_a_0_6_0_named_config_back_under_the_account() {
     // 0.6.0 may also have left a compatibility symlink at the email path.
     std::os::unix::fs::symlink(&named, env.profile("dev@gmail.com")).unwrap();
 
-    let o = env.cswap(&["list", "--quick"]);
+    let o = env.cswap(&["migrate", "--yes"]);
     assert_ok(&o);
     assert!(
         stderr(&o).contains("back under its email"),
@@ -925,7 +952,7 @@ fn migration_survives_a_pre_0_4_name_and_a_stored_default() {
     )
     .unwrap();
 
-    assert_ok(&env.cswap(&["list", "--quick"]));
+    assert_ok(&env.cswap(&["migrate", "--yes"]));
     let cfg = env.config_text();
     assert!(cfg.contains("email = \"m@x.com\""), "{cfg}");
     assert!(
@@ -994,6 +1021,128 @@ fn run_prunes_links_that_have_since_been_denylisted() {
     }
     for item in ["backups/.claude.json.backup.1", ".git/refs"] {
         assert!(src.join(item).exists(), "~/.claude/{item} must survive");
+    }
+}
+
+// ------------------------------------------------------------ shadowed shares
+
+/// Replace a share link with a real directory holding a file, the way a live
+/// claude does when the link is missing at the moment it resolves the path.
+fn shadow_projects(env: &Env, email: &str) -> PathBuf {
+    let link = env.profile(email).join("projects");
+    fs::remove_file(&link).unwrap();
+    fs::create_dir_all(link.join("proj-x")).unwrap();
+    fs::write(link.join("proj-x/lost.jsonl"), "{\"stranded\":true}\n").unwrap();
+    link
+}
+
+#[test]
+fn a_shadowing_directory_is_reported_instead_of_swallowed() {
+    let env = Env::new();
+    assert_ok(&env.login("one@x.com", "tok-one"));
+    let shadow = shadow_projects(&env, "one@x.com");
+
+    // Launching re-runs the mirror. It must refuse to clobber the directory AND
+    // refuse to stay quiet about it — silence here is what loses transcripts.
+    let o = env.run_cmd(&["run", "one@x.com"], &[]);
+    assert_ok(&o);
+    assert!(stderr(&o).contains("projects"), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("cswap doctor"),
+        "points at the fix: {}",
+        stderr(&o)
+    );
+    assert!(
+        shadow.join("proj-x/lost.jsonl").exists(),
+        "the shadowing files are never clobbered"
+    );
+}
+
+#[test]
+fn doctor_finds_a_shadow_and_repair_parks_it_without_touching_live() {
+    let env = Env::new();
+    assert_ok(&env.login("one@x.com", "tok-one"));
+    shadow_projects(&env, "one@x.com");
+
+    let o = env.cswap(&["doctor"]);
+    assert_ok(&o);
+    assert!(stdout(&o).contains("shadowed"), "{}", stdout(&o));
+    assert!(stdout(&o).contains("projects"), "{}", stdout(&o));
+    assert!(stdout(&o).contains("1 file"), "counts it: {}", stdout(&o));
+
+    let o = env.cswap(&["doctor", "--repair"]);
+    assert_ok(&o);
+    assert!(stdout(&o).contains("parked"), "{}", stdout(&o));
+
+    // The link is back...
+    let link = env.profile("one@x.com").join("projects");
+    assert!(is_symlink(&link), "the share link is restored");
+    assert_eq!(fs::read_link(&link).unwrap(), env.live().join("projects"));
+
+    // ...the stranded file still exists in cswap's own space...
+    let parked: Vec<PathBuf> = fs::read_dir(env.data().join("shadowed/one@x.com"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(parked.len(), 1, "one timestamped park directory");
+    assert!(
+        parked[0].join("projects/proj-x/lost.jsonl").exists(),
+        "nothing is deleted by a repair"
+    );
+
+    // ...and ~/.claude was not written to. Repair reports, it does not merge.
+    assert!(
+        !env.live().join("projects/proj-x").exists(),
+        "repair never writes into ~/.claude"
+    );
+    assert!(env.live().join("projects/proj-a/s1.jsonl").exists());
+}
+
+#[test]
+fn doctor_is_quiet_on_a_healthy_profile() {
+    let env = Env::new();
+    assert_ok(&env.login("one@x.com", "tok-one"));
+    let o = env.cswap(&["doctor"]);
+    assert_ok(&o);
+    assert!(stdout(&o).contains("No problems found"), "{}", stdout(&o));
+    assert!(!stdout(&o).contains("shadowed"), "{}", stdout(&o));
+}
+
+#[test]
+fn doctor_names_a_profile_that_never_logged_in() {
+    let env = Env::new();
+    assert_ok(&env.login("one@x.com", "tok-one"));
+    fs::remove_file(env.profile("one@x.com").join(".credentials.json")).unwrap();
+
+    let o = env.cswap(&["doctor"]);
+    assert_ok(&o);
+    assert!(stdout(&o).contains("no login"), "{}", stdout(&o));
+    assert!(
+        stdout(&o).contains("cswap login one@x.com"),
+        "{}",
+        stdout(&o)
+    );
+}
+
+/// The regression that cost real transcript data: asking for a version number
+/// used to run the config migration, rewriting config.toml and renaming
+/// profile directories — including under live sessions.
+#[test]
+fn version_and_help_never_touch_the_config() {
+    let env = Env::new();
+    fs::create_dir_all(env.config_path().parent().unwrap()).unwrap();
+    let legacy = "[[account]]\nemail = \"dev@neura.org\"\naliases = [\"neura\"]\n";
+    fs::write(env.config_path(), legacy).unwrap();
+
+    for args in [vec!["--version"], vec!["--help"], vec!["help", "list"]] {
+        let o = env.cswap(&args);
+        assert_ok(&o);
+        assert_eq!(
+            env.config_text(),
+            legacy,
+            "`cswap {}` rewrote the config",
+            args.join(" ")
+        );
     }
 }
 

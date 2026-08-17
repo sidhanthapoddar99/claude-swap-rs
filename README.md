@@ -139,6 +139,10 @@ cswap watch            # the same view, redrawn every 300s ([r] refresh, [q] qui
 cswap watch -i 120
 
 cswap remove old       # forget a profile (never touches ~/.claude data)
+
+cswap doctor           # check every profile for silent breakage
+cswap doctor --repair  # park shadowing files, restore the share links
+cswap migrate          # rewrite a pre-0.6.1 config.toml (never automatic)
 ```
 
 You name the account up front because it keys the directory, and that directory has to exist and be linked *before* claude runs. cswap checks that the account which arrives is the one you asked for, and refuses to file one account's tokens under another's name.
@@ -163,7 +167,13 @@ One profile per account. `default` appears nowhere in this file and never can �
 
 ### Migrating
 
-The first 0.6.1 run rewrites the config in place and says what it did:
+Run `cswap migrate`. Nothing migrates on its own — other commands only tell you
+it is pending. Until 0.6.2 the migration ran before the arguments were parsed,
+so `cswap --version` rewrote the config and renamed profile directories, which
+is capable of stranding a live session's data. `cswap migrate` refuses to move
+a directory that has a claude process attached to it.
+
+What it does, and says:
 
 - `[[account]]` becomes `[[profile]]`. Both were already keyed by email, so **no directory moves** and `CSWAP_ACTIVE` in open terminals keeps working.
 - The `accounts/` credential store moves to `accounts.pre-0.6.bak`. **Nothing is copied out of it into a profile** — that would give one account two token families. A profile that only ever lived in the store (typically the one that was your live login) comes out with no credentials, and cswap tells you to run `cswap login <email>`.
@@ -176,7 +186,9 @@ The first 0.6.1 run rewrites the config in place and says what it did:
 - **Parallel profiles:** activate different profiles in different terminals and run them simultaneously. Separate config dirs; shared history via symlinks.
 - **Trust & MCP carry-over:** a new profile seeds `mcpServers` and per-project trust (`projects` key) from your live `~/.claude.json` once at creation, so you don't re-approve every repo. After that the copies evolve independently. No identity is copied — claude records that itself when the profile's own login completes.
 - **`cswap activate` is per shell, but an IDE may clone it.** VS Code applies a stored environment to every terminal it opens, so an export can outlive the shell you made it in. `cswap activate default` clears one terminal; reloading the window clears the rest.
-- **Token refresh:** before launching a profile, cswap refreshes its OAuth token if it expires within 5 minutes and persists the rotation. `default` is never refreshed by cswap — that's Claude's job.
+- **Token refresh:** before launching a profile, cswap refreshes its OAuth token if it expires within 5 minutes and persists the rotation. `default` is never refreshed by cswap — that's Claude's job. A rejected refresh (`invalid_grant`) is reported as terminal — that token family is dead and the account has to log in again — and usage failures carry their HTTP status, so a 401 reads differently from a 429.
+- **Shadowed shares:** if a real file or directory ends up where a share link belongs, claude writes into it and the data is invisible to `~/.claude` and to every other profile. cswap never clobbers such a file, but it now reports it on every launch and in `cswap doctor`. `cswap doctor --repair` moves it into `~/.local/share/cswap/shadowed/` and restores the link; it never merges into `~/.claude` and never deletes anything. Links are replaced atomically, so the window that creates this in the first place is gone.
+- **Live sessions are respected:** `cswap migrate`, `cswap remove` and `cswap doctor --repair` refuse to touch a profile that has a running claude (detected via `/proc` on Linux). Rearranging a directory under a live session is how transcripts get stranded.
 - **Windows:** not supported (symlink + exec semantics differ). WSL works fully.
 
 ## Development
@@ -199,8 +211,8 @@ Releases are built by CI from version tags on `main`:
 # 1. bump version in Cargo.toml (on dev), PR into main
 # 2. tag the merge commit on main:
 git checkout main && git pull
-git tag v0.6.1
-git push origin v0.6.1
+git tag v0.6.2
+git push origin v0.6.2
 ```
 
 The `Release` workflow builds static binaries for Linux (x86_64/aarch64 musl) and macOS (x86_64/aarch64), and publishes them to GitHub Releases with SHA-256 checksums and auto-generated notes.

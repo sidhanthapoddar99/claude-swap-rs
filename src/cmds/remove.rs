@@ -27,7 +27,24 @@ pub fn run(key: Option<String>, yes: bool) -> Result<()> {
         None => interactive::pick_profile(&cfg, "Remove which profile?")?.clone(),
     };
 
-    let has_creds = profile::creds_path(&prof.email).exists();
+    // Deleting the directory under a running claude leaves that process writing
+    // to paths nothing else can resolve, and it loses the session when it exits.
+    let sessions = profile::live_sessions(&crate::paths::profile_dir(&prof.email));
+    if !sessions.is_empty() {
+        bail!(
+            "claude is running as {} (pid {}) — exit it first.\n\
+             Removing the directory underneath a live session strands whatever it \
+             is still writing.",
+            prof.email,
+            sessions
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    let has_creds = profile::has_login(&prof.email);
     if !yes {
         let warning = if has_creds {
             " Its login is stored only here, so you will have to log in again"

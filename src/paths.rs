@@ -72,3 +72,13 @@ pub fn profile_dir(email: &str) -> PathBuf {
 pub fn legacy_accounts_dir() -> PathBuf {
     data_dir().join("accounts")
 }
+
+/// Where `cswap doctor --repair` parks a directory that was shadowing a share
+/// link, so the link can be restored without destroying what claude wrote.
+///
+/// Deliberately under cswap's own data dir. Repair does NOT merge the files
+/// back into ~/.claude: that would break the one rule the whole design rests
+/// on. It parks them, restores the link, and prints what to merge by hand.
+pub fn shadowed_dir(email: &str) -> PathBuf {
+    data_dir().join("shadowed").join(email)
+}

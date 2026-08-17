@@ -72,6 +72,10 @@ pub fn print_table(quick: bool) -> Result<()> {
         let alias_cell = ui::pad(&aliases, &ui::paint(color, DIM, &aliases), w_alias);
         let usage = if quick {
             String::new()
+        } else if !crate::profile::has_login(&p.email) {
+            // No token, so no call: the endpoint budgets requests per token and
+            // "not logged in" is the answer anyway.
+            ui::paint(color, DIM, "not logged in")
         } else {
             gates(&Target::Profile(p.clone()), color)
         };

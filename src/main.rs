@@ -49,6 +49,10 @@ Limits:
   usage       Detailed per-profile usage with bars and reset times
   watch       Live usage dashboard (redraws every INTERVAL seconds)
 
+Maintenance:
+  doctor      Check profiles for silent breakage (--repair to fix)
+  migrate     Rewrite a pre-0.6.1 config.toml
+
 Options:
 {options}
 {after-help}",
@@ -257,6 +261,43 @@ EXAMPLES:\n  cswap watch\n  cswap watch -i 120"
         interval: u64,
     },
 
+    // ------------------------------------------------------------ Maintenance
+    /// Check every profile for the failures that are otherwise silent
+    #[command(
+        long_about = "Report what is wrong with each profile, and fix what is safely\n\
+fixable.\n\n\
+The failure that matters: a REAL file or directory sitting where a share link\n\
+belongs. Claude writes into it and the data is invisible to ~/.claude and to\n\
+every other profile — no error, nothing in the logs, until a transcript you\n\
+expected is not there. cswap refuses to clobber such a file (the copy inside\n\
+may be the only one), so reporting it is the whole job.\n\n\
+--repair moves the shadowing entry into ~/.local/share/cswap/shadowed/ and\n\
+restores the link. It never merges into ~/.claude and never deletes anything;\n\
+it prints where it parked the files so you can merge them yourself. It refuses\n\
+to touch a profile that has a claude session running.\n\n\
+EXAMPLES:\n  cswap doctor\n  cswap doctor --repair"
+    )]
+    Doctor {
+        /// Park shadowing files in cswap's own space and restore the links
+        #[arg(long)]
+        repair: bool,
+    },
+
+    /// Rewrite a pre-0.6.1 config.toml to the current format
+    #[command(long_about = "Convert an old config in place: `[[account]]` becomes\n\
+`[[profile]]`, a 0.6.0 `name` folds into the alias list, and the old\n\
+accounts/ credential store moves aside (nothing is copied out of it — two\n\
+copies of one refresh-token family is what kills an account).\n\n\
+Nothing migrates automatically. Until 0.6.2 this ran before the arguments were\n\
+parsed, so `cswap --version` rewrote the config and renamed directories,\n\
+including under live claude sessions.\n\n\
+EXAMPLES:\n  cswap migrate\n  cswap migrate --yes")]
+    Migrate {
+        /// Skip the confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Internal: what the claude() shell wrapper calls
     #[command(name = "_claude", hide = true)]
     ClaudeShim {
@@ -279,10 +320,14 @@ enum AliasCmd {
 }
 
 fn main() {
-    if let Err(e) = config::migrate_on_disk() {
-        eprintln!("cswap: config migration failed: {e:#}");
-    }
+    // Parse FIRST. Nothing mutates state before clap has seen the arguments —
+    // `cswap --version` used to run the config migration, which rewrote
+    // config.toml and renamed profile directories as a side effect of asking
+    // for a version number. Migration is now `cswap migrate`, and nothing else.
     let cli = Cli::parse();
+    if !matches!(cli.cmd, Cmd::Migrate { .. }) && config::needs_migration() {
+        eprintln!("cswap: config.toml uses a pre-0.6.1 shape. Run `cswap migrate` to update it.");
+    }
     let result = match cli.cmd {
         Cmd::Login { key, alias, yes } => cmds::login::run(key, alias, yes),
         Cmd::Activate { key, print } => cmds::activate::run(key, print),
@@ -299,6 +344,8 @@ fn main() {
             AliasCmd::Remove { alias } => cmds::alias::remove(alias),
         },
         Cmd::Remove { key, yes } => cmds::remove::run(key, yes),
+        Cmd::Doctor { repair } => cmds::doctor::run(repair),
+        Cmd::Migrate { yes } => cmds::migrate::run(yes),
         Cmd::ClaudeShim { args } => cmds::run::shim(args),
     };
     if let Err(e) = result {
