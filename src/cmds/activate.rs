@@ -1,14 +1,14 @@
-//! `cswap activate [ALIAS|EMAIL]` — per-terminal account selection.
+//! `cswap activate [NAME|default]` — per-terminal target selection.
 //!
-//! With no argument on a terminal, an interactive menu picks the account
-//! (with a "back to default" choice). The real work happens in the shell
-//! function installed by `cswap shell-init`: it calls `--print` and evals
-//! the export line from stdout; menus/feedback render on stderr.
+//! With no argument on a terminal, an interactive menu picks between `default`
+//! and the profiles. The real work happens in the shell function installed by
+//! `cswap shell-init`: it calls `--print` and evals the export line from
+//! stdout; menus/feedback render on stderr.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-use crate::config::Config;
-use crate::interactive;
+use crate::config::{Config, Target};
+use crate::{interactive, profile};
 
 pub fn run(key: Option<String>, print: bool) -> Result<()> {
     if !print {
@@ -27,33 +27,30 @@ pub fn run(key: Option<String>, print: bool) -> Result<()> {
     }
     let cfg = Config::load()?;
     // Pre-0.5.1 shell wrappers passed "${2:-}" — an EMPTY string when no
-    // account was given — which made the picker branch unreachable. Treat
+    // target was given — which made the picker branch unreachable. Treat
     // empty as absent so old snippets still sourced in open shells work.
     let target = match key.as_deref().filter(|k| !k.is_empty()) {
-        Some("default") | Some("off") => None,
-        Some(k) => Some(
-            cfg.find(k)
-                .with_context(|| format!("no account '{k}' (see `cswap list --quick`)"))?,
-        ),
-        None if interactive::on_tty() => interactive::pick_account(
-            &cfg,
-            "Activate which account (this shell)?",
-            &["(back to default)"],
-        )?,
-        None => None, // non-interactive bare activate keeps meaning "default"
+        Some(k) => cfg.resolve_key(k)?,
+        None if interactive::on_tty() => {
+            interactive::pick_target(&cfg, "Activate which profile (this shell)?")?
+        }
+        None => Target::Default, // non-interactive bare activate means "default"
     };
     match target {
-        Some(a) => {
-            println!("export CSWAP_ACTIVE='{}'", a.email);
+        Target::Profile(p) => {
+            // Export the EMAIL: it is the stable key, so the export keeps
+            // working if the alias is renamed or removed later.
+            println!("export CSWAP_ACTIVE='{}'", p.email);
             eprintln!(
                 "cswap: active → {} ({}) [this shell only]",
-                a.label(),
-                a.email
+                p.label(),
+                p.email
             );
         }
-        None => {
+        Target::Default => {
             println!("unset CSWAP_ACTIVE");
-            eprintln!("cswap: back to the default account");
+            let who = profile::live_email().unwrap_or_else(|| "nobody logged in".to_string());
+            eprintln!("cswap: back to default ({who}) [live ~/.claude]");
         }
     }
     Ok(())

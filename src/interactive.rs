@@ -1,4 +1,4 @@
-//! Interactive pickers — used whenever a command that needs an account (or
+//! Interactive pickers — used whenever a command that needs a target (or
 //! alias) is invoked without one on a real terminal. All prompts render on
 //! stderr so stdout stays clean for eval'd output (activate --print).
 
@@ -6,44 +6,58 @@ use anyhow::{bail, Context, Result};
 use dialoguer::console::Term;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
-use crate::config::{Account, Config};
+use crate::config::{Config, Profile, Target};
+use crate::profile;
 
 pub fn on_tty() -> bool {
     Term::stderr().is_term()
 }
 
-/// Arrow-key menu over all accounts. `extra` adds trailing non-account
-/// choices (e.g. "(back to default)"); returns None when one of those wins.
-pub fn pick_account<'a>(
-    cfg: &'a Config,
-    prompt: &str,
-    extra: &[&str],
-) -> Result<Option<&'a Account>> {
-    if cfg.accounts.is_empty() {
-        bail!("no accounts yet — run `cswap login` first");
+fn describe(p: &Profile) -> String {
+    if p.aliases.is_empty() {
+        p.email.clone()
+    } else {
+        format!("{}  ({})", p.label(), p.email)
     }
+}
+
+/// Arrow-key menu over `default` and every profile.
+pub fn pick_target(cfg: &Config, prompt: &str) -> Result<Target> {
     if !on_tty() {
-        bail!("not a terminal — pass an alias or email (see `cswap list --quick`)");
+        bail!("not a terminal — pass a profile or `default` (see `cswap list --quick`)");
     }
-    let mut items: Vec<String> = cfg
-        .accounts
-        .iter()
-        .map(|a| {
-            if a.aliases.is_empty() {
-                a.email.clone()
-            } else {
-                format!("{}  ({})", a.label(), a.email)
-            }
-        })
-        .collect();
-    items.extend(extra.iter().map(|s| s.to_string()));
+    let who = profile::live_email().unwrap_or_else(|| "nobody logged in".to_string());
+    let mut items = vec![format!("default  ({who})  [live ~/.claude]")];
+    items.extend(cfg.profiles.iter().map(describe));
     let idx = Select::with_theme(&ColorfulTheme::default())
         .with_prompt(prompt)
         .items(&items)
         .default(0)
         .interact_on(&Term::stderr())
         .context("selection cancelled")?;
-    Ok(cfg.accounts.get(idx))
+    Ok(match idx {
+        0 => Target::Default,
+        n => Target::Profile(cfg.profiles[n - 1].clone()),
+    })
+}
+
+/// Arrow-key menu over profiles only — for commands that cannot act on the
+/// default, because cswap owns no state for it (remove, alias).
+pub fn pick_profile<'a>(cfg: &'a Config, prompt: &str) -> Result<&'a Profile> {
+    if cfg.profiles.is_empty() {
+        bail!("no profiles yet — run `cswap login <email>` first");
+    }
+    if !on_tty() {
+        bail!("not a terminal — pass a profile (see `cswap list --quick`)");
+    }
+    let items: Vec<String> = cfg.profiles.iter().map(describe).collect();
+    let idx = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .items(&items)
+        .default(0)
+        .interact_on(&Term::stderr())
+        .context("selection cancelled")?;
+    Ok(&cfg.profiles[idx])
 }
 
 pub fn pick_string(items: &[String], prompt: &str) -> Result<usize> {
@@ -80,20 +94,6 @@ pub fn input_optional(prompt: &str) -> Result<Option<String>> {
         .context("input cancelled")?;
     let text = text.trim().to_string();
     Ok(if text.is_empty() { None } else { Some(text) })
-}
-
-/// Require the user to literally type `word` (case-insensitive) to proceed —
-/// a heavier gate than y/n for irreversible actions. Anything else = no.
-pub fn type_to_confirm(prompt: &str, word: &str) -> Result<bool> {
-    if !on_tty() {
-        bail!("not a terminal — pass --yes to confirm non-interactively");
-    }
-    let ans = Input::<String>::with_theme(&ColorfulTheme::default())
-        .with_prompt(prompt)
-        .allow_empty(true)
-        .interact_text_on(&Term::stderr())
-        .context("confirmation cancelled")?;
-    Ok(ans.trim().eq_ignore_ascii_case(word))
 }
 
 pub fn confirm(prompt: &str) -> Result<bool> {

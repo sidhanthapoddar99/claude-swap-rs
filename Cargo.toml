@@ -1,8 +1,8 @@
 [package]
 name = "claude-swap-rs"
-version = "0.5.1"
+version = "0.6.1"
 edition = "2021"
-description = "Fast multi-account switcher for Claude Code: named profiles, per-terminal activation, shared history"
+description = "Fast multi-profile switcher for Claude Code: independent named profiles, per-terminal activation, shared history"
 license = "MIT"
 repository = "https://github.com/sidhanthapoddar99/claude-swap-rs"
 

@@ -46,7 +46,7 @@ pub fn run(interval: u64) -> Result<()> {
         );
         println!();
         match Config::load() {
-            Ok(cfg) if cfg.accounts.is_empty() => println!("No accounts yet. Run: cswap login"),
+            // The default always has a card, so render even with no profiles.
             Ok(cfg) => usage::render(&cfg, None),
             Err(e) => println!("error: {e:#}"),
         }

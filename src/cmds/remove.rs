@@ -1,65 +1,60 @@
-//! `cswap remove [ALIAS|EMAIL]` — forget a registered profile.
+//! `cswap remove [NAME]` — forget a profile.
 //!
-//! Interactive account picker when no argument is given; always ends with a
-//! confirmation (or `--yes` for scripts). Deletes the config entry, stored
-//! tokens, and the profile dir. The profile contains symlinks into ~/.claude;
-//! `remove_dir_all` removes symlinks WITHOUT following them, so the user's
-//! real Claude data is never touched.
+//! Interactive profile picker when no argument is given; always ends with a
+//! confirmation (or `--yes` for scripts). Deletes the config entry and the
+//! profile directory, which holds that profile's only credentials. The
+//! directory is mostly symlinks into ~/.claude; `remove_dir_all` removes
+//! symlinks WITHOUT following them, so the user's real Claude data is safe.
+//!
+//! `default` cannot be removed: cswap owns no state for it.
 
 use anyhow::{bail, Context, Result};
-use std::fs;
 
 use crate::config::Config;
-use crate::interactive;
-use crate::paths;
+use crate::{interactive, profile};
 
 pub fn run(key: Option<String>, yes: bool) -> Result<()> {
     let mut cfg = Config::load()?;
-    let acct = match key {
+    let prof = match key {
+        Some(k) if crate::config::is_default_key(&k) => bail!(
+            "`default` is the live ~/.claude, not a cswap profile — there is nothing to remove.\n\
+             To log out of it, use claude itself: `command claude` then /logout."
+        ),
         Some(k) => cfg
             .find(&k)
-            .with_context(|| format!("no account '{k}' (see `cswap list --quick`)"))?
+            .with_context(|| format!("no profile '{k}' (see `cswap list --quick`)"))?
             .clone(),
-        None => interactive::pick_account(&cfg, "Remove which account?", &[])?
-            .expect("no extra items")
-            .clone(),
+        None => interactive::pick_profile(&cfg, "Remove which profile?")?.clone(),
     };
 
+    let has_creds = profile::creds_path(&prof.email).exists();
     if !yes {
+        let warning = if has_creds {
+            " Its login is stored only here, so you will have to log in again"
+        } else {
+            ""
+        };
         let ok = interactive::confirm(&format!(
-            "Remove {} ({})? Stored tokens and the profile dir will be deleted \
-             (your ~/.claude data is untouched)",
-            acct.label(),
-            acct.email
+            "Remove the profile for {}?{warning}. Your ~/.claude data is untouched",
+            prof.email
         ))?;
         if !ok {
             bail!("aborted — nothing removed");
         }
     }
 
-    cfg.accounts.retain(|a| a.email != acct.email);
+    cfg.profiles.retain(|p| p.email != prof.email);
     cfg.save()?;
+    crate::cmds::login::remove_dir(&prof.email)?;
 
-    for path in [
-        paths::store_creds(&acct.email),
-        paths::store_meta(&acct.email),
-    ] {
-        let _ = fs::remove_file(path);
-    }
-    let profile = paths::profile_dir(&acct.email);
-    if profile.exists() {
-        fs::remove_dir_all(&profile)
-            .with_context(|| format!("failed to remove {}", profile.display()))?;
-    }
-
-    println!("Removed {} ({})", acct.label(), acct.email);
-    // Forgetting a profile never changes the default — the default is the live
-    // ~/.claude login, which this command doesn't touch. Flag the overlap
-    // though: the removed account may still be the one bare `claude` uses.
-    if crate::profile::live_email().as_deref() == Some(acct.email.as_str()) {
+    println!("Removed the profile for {}", prof.email);
+    // The default is a separate entity, so removing a profile never changes it
+    // — not even when both held the same account.
+    if profile::live_email().as_deref() == Some(prof.email.as_str()) {
         println!(
-            "note: {} is still the live ~/.claude login (the default) — it just isn't registered anymore.",
-            acct.email
+            "note: {} is still the default (~/.claude). That login was always separate \
+             and is unaffected.",
+            prof.email
         );
     }
     Ok(())

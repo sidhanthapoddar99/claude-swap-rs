@@ -1,22 +1,21 @@
 //! `cswap run [NAME] [CLAUDE_ARGS]...` and the hidden `_claude` shim.
 //!
-//! Resolves the account (explicit name > $CSWAP_ACTIVE > default), makes the
+//! Resolves the target (explicit name > $CSWAP_ACTIVE > `default`), makes the
 //! profile launch-ready, then **exec**s the real claude binary with
 //! CLAUDE_CONFIG_DIR pointing at the profile — zero wrapper overhead, native
 //! signal handling and exit codes.
 //!
-//! Live passthrough: the account whose email matches the identity currently
-//! logged into ~/.claude runs against ~/.claude itself (no CLAUDE_CONFIG_DIR,
-//! no token handling by cswap). One credential copy means cswap can never
-//! rotate the refresh-token family out from under the live login the VS Code
-//! extension and bare `command claude` depend on.
+//! `default` runs against ~/.claude itself: no CLAUDE_CONFIG_DIR, no profile,
+//! no token handling by cswap. It is reached by selecting it, never by matching
+//! emails — a profile that happens to hold the same account as the live login
+//! still runs from its own directory with its own tokens.
 
 use anyhow::{bail, Context, Result};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::config::Config;
+use crate::config::{Config, Target};
 use crate::profile;
 
 /// Env vars that make claude bypass account OAuth entirely — scrubbed so a
@@ -27,57 +26,59 @@ pub const SCRUBBED: &[&str] = &[
     "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
 ];
 
-/// `cswap run`: first arg is an account (alias|email) if it matches one,
-/// otherwise every arg passes to claude and the active/default account is
-/// used. With no args at all on a terminal, an interactive picker asks.
+/// `cswap run`: the first arg is a target (name|alias|`default`) if it matches
+/// one, otherwise every arg passes to claude and the active target is used.
+/// With no args at all on a terminal, an interactive picker asks.
 pub fn run(mut args: Vec<String>) -> Result<()> {
     let cfg = Config::load()?;
-    let acct = match args.first() {
-        Some(first) if cfg.find(first).is_some() => {
-            let acct = cfg.find(first).expect("just checked").clone();
+    let target = match args.first() {
+        Some(first) if is_target(&cfg, first) => {
+            let target = cfg.resolve_key(first)?;
             args.remove(0);
-            acct
+            target
         }
-        None if crate::interactive::on_tty() && !cfg.accounts.is_empty() => {
-            crate::interactive::pick_account(&cfg, "Run claude as which account?", &[])?
-                .expect("no extra items")
-                .clone()
+        None if crate::interactive::on_tty() => {
+            crate::interactive::pick_target(&cfg, "Run claude as which profile?")?
         }
         _ => cfg.resolve_active()?,
     };
-    launch(&acct, &args, true)
+    launch(&target, &args, true)
 }
 
 /// Hidden `_claude` shim used by the shell-init `claude()` wrapper: args pass
-/// through verbatim (never interpreted as an account name). Quiet — a bare
-/// `claude` should feel exactly like claude.
+/// through verbatim (never interpreted as a target). Quiet — a bare `claude`
+/// should feel exactly like claude.
 pub fn shim(args: Vec<String>) -> Result<()> {
     let cfg = Config::load()?;
-    let acct = cfg.resolve_active()?;
-    launch(&acct, &args, false)
+    let target = cfg.resolve_active()?;
+    launch(&target, &args, false)
 }
 
-fn launch(acct: &crate::config::Account, args: &[String], announce: bool) -> Result<()> {
-    let config_dir = if profile::live_email().as_deref() == Some(acct.email.as_str()) {
-        if announce {
-            eprintln!(
-                "cswap: running claude as {} ({}) [live ~/.claude]",
-                acct.label(),
-                acct.email
-            );
+fn is_target(cfg: &Config, key: &str) -> bool {
+    crate::config::is_default_key(key) || cfg.find(key).is_some()
+}
+
+fn launch(target: &Target, args: &[String], announce: bool) -> Result<()> {
+    let config_dir = match target {
+        Target::Default => {
+            if announce {
+                let who = profile::live_email().unwrap_or_else(|| "nobody logged in".to_string());
+                eprintln!("cswap: running claude as default ({who}) [live ~/.claude]");
+            }
+            None
         }
-        None
-    } else {
-        let dir = profile::ensure(acct)?;
-        if announce {
-            eprintln!("cswap: running claude as {} ({})", acct.label(), acct.email);
+        Target::Profile(p) => {
+            let dir = profile::ensure(p)?;
+            if announce {
+                eprintln!("cswap: running claude as {} ({})", p.label(), p.email);
+            }
+            Some(dir)
         }
-        Some(dir)
     };
     exec_claude(config_dir, args)
 }
 
-fn exec_claude(config_dir: Option<PathBuf>, args: &[String]) -> Result<()> {
+pub fn exec_claude(config_dir: Option<PathBuf>, args: &[String]) -> Result<()> {
     let claude = find_claude()?;
     let mut cmd = Command::new(&claude);
     cmd.args(args);
@@ -88,8 +89,8 @@ fn exec_claude(config_dir: Option<PathBuf>, args: &[String]) -> Result<()> {
         Some(dir) => {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
-        // Live passthrough: make sure a preset CLAUDE_CONFIG_DIR from the
-        // environment can't redirect what "the live account" means.
+        // default: make sure a preset CLAUDE_CONFIG_DIR from the environment
+        // can't redirect what "the live ~/.claude" means.
         None => {
             cmd.env_remove("CLAUDE_CONFIG_DIR");
         }

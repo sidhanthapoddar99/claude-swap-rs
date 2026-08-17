@@ -1,14 +1,21 @@
-//! Per-account profile directories (the CLAUDE_CONFIG_DIR targets).
+//! Profile directories (the CLAUDE_CONFIG_DIR targets).
 //!
 //! A profile is ~/.claude wearing a different identity card:
-//!   .credentials.json   real file — this account's tokens (0600)
+//!   .credentials.json   real file — THIS profile's tokens, the only copy (0600)
 //!   .claude.json        real file — oauthAccount + onboarding seed (0600)
+//!   <DENYLIST>          never linked — see the constant below
 //!   <everything else>   symlink into ~/.claude, auto-discovered per launch
 //!
-//! Safety contract: this module writes into ~/.claude / ~/.claude.json from
-//! exactly ONE function — `promote_to_live`, reached only by an explicit
-//! `cswap default <x>`. Everything else reads them; all other writes land
-//! under ~/.local/share/cswap/.
+//! Safety contract: cswap never writes into ~/.claude or ~/.claude.json. The
+//! live directory is the `default` entity and it is read-only to us — we read
+//! it to report who is logged in, to seed a new profile's theme and trust, and
+//! to mirror it as symlinks. Every cswap write lands under
+//! ~/.local/share/cswap/ or ~/.config/cswap/.
+//!
+//! Nothing here compares a profile against the live login. The default may
+//! hold the same account as a profile — it is the only thing allowed to — and
+//! each keeps its own token family, which is only true as long as no code path
+//! copies credentials between them.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -16,26 +23,55 @@ use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::config::Account;
+use crate::config::Profile;
 use crate::{oauth, paths};
 
-/// Never linked — identity stays per-profile. (.claude.json lives in $HOME,
-/// not inside ~/.claude, so it never appears in the scan at all.)
-const DENYLIST: &[&str] = &[".credentials.json"];
+/// Never linked. (.claude.json lives in $HOME, not inside ~/.claude, so it
+/// never appears in the scan at all.)
+///
+///   .credentials.json  identity — this profile's own tokens.
+///   backups            holds `.claude.json.backup.<ms>` snapshots. `.claude.json`
+///                      is per-profile, so its backups must be too: a shared
+///                      directory keyed only by timestamp lets a profile restore
+///                      the LIVE account's identity file.
+///   .git               the user may version-control ~/.claude. A linked `.git`
+///                      makes git treat the PROFILE as that repo's working tree,
+///                      so every real file reads as deleted or type-changed. One
+///                      `git add -A` inside the profile rewrites ~/.claude's
+///                      tracked tree; one `git checkout` materialises real files
+///                      that then permanently shadow the share links.
+const DENYLIST: &[&str] = &[".credentials.json", "backups", ".git"];
 
 /// Keys copied once from the live ~/.claude.json into a fresh profile's
 /// .claude.json: user-scope MCP servers and per-project trust/allowlists.
+/// Convenience only — none of this is a credential.
 const SEEDED_KEYS: &[&str] = &["mcpServers", "projects"];
 
 /// Email of the identity currently logged into the live ~/.claude, if any.
-/// Accounts matching it run via passthrough (no profile, no token handling)
-/// so cswap can never rotate the live login's refresh-token family.
+/// Display only: this answers "who is `default`", and nothing branches on it.
 pub fn live_email() -> Option<String> {
     let live: Value = serde_json::from_str(&fs::read_to_string(paths::claude_json()).ok()?).ok()?;
     live.get("oauthAccount")?
         .get("emailAddress")?
         .as_str()
         .map(String::from)
+}
+
+/// The live ~/.claude token, read as-is. Never refreshed: rotating the live
+/// login's token family is claude's job, not ours.
+pub fn live_creds() -> Result<Value> {
+    let text = fs::read_to_string(paths::live_credentials())
+        .context("no live ~/.claude login — run `claude` and log in")?;
+    let creds: Value = serde_json::from_str(&text).context("malformed ~/.claude credentials")?;
+    let fresh = creds
+        .get("claudeAiOauth")
+        .and_then(|o| o.get("expiresAt"))
+        .and_then(Value::as_i64)
+        .is_some_and(|t| t > oauth::now_ms());
+    if !fresh {
+        anyhow::bail!("live token expired — run claude once to refresh");
+    }
+    Ok(creds)
 }
 
 pub fn write_private(path: &Path, contents: &str) -> Result<()> {
@@ -47,140 +83,100 @@ pub fn write_private(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Load this account's current credentials (profile copy if the profile
-/// exists — it is the live store — else the login-time backup), refresh the
-/// token if it is about to expire, and persist any rotation everywhere.
-pub fn current_creds(acct: &Account) -> Result<Value> {
-    let profile_creds = paths::profile_dir(&acct.email).join(".credentials.json");
-    let store = paths::store_creds(&acct.email);
-    let source = if profile_creds.exists() {
-        &profile_creds
-    } else {
-        &store
-    };
-    let text = fs::read_to_string(source).with_context(|| {
+pub fn creds_path(email: &str) -> PathBuf {
+    paths::profile_dir(email).join(".credentials.json")
+}
+
+/// Re-assert 0600 on the profile's two identity files.
+///
+/// claude writes both itself during a login, and it replaces `.claude.json` by
+/// rename — so whatever mode cswap set when seeding is gone and the result
+/// follows claude's umask. `.credentials.json` is now the only copy of this
+/// profile's tokens, so its mode is not something to inherit from elsewhere.
+pub fn harden_identity(email: &str) -> Result<()> {
+    let dir = paths::profile_dir(email);
+    for file in [".credentials.json", ".claude.json"] {
+        let path = dir.join(file);
+        if path.exists() {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("failed to secure {}", path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Load this profile's credentials, refresh the token if it is about to expire,
+/// and persist any rotation. The profile directory holds the only copy, so
+/// there is nowhere else to write it back to.
+pub fn current_creds(prof: &Profile) -> Result<Value> {
+    let path = creds_path(&prof.email);
+    let text = fs::read_to_string(&path).with_context(|| {
         format!(
-            "no stored credentials for '{}' — log in with `claude`, then run `cswap login`",
-            acct.email
+            "profile {} has no login yet — run `cswap login {}`",
+            prof.email, prof.email
         )
     })?;
     let mut creds: Value = serde_json::from_str(&text)
-        .with_context(|| format!("malformed credentials: {}", source.display()))?;
+        .with_context(|| format!("malformed credentials: {}", path.display()))?;
     if oauth::refresh_if_needed(&mut creds, oauth::REFRESH_MARGIN_MS)? {
-        let serialized = serde_json::to_string(&creds)?;
-        write_private(&store, &serialized)?;
-        if profile_creds.exists() {
-            write_private(&profile_creds, &serialized)?;
-        }
+        write_private(&path, &serde_json::to_string(&creds)?)?;
     }
     Ok(creds)
 }
 
-/// Snapshot the live ~/.claude credentials into `email`'s store (and profile
-/// copy, if one exists). Used before a `cswap default` swap displaces a
-/// registered live login: claude rotates refresh tokens in ~/.claude while an
-/// account is live, so the login-time store copy may be a dead ancestor —
-/// the live file holds the only guaranteed-fresh tokens.
-pub fn capture_live_into_store(email: &str) -> Result<()> {
-    let text = fs::read_to_string(paths::live_credentials())
-        .context("cannot read the live ~/.claude credentials")?;
-    write_private(&paths::store_creds(email), &text)?;
-    let profile_creds = paths::profile_dir(email).join(".credentials.json");
-    if profile_creds.exists() {
-        write_private(&profile_creds, &text)?;
-    }
-    Ok(())
-}
-
-/// Swap the live ~/.claude login to `acct` — make it the default.
-///
-/// THE ONLY place cswap writes into ~/.claude, reached solely from an explicit
-/// `cswap default <x>`. Copies the account's freshly-refreshed credentials into
-/// ~/.claude/.credentials.json and rewrites ~/.claude.json's `oauthAccount` so
-/// bare `claude`, the VS Code extension, and `live_email()` all see the new
-/// identity. Every other key in ~/.claude.json is preserved.
-pub fn promote_to_live(acct: &Account) -> Result<()> {
-    let creds = current_creds(acct)?; // refresh + persist to the store/profile
-    write_private(&paths::live_credentials(), &serde_json::to_string(&creds)?)?;
-
-    let meta: Value = fs::read_to_string(paths::store_meta(&acct.email))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| json!({}));
-    let oa = meta
-        .get("oauthAccount")
-        .cloned()
-        .unwrap_or_else(|| json!({ "emailAddress": acct.email }));
-
-    let path = paths::claude_json();
-    let mut live: Value = fs::read_to_string(&path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| json!({}));
-    live["oauthAccount"] = oa;
-    // ~/.claude.json is not a secret file (it holds no tokens) — keep its
-    // normal perms rather than forcing 0600 like the credential stores.
-    fs::write(&path, serde_json::to_string_pretty(&live)?)
-        .with_context(|| format!("failed to update {}", path.display()))?;
-    Ok(())
-}
-
-/// Make the profile launch-ready and return its path.
-pub fn ensure(acct: &Account) -> Result<PathBuf> {
-    let dir = paths::profile_dir(&acct.email);
+/// Create the profile directory and its share links, without requiring a
+/// login. This is what `cswap login` prepares before handing the directory to
+/// claude: the links must exist BEFORE claude runs, or claude creates real
+/// directories that then permanently shadow them.
+pub fn scaffold(prof: &Profile) -> Result<PathBuf> {
+    let dir = paths::profile_dir(&prof.email);
     fs::create_dir_all(&dir)?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-
-    // Credentials: seed from the store on first run; afterwards the profile
-    // copy is the source of truth (Claude rotates tokens in place there).
-    let creds_path = dir.join(".credentials.json");
-    if !creds_path.exists() {
-        let stored = fs::read_to_string(paths::store_creds(&acct.email)).with_context(|| {
-            format!(
-                "no stored credentials for '{}' — log in with `claude`, then run `cswap login`",
-                acct.email
-            )
-        })?;
-        write_private(&creds_path, &stored)?;
-    }
-    let creds = current_creds(acct)?; // refreshes + persists if stale
-                                      // current_creds may have refreshed only the store if it raced dir creation;
-                                      // make sure the profile copy is what we resolved.
-    write_private(&creds_path, &serde_json::to_string(&creds)?)?;
-
     let claude_json = dir.join(".claude.json");
     if !claude_json.exists() {
-        seed_claude_json(&claude_json, acct)?;
+        seed_claude_json(&claude_json)?;
     }
-
     sync_links(&dir)?;
     Ok(dir)
 }
 
-/// First-launch .claude.json: identity + the two keys that skip onboarding
-/// (`theme` is load-bearing: Claude shows the wizard when theme or
-/// hasCompletedOnboarding is missing), plus one-time copies of user-scope
-/// MCP servers and per-project trust from the live config.
-fn seed_claude_json(path: &Path, acct: &Account) -> Result<()> {
-    let meta: Value = fs::read_to_string(paths::store_meta(&acct.email))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| json!({}));
+/// Make the profile launch-ready and return its path. Fails when the profile
+/// has never completed a login — there is no store to fall back on.
+pub fn ensure(prof: &Profile) -> Result<PathBuf> {
+    let dir = scaffold(prof)?;
+    let creds = current_creds(prof)?; // refreshes + persists if stale
+    write_private(&creds_path(&prof.email), &serde_json::to_string(&creds)?)?;
+    // The previous session may have left .claude.json at claude's umask.
+    harden_identity(&prof.email)?;
+    Ok(dir)
+}
+
+/// Read the email a completed login recorded in the profile's .claude.json.
+pub fn recorded_email(email: &str) -> Option<String> {
+    let text = fs::read_to_string(paths::profile_dir(email).join(".claude.json")).ok()?;
+    let cj: Value = serde_json::from_str(&text).ok()?;
+    cj.get("oauthAccount")?
+        .get("emailAddress")?
+        .as_str()
+        .map(String::from)
+}
+
+/// First-launch .claude.json: the two keys that skip onboarding (`theme` is
+/// load-bearing: Claude shows the wizard when theme or hasCompletedOnboarding
+/// is missing), plus one-time copies of user-scope MCP servers and per-project
+/// trust from the live config.
+///
+/// No identity is written. Claude records `oauthAccount` itself when the
+/// profile's own login completes — copying it in would describe a login that
+/// this profile has not performed.
+fn seed_claude_json(path: &Path) -> Result<()> {
     let live: Value = fs::read_to_string(paths::claude_json())
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_else(|| json!({}));
 
     let mut out = json!({ "hasCompletedOnboarding": true });
-    let theme = meta
-        .get("theme")
-        .or_else(|| live.get("theme"))
-        .and_then(Value::as_str)
-        .unwrap_or("dark");
-    out["theme"] = json!(theme);
-    if let Some(oa) = meta.get("oauthAccount") {
-        out["oauthAccount"] = oa.clone();
-    }
+    out["theme"] = json!(live.get("theme").and_then(Value::as_str).unwrap_or("dark"));
     for key in SEEDED_KEYS {
         if let Some(v) = live.get(*key) {
             out[*key] = v.clone();
@@ -192,20 +188,23 @@ fn seed_claude_json(path: &Path, acct: &Account) -> Result<()> {
 /// Mirror ~/.claude into the profile as symlinks: everything except the
 /// denylist. Re-run every launch so files Claude Code invents in future
 /// versions are picked up automatically. Existing real files in the profile
-/// are left untouched; dangling links into ~/.claude are pruned.
+/// are left untouched; stale links are pruned.
 pub fn sync_links(profile: &Path) -> Result<()> {
     let src_root = paths::claude_dir();
     if !src_root.is_dir() {
         return Ok(()); // nothing to share yet
     }
 
-    // Prune dangling cswap-made links (target vanished from ~/.claude).
+    // Prune cswap-made links that should no longer exist: the target vanished
+    // from ~/.claude, or the name has since joined the denylist (so a profile
+    // built by an older cswap repairs itself). Real files are never touched.
     for entry in fs::read_dir(profile)? {
         let entry = entry?;
         let link = entry.path();
         if entry.file_type()?.is_symlink() {
             if let Ok(target) = fs::read_link(&link) {
-                if target.starts_with(&src_root) && !target.exists() {
+                let denied = DENYLIST.contains(&entry.file_name().to_string_lossy().as_ref());
+                if target.starts_with(&src_root) && (denied || !target.exists()) {
                     fs::remove_file(&link)?;
                 }
             }
