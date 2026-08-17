@@ -1,5 +1,5 @@
 //! Shared terminal rendering: color policy, severity ramp, usage bars, and
-//! the one place that fetches a window list for an account.
+//! the one place that fetches a window list for a target.
 //!
 //! The bar glyphs follow the reference project's dashboard — `━` fill, `╸`
 //! for the half cell, `─` for the untouched track — so a cswap bar reads the
@@ -9,7 +9,7 @@
 use anyhow::Result;
 use std::io::IsTerminal;
 
-use crate::config::Account;
+use crate::config::Target;
 use crate::oauth::{self, Window};
 use crate::profile;
 
@@ -76,26 +76,15 @@ pub fn bar(pct: f64, width: usize, color: bool) -> String {
     }
 }
 
-/// Every window for one account, or the reason we couldn't get them.
+/// Every window for one target, or the reason we couldn't get them.
 ///
-/// Live account: read ~/.claude's token as-is and never refresh it — rotating
-/// the live login's token family is claude's job, not ours.
-pub fn fetch_windows(acct: &Account) -> Result<Vec<Window>> {
-    let creds = if profile::live_email().as_deref() == Some(acct.email.as_str()) {
-        let text = std::fs::read_to_string(crate::paths::live_credentials())?;
-        let creds: serde_json::Value = serde_json::from_str(&text)?;
-        let fresh = creds
-            .get("claudeAiOauth")
-            .and_then(|o| o.get("expiresAt"))
-            .and_then(serde_json::Value::as_i64)
-            .map(|t| t > oauth::now_ms())
-            .unwrap_or(false);
-        if !fresh {
-            anyhow::bail!("live token expired — run claude once to refresh");
-        }
-        creds
-    } else {
-        profile::current_creds(acct)?
+/// `default` reads ~/.claude's token as-is and never refreshes it — rotating
+/// the live login's token family is claude's job, not ours. A profile reads its
+/// own token and may refresh it, whoever else happens to be logged in.
+pub fn fetch_windows(target: &Target) -> Result<Vec<Window>> {
+    let creds = match target {
+        Target::Default => profile::live_creds()?,
+        Target::Profile(p) => profile::current_creds(p)?,
     };
     let token = oauth::access_token(&creds).ok_or_else(|| anyhow::anyhow!("no access token"))?;
     Ok(oauth::windows(&oauth::fetch_usage(token)?))

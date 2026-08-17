@@ -1,22 +1,22 @@
-//! `cswap list` — the Default (live ~/.claude) on its own line, then one
-//! borderless row per registered account:
+//! `cswap list` — the default on its own line, then one borderless row per
+//! profile:
 //!
 //! ```text
-//! Default  developer@neuralabs.org   not registered   5h 12% │ 7d 30%   ● active
+//! default  developer@neuralabs.org  live ~/.claude  5h 12% │ 7d 30%   ● active
 //!
-//! STATUS  ACCOUNT               ALIAS        USAGE
-//!         devanshw09@gmail.com  wadhwani, 2  5h  3% │ 7d 12%
+//! STATUS  ACCOUNT               ALIAS     USAGE
+//!         devanshw09@gmail.com  wadhwani  5h  3% │ 7d 12%
 //! ```
 //!
-//! The default is derived, not stored: it is whoever is logged into ~/.claude.
-//! `STATUS` is `active` only for the account THIS shell activated; with nothing
-//! activated the default is what's in effect, so it carries the `● active`.
-//! One line per account: the 5h/7d gates only. `cswap usage` is the detail.
+//! The default is not a row: it owns no cswap state, so it has no profile
+//! directory and no aliases. `STATUS` is `active` only for what THIS shell
+//! activated; with nothing activated the default is in effect and carries the
+//! marker. One line per profile: the 5h/7d gates only. `cswap usage` is detail.
 
 use anyhow::Result;
 
-use crate::config::{Account, Config};
-use crate::ui::{self, DIM, RESET, YELLOW};
+use crate::config::{Config, Profile, Target};
+use crate::ui::{self, DIM, RESET};
 
 pub fn run(quick: bool) -> Result<()> {
     print_table(quick)?;
@@ -29,35 +29,35 @@ pub fn print_table(quick: bool) -> Result<()> {
     let color = ui::color_on();
     let active = active_email(&cfg);
 
-    print_default(&cfg, active.as_deref(), quick, color);
+    print_default(active.as_deref(), quick, color);
     println!();
 
-    if cfg.accounts.is_empty() {
+    if cfg.profiles.is_empty() {
         println!(
             "{}",
-            ui::paint(color, DIM, "No accounts registered. Run: cswap login")
+            ui::paint(color, DIM, "No profiles yet. Run: cswap login <email>")
         );
         return Ok(());
     }
 
-    let status_of = |acct: &Account| {
-        if active.as_deref() == Some(acct.email.as_str()) {
+    let status_of = |p: &Profile| {
+        if active.as_deref() == Some(p.email.as_str()) {
             "active".to_string()
         } else {
             String::new()
         }
     };
-    let aliases_of = |a: &Account| {
-        if a.aliases.is_empty() {
+    let aliases_of = |p: &Profile| {
+        if p.aliases.is_empty() {
             "-".to_string()
         } else {
-            a.aliases.join(", ")
+            p.aliases.join(", ")
         }
     };
 
-    let w_status = width("STATUS", cfg.accounts.iter().map(status_of));
-    let w_account = width("ACCOUNT", cfg.accounts.iter().map(|a| a.email.clone()));
-    let w_alias = width("ALIAS", cfg.accounts.iter().map(aliases_of));
+    let w_status = width("STATUS", cfg.profiles.iter().map(status_of));
+    let w_account = width("ACCOUNT", cfg.profiles.iter().map(|p| p.email.clone()));
+    let w_alias = width("ALIAS", cfg.profiles.iter().map(aliases_of));
 
     let header = format!(
         "{:<w_status$}  {:<w_account$}  {:<w_alias$}  {}",
@@ -65,19 +65,19 @@ pub fn print_table(quick: bool) -> Result<()> {
     );
     println!("{}", ui::paint(color, DIM, &header));
 
-    for acct in &cfg.accounts {
-        let status = status_of(acct);
+    for p in &cfg.profiles {
+        let status = status_of(p);
         let status_cell = ui::pad(&status, &ui::paint(color, ui::ACCENT, &status), w_status);
-        let aliases = aliases_of(acct);
+        let aliases = aliases_of(p);
         let alias_cell = ui::pad(&aliases, &ui::paint(color, DIM, &aliases), w_alias);
         let usage = if quick {
             String::new()
         } else {
-            gates(acct, color)
+            gates(&Target::Profile(p.clone()), color)
         };
         println!(
             "{status_cell}  {:<w_account$}  {alias_cell}  {usage}",
-            acct.email
+            p.email
         );
     }
     if quick {
@@ -86,9 +86,9 @@ pub fn print_table(quick: bool) -> Result<()> {
     Ok(())
 }
 
-/// The Default line: live email · registration status · usage · active marker.
-fn print_default(cfg: &Config, active: Option<&str>, quick: bool, color: bool) {
-    let label = ui::paint(color, DIM, "Default");
+/// The default line: who ~/.claude is · usage · active marker.
+fn print_default(active: Option<&str>, quick: bool, color: bool) {
+    let label = ui::paint(color, DIM, "default");
     let Some(email) = crate::profile::live_email() else {
         println!(
             "{label}  {}",
@@ -96,31 +96,33 @@ fn print_default(cfg: &Config, active: Option<&str>, quick: bool, color: bool) {
         );
         return;
     };
-    let reg = if cfg.find(&email).is_some() {
-        ui::paint(color, DIM, "registered")
-    } else {
-        ui::paint(color, YELLOW, "not registered")
-    };
     let usage = if quick {
         String::new()
     } else {
-        gates(&Account::new(email.clone()), color)
+        gates(&Target::Default, color)
     };
-    // With nothing activated, the default is the account actually in effect.
+    // With nothing activated, the default is what's actually in effect.
     let marker = if active.is_none() {
         format!("  {}", ui::paint(color, ui::ACCENT, "● active"))
     } else {
         String::new()
     };
-    println!("{label}  {email}  {reg}  {usage}{marker}");
+    println!(
+        "{label}  {email}  {}  {usage}{marker}",
+        ui::paint(color, DIM, "live ~/.claude")
+    );
 }
 
-/// Which email this shell has activated, resolved through aliases.
+/// Which account THIS shell activated, resolved through aliases. None means
+/// the default is in effect.
 pub fn active_email(cfg: &Config) -> Option<String> {
-    std::env::var("CSWAP_ACTIVE")
+    let key = std::env::var("CSWAP_ACTIVE")
         .ok()
-        .filter(|s| !s.is_empty())
-        .map(|k| cfg.find(&k).map(|a| a.email.clone()).unwrap_or(k))
+        .filter(|s| !s.is_empty())?;
+    if crate::config::is_default_key(&key) {
+        return None;
+    }
+    Some(cfg.find(&key).map(|p| p.email.clone()).unwrap_or(key))
 }
 
 fn width(header: &str, cells: impl Iterator<Item = String>) -> usize {
@@ -132,8 +134,8 @@ fn width(header: &str, cells: impl Iterator<Item = String>) -> usize {
 }
 
 /// The 5h and 7d gates on one line — per-model windows belong to `cswap usage`.
-fn gates(acct: &Account, color: bool) -> String {
-    let windows = match ui::fetch_windows(acct) {
+fn gates(target: &Target, color: bool) -> String {
+    let windows = match ui::fetch_windows(target) {
         Ok(w) => w,
         Err(e) => return ui::paint(color, DIM, &format!("unavailable ({e:#})")),
     };

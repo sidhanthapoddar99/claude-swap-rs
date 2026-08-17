@@ -118,4 +118,4 @@ else
 fi
 
 echo
-echo "Next: log into Claude Code ('claude'), then run: cswap login"
+echo "Next: create your first profile: cswap login <name>"

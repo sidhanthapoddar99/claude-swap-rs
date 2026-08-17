@@ -1,58 +1,96 @@
-//! ~/.config/cswap/config.toml — the account registry.
+//! ~/.config/cswap/config.toml — the profile registry.
 //!
-//! There is no "name": an account IS its email (the unique identity), and
-//! aliases are the labels you type. Anywhere an account is referenced
-//! (activate/run/default/alias/remove) an alias or the email resolves.
+//! A profile is a whole entity: its own directory, its own login, its own OAuth
+//! token family. It IS an account — the email is the key, so no two profiles
+//! can hold the same account. Aliases are the labels you type.
 //!
-//! There is also no stored "default": the default is DERIVED — it is whoever
-//! is logged into the live ~/.claude right now (see [`crate::profile::live_email`]).
-//! `cswap default <x>` swaps that live login; nothing about it is persisted
-//! here. Pre-0.4 configs carried a `default = "..."` line; it is ignored on
-//! load and stripped on the next rewrite.
+//! `default` is not in here and never can be: it means the live `~/.claude`,
+//! which cswap only ever reads. It is the ONE thing allowed to hold the same
+//! account as a profile, because it is not a profile.
 //!
 //! ```toml
-//! [[account]]
+//! [[profile]]
 //! email = "you@gmail.com"
 //! aliases = ["personal", "p"]
 //!
-//! [[account]]
+//! [[profile]]
 //! email = "you@corp.com"
 //! aliases = ["work"]
 //! ```
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-use crate::{paths, profile};
+use crate::paths;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// The reserved word that selects the live ~/.claude instead of a profile.
+pub const DEFAULT_KEY: &str = "default";
+
+/// What gets written back. Only ever serialized.
+#[derive(Debug, Default, Serialize)]
 pub struct Config {
-    #[serde(default, rename = "account")]
-    pub accounts: Vec<Account>,
+    #[serde(rename = "profile")]
+    pub profiles: Vec<Profile>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Account {
+#[derive(Debug, Clone, Serialize)]
+pub struct Profile {
+    /// The key: identifies the entity, names its directory. One per account.
     pub email: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
-    /// Legacy (pre-0.4) primary name — migrated into aliases on load,
-    /// never written back.
-    #[serde(default, skip_serializing)]
+}
+
+/// Every historical entry shape, read permissively:
+///   0.5    `[[account]]` with email + aliases
+///   0.6.0  `[[profile]]` with a separate `name` key
+///   pre-0.4 `name` as the primary label
+#[derive(Debug, Clone, Deserialize)]
+struct RawEntry {
+    email: String,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
     name: Option<String>,
 }
 
-impl Account {
-    pub fn new(email: String) -> Account {
-        Account {
+#[derive(Debug, Default, Deserialize)]
+struct RawConfig {
+    #[serde(default, rename = "profile")]
+    profiles: Vec<RawEntry>,
+    #[serde(default, rename = "account")]
+    accounts: Vec<RawEntry>,
+}
+
+impl RawEntry {
+    /// Fold any historical `name` into the alias list; the email is the key.
+    fn normalize(&self) -> Profile {
+        let mut aliases = Vec::new();
+        if let Some(n) = self.name.as_ref().filter(|n| !n.is_empty()) {
+            aliases.push(n.clone());
+        }
+        for a in &self.aliases {
+            if !aliases.contains(a) {
+                aliases.push(a.clone());
+            }
+        }
+        Profile {
+            email: self.email.clone(),
+            aliases,
+        }
+    }
+}
+
+impl Profile {
+    pub fn new(email: String) -> Profile {
+        Profile {
             email,
             aliases: Vec::new(),
-            name: None,
         }
     }
 
-    /// What we show for this account: first alias, else the email.
+    /// What we show for this profile: first alias, else the email.
     pub fn label(&self) -> &str {
         self.aliases
             .first()
@@ -65,6 +103,24 @@ impl Account {
     }
 }
 
+/// What a launch runs as. `Default` is the live ~/.claude and owns no cswap
+/// state; `Profile` is one of the registered entities.
+#[derive(Debug, Clone)]
+pub enum Target {
+    Default,
+    Profile(Profile),
+}
+
+impl Target {
+    /// A stable key for this target: the email, or the reserved word.
+    pub fn key(&self) -> &str {
+        match self {
+            Target::Default => DEFAULT_KEY,
+            Target::Profile(p) => &p.email,
+        }
+    }
+}
+
 pub fn valid_label(label: &str) -> bool {
     !label.is_empty()
         && label.len() <= 64
@@ -72,8 +128,25 @@ pub fn valid_label(label: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
         && !label.starts_with('.')
-        && label != "default"
-        && label != "off"
+        && !is_default_key(label)
+}
+
+/// An email has to be usable as a directory name and distinguishable from the
+/// reserved words. Deliberately loose otherwise — Anthropic decides what a
+/// valid address is, not us.
+pub fn valid_account(email: &str) -> bool {
+    !email.is_empty()
+        && email.len() <= 254
+        && email.contains('@')
+        && !email.contains('/')
+        && !email.contains('\\')
+        && !email.starts_with('.')
+        && !email.contains(char::is_whitespace)
+        && !is_default_key(email)
+}
+
+pub fn is_default_key(key: &str) -> bool {
+    key == DEFAULT_KEY || key == "off"
 }
 
 impl Config {
@@ -84,25 +157,18 @@ impl Config {
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let mut cfg: Config = toml::from_str(&text)
+        let raw: RawConfig = toml::from_str(&text)
             .with_context(|| format!("malformed config: {}", path.display()))?;
-        cfg.migrate_legacy_names();
-        Ok(cfg)
-    }
-
-    /// Pre-0.4 configs had `name = "..."`: fold it in as the primary alias.
-    /// Returns true when anything was migrated (caller may persist).
-    pub fn migrate_legacy_names(&mut self) -> bool {
-        let mut changed = false;
-        for acct in &mut self.accounts {
-            if let Some(name) = acct.name.take() {
-                if !acct.aliases.contains(&name) {
-                    acct.aliases.insert(0, name);
-                }
-                changed = true;
-            }
-        }
-        changed
+        // Either key is accepted on load, so a config the migration hasn't
+        // rewritten yet still works.
+        Ok(Config {
+            profiles: raw
+                .profiles
+                .iter()
+                .chain(raw.accounts.iter())
+                .map(RawEntry::normalize)
+                .collect(),
+        })
     }
 
     pub fn save(&self) -> Result<()> {
@@ -115,97 +181,174 @@ impl Config {
         Ok(())
     }
 
-    /// Resolve an alias or email to an account.
-    pub fn find(&self, key: &str) -> Option<&Account> {
-        self.accounts.iter().find(|a| a.matches(key))
+    /// Resolve an email or alias to a profile. `default` never resolves here —
+    /// callers that accept it must check [`is_default_key`] first.
+    pub fn find(&self, key: &str) -> Option<&Profile> {
+        self.profiles.iter().find(|p| p.matches(key))
     }
 
-    /// Is this label already used as any account's alias (or an email)?
+    /// Is this label already an email or alias in use?
     pub fn label_taken(&self, label: &str) -> bool {
-        self.accounts
+        self.profiles
             .iter()
-            .any(|a| a.email == label || a.aliases.iter().any(|al| al == label))
+            .any(|p| p.email == label || p.aliases.iter().any(|a| a == label))
     }
 
-    /// The account a bare `claude` should run as: $CSWAP_ACTIVE if this shell
-    /// activated one, otherwise the default (= the live ~/.claude login).
+    /// What a bare `claude` runs as: $CSWAP_ACTIVE if this shell activated a
+    /// profile, otherwise `default` (the live ~/.claude).
     ///
-    /// The returned account is owned because the default may not be registered
-    /// — when the live login has no config entry we synthesise a bare account
-    /// for it, which `run` launches via passthrough against ~/.claude.
-    pub fn resolve_active(&self) -> Result<Account> {
-        if let Ok(key) = std::env::var("CSWAP_ACTIVE") {
-            if !key.is_empty() {
-                return self.find(&key).cloned().with_context(|| {
-                    format!("CSWAP_ACTIVE={key} does not match any account (see `cswap list`)")
-                });
-            }
+    /// Note what is NOT here: no comparison against the live login. A profile
+    /// is never selected by who is logged into ~/.claude, which is what lets
+    /// the default and a profile hold one account without interfering.
+    pub fn resolve_active(&self) -> Result<Target> {
+        let Ok(key) = std::env::var("CSWAP_ACTIVE") else {
+            return Ok(Target::Default);
+        };
+        if key.is_empty() || is_default_key(&key) {
+            return Ok(Target::Default);
         }
-        let email = profile::live_email().context(
-            "nothing activated and no live ~/.claude login — run `claude` and log in, \
-             or `cswap activate <alias|email>`",
-        )?;
-        Ok(self
-            .find(&email)
+        self.find(&key)
             .cloned()
-            .unwrap_or_else(|| Account::new(email)))
+            .map(Target::Profile)
+            .with_context(|| {
+                format!("CSWAP_ACTIVE={key} does not match any profile (see `cswap list`)")
+            })
+    }
+
+    /// Resolve a user-typed key to a target, accepting `default`/`off`.
+    pub fn resolve_key(&self, key: &str) -> Result<Target> {
+        if is_default_key(key) {
+            return Ok(Target::Default);
+        }
+        self.find(key)
+            .cloned()
+            .map(Target::Profile)
+            .with_context(|| format!("no profile '{key}' (see `cswap list --quick`)"))
     }
 }
 
-/// One-time on-disk migration from the pre-0.4 name-keyed layout: store files
-/// (`accounts/<name>.*`) and profile dirs (`profiles/<name>`) move to their
-/// email-keyed paths, and the config is rewritten without `name`.
+/// One-time on-disk migration to the 0.6.1 layout.
+///
+/// Two shapes get folded in, both keyed by email in the end:
+///   * 0.5 `[[account]]` — already email-keyed on disk, so only the TOML key
+///     changes and the `accounts/` credential store moves aside.
+///   * 0.6.0 `[[profile]]` with a `name` — the name becomes an alias and
+///     `profiles/<name>` is renamed back to `profiles/<email>`.
+///
+/// Credentials are never copied INTO a profile here. An account that only ever
+/// lived in the old store (it was the live login, so it never had a profile)
+/// comes out with no credentials, and `cswap login <email>` gives it its own.
+/// Seeding it from the store would hand two entities one refresh-token family.
 pub fn migrate_on_disk() -> Result<()> {
     let path = paths::config_file();
     if !path.exists() {
         return Ok(());
     }
     let text = fs::read_to_string(&path)?;
-    let mut cfg: Config = match toml::from_str(&text) {
+    let raw: RawConfig = match toml::from_str(&text) {
         Ok(c) => c,
         Err(_) => return Ok(()), // load() will surface the real error later
     };
-    // Detect legacy names BEFORE migrate_legacy_names() consumes them.
-    let legacy: Vec<(String, String)> = cfg
-        .accounts
+    let from_0_5 = !raw.accounts.is_empty();
+    let named = raw
+        .profiles
         .iter()
-        .filter_map(|a| a.name.clone().map(|n| (n, a.email.clone())))
-        .collect();
-    let names_migrated = cfg.migrate_legacy_names();
-    // Pre-0.4 configs carry a top-level `default = "..."` that the model no
-    // longer stores; a rewrite drops it since Config has no such field.
-    let has_stale_default = text
-        .lines()
-        .any(|l| l.trim_start().starts_with("default ="));
-    // Pre-removal configs carry per-account `isolated = ...` lines that the
-    // model no longer stores; a rewrite drops them since Account has no such
-    // field. (Unknown keys parse fine — serde ignores them on load.)
-    let has_stale_isolated = text
-        .lines()
-        .any(|l| l.trim_start().starts_with("isolated ="));
-    if !names_migrated && !has_stale_default && !has_stale_isolated {
+        .filter(|e| e.name.as_ref().is_some_and(|n| !n.is_empty()))
+        .count();
+    if !from_0_5 && named == 0 {
         return Ok(());
     }
-    for (old, email) in legacy {
-        for (from, to) in [
-            (paths::store_creds(&old), paths::store_creds(&email)),
-            (paths::store_meta(&old), paths::store_meta(&email)),
-            (paths::profile_dir(&old), paths::profile_dir(&email)),
-        ] {
-            if from.exists() && !to.exists() {
-                let _ = fs::rename(&from, &to);
+
+    // 0.6.0 keyed directories by name; put them back under the email.
+    let mut moved = 0;
+    for entry in raw.profiles.iter() {
+        let Some(name) = entry.name.as_ref().filter(|n| !n.is_empty()) else {
+            continue;
+        };
+        let from = paths::profile_dir(name);
+        let to = paths::profile_dir(&entry.email);
+        if !from.is_dir() {
+            continue;
+        }
+        // A 0.6.0 run may have left a compatibility symlink at the email path
+        // pointing back at the name; it is in the way and it is ours to clear.
+        if fs::symlink_metadata(&to).is_ok_and(|m| m.file_type().is_symlink()) {
+            let points_here = fs::read_link(&to).map(|t| t == from).unwrap_or(false);
+            if points_here {
+                fs::remove_file(&to)?;
+            }
+        }
+        if !to.exists() {
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if fs::rename(&from, &to).is_ok() {
+                moved += 1;
             }
         }
     }
+
+    // Keep the old store rather than deleting it: it holds real tokens, and a
+    // user who wants them back can copy one in by hand.
+    let store = paths::legacy_accounts_dir();
+    let parked = store.with_file_name("accounts.pre-0.6.bak");
+    let store_parked = store.is_dir() && !parked.exists() && fs::rename(&store, &parked).is_ok();
+
+    let profiles: Vec<Profile> = raw
+        .profiles
+        .iter()
+        .chain(raw.accounts.iter())
+        .map(RawEntry::normalize)
+        .collect();
+    let cfg = Config { profiles };
     cfg.save()?;
-    let what = if names_migrated {
-        "the email-keyed layout (aliases replace names)"
-    } else if has_stale_default {
-        "the derived-default layout (the default is now the live ~/.claude login)"
-    } else {
-        "drop obsolete fields"
-    };
-    eprintln!("cswap: migrated config to {what}.");
+
+    eprintln!(
+        "cswap: migrated to the 0.6.1 model — one profile per account, keyed by \
+         email, and `default` is the live ~/.claude (cswap only reads it)."
+    );
+    if moved > 0 {
+        eprintln!(
+            "cswap: moved {moved} profile director{} back under its email.",
+            if moved == 1 { "y" } else { "ies" }
+        );
+    }
+    let without_creds: Vec<&str> = cfg
+        .profiles
+        .iter()
+        .filter(|p| {
+            !paths::profile_dir(&p.email)
+                .join(".credentials.json")
+                .exists()
+        })
+        .map(|p| p.email.as_str())
+        .collect();
+    if !without_creds.is_empty() {
+        eprintln!(
+            "cswap: no login stored for {} — run: cswap login {}",
+            without_creds.join(", "),
+            without_creds[0]
+        );
+    }
+    if store_parked {
+        eprintln!(
+            "cswap: the old credential store moved to {} (safe to delete).",
+            parked.display()
+        );
+    }
+    Ok(())
+}
+
+/// Reject a second profile for an account someone already holds. The default
+/// is deliberately not consulted: it is allowed to share.
+pub fn ensure_account_free(cfg: &Config, email: &str) -> Result<()> {
+    if let Some(p) = cfg.profiles.iter().find(|p| p.email == email) {
+        bail!(
+            "{email} already has a profile (labelled '{}'). One profile per account — \
+             use it, or `cswap remove {email}` first.",
+            p.label()
+        );
+    }
     Ok(())
 }
 
@@ -213,11 +356,22 @@ pub fn migrate_on_disk() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn acct(email: &str, aliases: &[&str]) -> Account {
-        Account {
+    fn prof(email: &str, aliases: &[&str]) -> Profile {
+        Profile {
             email: email.into(),
             aliases: aliases.iter().map(|s| s.to_string()).collect(),
-            name: None,
+        }
+    }
+
+    fn load_str(text: &str) -> Config {
+        let raw: RawConfig = toml::from_str(text).unwrap();
+        Config {
+            profiles: raw
+                .profiles
+                .iter()
+                .chain(raw.accounts.iter())
+                .map(RawEntry::normalize)
+                .collect(),
         }
     }
 
@@ -229,49 +383,87 @@ mod tests {
         assert!(!valid_label("Dev"));
         assert!(!valid_label("has space"));
         assert!(!valid_label(".hidden"));
-        assert!(!valid_label("default"));
+        assert!(!valid_label("default"), "reserved: means ~/.claude");
         assert!(!valid_label("off"));
     }
 
     #[test]
-    fn find_by_alias_and_email_and_labels() {
+    fn account_validation_guards_the_directory_name() {
+        assert!(valid_account("you@corp.com"));
+        assert!(!valid_account("nobody"), "must look like an address");
+        assert!(!valid_account("a/b@x.com"), "would escape the profiles dir");
+        assert!(!valid_account(".hidden@x.com"));
+        assert!(!valid_account("has space@x.com"));
+        assert!(!valid_account("default"));
+    }
+
+    #[test]
+    fn find_by_email_and_alias() {
         let cfg = Config {
-            accounts: vec![acct("a@x.com", &["alpha", "a1"]), acct("b@x.com", &[])],
+            profiles: vec![prof("a@x.com", &["alpha", "a1"]), prof("b@x.com", &[])],
         };
+        assert_eq!(cfg.find("a@x.com").unwrap().email, "a@x.com");
         assert_eq!(cfg.find("alpha").unwrap().email, "a@x.com");
         assert_eq!(cfg.find("a1").unwrap().email, "a@x.com");
-        assert_eq!(cfg.find("b@x.com").unwrap().email, "b@x.com");
         assert!(cfg.find("zzz").is_none());
-        assert!(cfg.label_taken("alpha"));
-        assert!(cfg.label_taken("a@x.com"));
-        assert!(!cfg.label_taken("free"));
-        assert_eq!(cfg.accounts[0].label(), "alpha");
-        assert_eq!(cfg.accounts[1].label(), "b@x.com");
+        assert_eq!(cfg.profiles[0].label(), "alpha");
+        assert_eq!(cfg.profiles[1].label(), "b@x.com");
     }
 
     #[test]
-    fn legacy_name_migrates_to_alias_and_default_is_ignored() {
-        let text = "default = \"main\"\n\n[[account]]\nname = \"main\"\nemail = \"m@x.com\"\n";
-        let mut cfg: Config = toml::from_str(text).unwrap();
-        assert!(cfg.migrate_legacy_names());
-        assert_eq!(cfg.accounts[0].aliases, vec!["main".to_string()]);
-        // Re-serialization carries neither a name nor a default field.
-        let out = toml::to_string_pretty(&cfg).unwrap();
-        assert!(!out.contains("name ="));
-        assert!(!out.contains("default ="), "default is no longer stored");
-        assert!(out.contains("aliases = [\"main\"]"));
-    }
-
-    #[test]
-    fn toml_roundtrip() {
+    fn one_profile_per_account() {
         let cfg = Config {
-            accounts: vec![acct("d@x.com", &["dev"])],
+            profiles: vec![prof("taken@x.com", &["work"])],
+        };
+        let err = ensure_account_free(&cfg, "taken@x.com")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already has a profile"), "{err}");
+        assert!(err.contains("work"), "names the existing label: {err}");
+        assert!(ensure_account_free(&cfg, "free@x.com").is_ok());
+    }
+
+    #[test]
+    fn default_key_resolves_to_the_default_target() {
+        let cfg = Config::default();
+        assert!(matches!(
+            cfg.resolve_key("default").unwrap(),
+            Target::Default
+        ));
+        assert!(matches!(cfg.resolve_key("off").unwrap(), Target::Default));
+        assert!(cfg.resolve_key("nope").is_err());
+    }
+
+    #[test]
+    fn reads_0_5_accounts_and_0_6_0_named_profiles_alike() {
+        // 0.5: email-keyed accounts.
+        let cfg = load_str("[[account]]\nemail = \"a@x.com\"\naliases = [\"one\"]\n");
+        assert_eq!(cfg.profiles[0].email, "a@x.com");
+        assert_eq!(cfg.profiles[0].aliases, vec!["one".to_string()]);
+
+        // 0.6.0: a separate name key, which folds back to the front alias.
+        let cfg =
+            load_str("[[profile]]\nname = \"wadhwani\"\nemail = \"w@x.com\"\naliases = [\"w\"]\n");
+        assert_eq!(cfg.profiles[0].email, "w@x.com");
+        assert_eq!(
+            cfg.profiles[0].aliases,
+            vec!["wadhwani".to_string(), "w".to_string()],
+            "the 0.6.0 name becomes the primary alias"
+        );
+        assert_eq!(cfg.profiles[0].label(), "wadhwani");
+    }
+
+    #[test]
+    fn serializing_writes_profiles_keyed_by_email_with_no_name() {
+        let cfg = Config {
+            profiles: vec![prof("d@x.com", &["dev"])],
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
-        let back: Config = toml::from_str(&text).unwrap();
-        assert_eq!(back.accounts[0].aliases, vec!["dev".to_string()]);
-        // A stray legacy `default =` deserializes fine and is dropped.
-        let back2: Config = toml::from_str(&format!("default = \"d@x.com\"\n{text}")).unwrap();
-        assert_eq!(back2.accounts.len(), 1);
+        assert!(text.contains("[[profile]]"), "{text}");
+        assert!(!text.contains("[[account]]"), "{text}");
+        assert!(!text.contains("name ="), "the name key is gone: {text}");
+        assert!(text.contains("email = \"d@x.com\""), "{text}");
+        let back = load_str(&text);
+        assert_eq!(back.profiles[0].aliases, vec!["dev".to_string()]);
     }
 }

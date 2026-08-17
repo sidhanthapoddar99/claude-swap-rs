@@ -1,97 +1,86 @@
-//! `cswap login` — register or refresh accounts. Accounts are keyed by
-//! email; there is no separate name (aliases are the labels).
+//! `cswap login <EMAIL>` — create a profile by logging into it.
 //!
-//! Default: capture whoever is logged into the live ~/.claude.
-//!   known email   -> relogin: refresh that account's stored tokens
-//!   unknown email -> register under the email (+ optional alias)
+//! One flow, always the same: build `profiles/<email>`, link it to ~/.claude,
+//! launch claude inside it with no credentials so claude walks its own login,
+//! then check that the account which arrived is the one you asked for. The live
+//! ~/.claude login is never read, written or copied.
 //!
-//! `--new`: log into a DIFFERENT account from inside cswap. Launches claude
-//! in an empty staging profile (own CLAUDE_CONFIG_DIR): claude sees no
-//! credentials and walks you through login; on exit cswap captures the
-//! result and promotes the staging dir to the account's profile. The live
-//! ~/.claude login is never touched.
+//! Why you name the account up front: the directory is keyed by it, and it must
+//! exist and be linked BEFORE claude runs. Staging under a temporary name and
+//! renaming afterwards is what the old `login --new` did, and it cost twice —
+//! claude created real directories that shadowed the share links forever, and
+//! the paths it recorded into ~/.claude still point at the staging directory.
+//! A directory that never moves has neither problem.
+//!
+//! Why there is no "adopt the current login" mode: copying credentials out of
+//! ~/.claude would hand the profile and the default ONE refresh-token family.
+//! Claude rotates refresh tokens in place, so whichever side ran last leaves
+//! the other holding a dead ancestor. Every entity does its own login.
 
 use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
 use std::fs;
 use std::process::Command;
 
-use crate::config::{valid_label, Account, Config};
+use crate::config::{ensure_account_free, valid_account, valid_label, Config, Profile};
 use crate::{interactive, paths, profile};
 
-pub fn run(alias_arg: Option<String>, new: bool) -> Result<()> {
-    if new {
-        return login_new(alias_arg);
-    }
-
-    let creds_path = paths::live_credentials();
-    let creds_text = fs::read_to_string(&creds_path).with_context(|| {
-        format!(
-            "no live Claude Code login found ({}) — run `claude` and log in first, \
-             or use `cswap login --new` to log into a fresh account",
-            creds_path.display()
-        )
-    })?;
-    let (email, oa) = identity_of(&creds_text, &live_claude_json())?;
-
+pub fn run(key: Option<String>, alias_arg: Option<String>, yes: bool) -> Result<()> {
     let mut cfg = Config::load()?;
 
-    if cfg.find(&email).is_some() {
-        // Relogin: refresh tokens; an --alias here simply adds the label.
-        save_capture(&email, &creds_text, &oa)?;
-        let profile_creds = paths::profile_dir(&email).join(".credentials.json");
-        if profile_creds.exists() {
-            profile::write_private(&profile_creds, &creds_text)?;
+    let key = match key {
+        Some(k) => k,
+        None if interactive::on_tty() => {
+            interactive::input("Which account? (the email you'll log in as)")?
         }
-        println!("Live ~/.claude login: {email}");
-        println!("Refreshed stored credentials for this already-registered account.");
-        if let Some(alias) = alias_arg {
-            add_alias(&mut cfg, &email, &alias)?;
-        } else {
-            println!("(To add a different account: cswap login --new)");
+        None => bail!("which account? pass the email: cswap login <email>"),
+    };
+    let key = key.trim().to_string();
+
+    // An existing profile can be named by email OR by one of its aliases; a new
+    // one has to be named by the email, since that is what keys the directory.
+    let existing = cfg.find(&key).cloned();
+    let email = match &existing {
+        Some(p) => p.email.clone(),
+        None => {
+            if !valid_account(&key) {
+                bail!(
+                    "'{key}' is not an account email and no profile matches it.\n\
+                     To create one: cswap login you@example.com"
+                );
+            }
+            key.clone()
         }
-        return Ok(());
+    };
+
+    let prof = existing
+        .clone()
+        .unwrap_or_else(|| Profile::new(email.clone()));
+    let dir = profile::scaffold(&prof)?;
+    let creds = profile::creds_path(&email);
+    let fresh_profile = existing.is_none();
+
+    // A relogin has to start from no credentials, or claude sees a valid
+    // session and never offers the login. That discards this profile's tokens,
+    // so ask first.
+    if creds.exists() {
+        if !yes
+            && !interactive::confirm(&format!(
+                "Profile {email} is already logged in. Log in again? Its current tokens \
+                 are discarded (nothing outside this profile is touched)"
+            ))?
+        {
+            bail!("aborted — {email} left as it is");
+        }
+        fs::remove_file(&creds).with_context(|| format!("failed to clear {}", creds.display()))?;
     }
 
-    // New email -> register under it.
-    save_capture(&email, &creds_text, &oa)?;
-    register(&mut cfg, &email, alias_arg)?;
-    Ok(())
-}
-
-/// `cswap login --new`: interactive login into a staging profile.
-fn login_new(alias_arg: Option<String>) -> Result<()> {
-    let staging = paths::data_dir().join("staging-login");
-    let _ = fs::remove_dir_all(&staging); // leftovers from an aborted attempt
-    fs::create_dir_all(&staging)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))?;
-    }
-    // Seed enough to skip theme onboarding; there are no credentials, so
-    // claude goes straight into its login flow.
-    let theme = live_claude_json()
-        .get("theme")
-        .and_then(Value::as_str)
-        .unwrap_or("dark")
-        .to_string();
-    profile::write_private(
-        &staging.join(".claude.json"),
-        &serde_json::to_string_pretty(&json!({
-            "hasCompletedOnboarding": true,
-            "theme": theme,
-        }))?,
-    )?;
-
-    println!("Launching claude in a clean profile — log in with the NEW account,");
-    println!("then exit claude (/exit) to finish registration. Your current");
-    println!("~/.claude login is not touched.");
+    println!("Launching claude in the profile for {email} — log in as that account.");
+    println!("Exit claude (/exit) when the login is done. Your ~/.claude login is not touched.");
     println!();
 
     let claude = crate::cmds::run::find_claude()?;
     let mut cmd = Command::new(&claude);
-    cmd.env("CLAUDE_CONFIG_DIR", &staging);
+    cmd.env("CLAUDE_CONFIG_DIR", &dir);
     for var in crate::cmds::run::SCRUBBED {
         cmd.env_remove(var);
     }
@@ -100,44 +89,54 @@ fn login_new(alias_arg: Option<String>) -> Result<()> {
         eprintln!("(claude exited with {status} — checking whether a login was captured anyway)");
     }
 
-    let creds_text = fs::read_to_string(staging.join(".credentials.json")).map_err(|_| {
-        let _ = fs::remove_dir_all(&staging);
-        anyhow::anyhow!("no login captured — claude exited without completing a login")
-    })?;
-    let (email, oa) = identity_of(&creds_text, &staging_claude_json(&staging))?;
+    let arrived = match verify_login(&creds, &email) {
+        Ok(a) => a,
+        Err(e) => {
+            // Nothing usable landed: don't leave a half-built profile behind.
+            if fresh_profile {
+                let _ = remove_dir(&email);
+            }
+            return Err(e);
+        }
+    };
 
-    let mut cfg = Config::load()?;
-    if cfg.find(&email).is_some() {
-        let _ = fs::remove_dir_all(&staging);
-        bail!("you logged in as {email}, which is already registered (see `cswap list --quick`)");
+    // The directory is keyed by the account, so a mismatch cannot just be
+    // accepted — it would file one account's tokens under another's name.
+    if arrived != email {
+        let _ = fs::remove_file(&creds);
+        if fresh_profile {
+            let _ = remove_dir(&email);
+        }
+        bail!(
+            "you logged in as {arrived}, but this profile is for {email}.\n\
+             Nothing was saved. To register that account instead: cswap login {arrived}"
+        );
     }
 
-    save_capture(&email, &creds_text, &oa)?;
-
-    // Promote staging to the real profile: credentials + .claude.json are
-    // already in place; ensure() will add the share symlinks on first run.
-    let profile_dir = paths::profile_dir(&email);
-    if let Some(parent) = profile_dir.parent() {
-        fs::create_dir_all(parent)?;
+    if fresh_profile {
+        ensure_account_free(&cfg, &email)?;
+        cfg.profiles.push(Profile::new(email.clone()));
+        cfg.save()?;
+        println!("Created profile for {email}");
+        if profile::live_email().as_deref() == Some(email.as_str()) {
+            println!(
+                "note: {email} is also the default (~/.claude). Separate logins, \
+                 separate tokens — that's the one overlap cswap allows."
+            );
+        }
+    } else {
+        println!("Logged {email} in again.");
     }
-    let _ = fs::remove_dir_all(&profile_dir);
-    fs::rename(&staging, &profile_dir).context("failed to promote staging profile")?;
+    profile::harden_identity(&email)?;
 
-    register(&mut cfg, &email, alias_arg)?;
-    Ok(())
-}
-
-fn register(cfg: &mut Config, email: &str, alias_arg: Option<String>) -> Result<()> {
-    cfg.accounts.push(Account::new(email.to_string()));
-    cfg.save()?;
-    println!("Registered {email}");
     match alias_arg {
-        Some(alias) => add_alias(cfg, email, &alias)?,
-        // Offer an alias right away — select/input TUI, skippable with Enter.
-        None if interactive::on_tty() => {
-            let alias = interactive::input_optional(&format!("Alias for {email} (Enter to skip)"))?;
-            if let Some(alias) = alias {
-                add_alias(cfg, email, &alias)?;
+        Some(alias) => add_alias(&mut cfg, &email, &alias)?,
+        // Offer an alias right away — skippable with Enter.
+        None if interactive::on_tty() && fresh_profile => {
+            if let Some(alias) =
+                interactive::input_optional(&format!("Alias for {email} (Enter to skip)"))?
+            {
+                add_alias(&mut cfg, &email, &alias)?;
             }
         }
         None => {}
@@ -145,16 +144,41 @@ fn register(cfg: &mut Config, email: &str, alias_arg: Option<String>) -> Result<
     Ok(())
 }
 
+/// A captured credential set must carry a refresh token, and the profile's
+/// .claude.json must name who logged in. Returns that account.
+fn verify_login(creds: &std::path::Path, email: &str) -> Result<String> {
+    let creds_text = fs::read_to_string(creds)
+        .map_err(|_| anyhow::anyhow!("no login captured — claude exited without completing one"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&creds_text).context(".credentials.json is not valid JSON")?;
+    let oauth = value
+        .get("claudeAiOauth")
+        .and_then(serde_json::Value::as_object)
+        .context("credentials carry no claudeAiOauth — the login did not complete")?;
+    if oauth
+        .get("refreshToken")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .is_empty()
+    {
+        bail!("credentials have no refreshToken — run `cswap login {email}` again");
+    }
+    profile::recorded_email(email).context(
+        "the login completed but claude recorded no account email — \
+         run `cswap login` again and let claude finish starting up",
+    )
+}
+
 fn add_alias(cfg: &mut Config, email: &str, alias: &str) -> Result<()> {
     if !valid_label(alias) {
         bail!("invalid alias '{alias}' (use lowercase letters, digits, '-', '_', '.')");
     }
     if cfg.label_taken(alias) {
-        bail!("'{alias}' is already used as an alias or email");
+        bail!("'{alias}' is already used as an alias or account");
     }
-    cfg.accounts
+    cfg.profiles
         .iter_mut()
-        .find(|a| a.email == email)
+        .find(|p| p.email == email)
         .expect("caller resolved")
         .aliases
         .push(alias.to_string());
@@ -163,58 +187,12 @@ fn add_alias(cfg: &mut Config, email: &str, alias: &str) -> Result<()> {
     Ok(())
 }
 
-/// Extract (email, oauthAccount) for a captured credential set.
-fn identity_of(creds_text: &str, claude_json: &Value) -> Result<(String, Value)> {
-    let creds: Value =
-        serde_json::from_str(creds_text).context(".credentials.json is not valid JSON")?;
-    let oauth = creds
-        .get("claudeAiOauth")
-        .and_then(Value::as_object)
-        .context("credentials carry no claudeAiOauth — the login did not complete")?;
-    if oauth
-        .get("refreshToken")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .is_empty()
-    {
-        bail!("credentials have no refreshToken — re-login with `claude /login` first");
+/// Remove a profile's directory. Its symlinks are removed WITHOUT following
+/// them, so the real ~/.claude data behind them is untouched.
+pub fn remove_dir(email: &str) -> Result<()> {
+    let dir = paths::profile_dir(email);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).with_context(|| format!("failed to remove {}", dir.display()))?;
     }
-    let oa = claude_json
-        .get("oauthAccount")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let email = oa
-        .get("emailAddress")
-        .and_then(Value::as_str)
-        .context(
-            "no oauthAccount.emailAddress recorded — run claude once so it stores who is logged in",
-        )?
-        .to_string();
-    Ok((email, oa))
-}
-
-fn live_claude_json() -> Value {
-    fs::read_to_string(paths::claude_json())
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| json!({}))
-}
-
-fn staging_claude_json(staging: &std::path::Path) -> Value {
-    fs::read_to_string(staging.join(".claude.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| json!({}))
-}
-
-fn save_capture(email: &str, creds_text: &str, oa: &Value) -> Result<()> {
-    profile::write_private(&paths::store_creds(email), creds_text)?;
-    let meta = json!({
-        "oauthAccount": oa,
-        "theme": live_claude_json().get("theme").and_then(Value::as_str).unwrap_or("dark"),
-    });
-    profile::write_private(
-        &paths::store_meta(email),
-        &serde_json::to_string_pretty(&meta)?,
-    )
+    Ok(())
 }

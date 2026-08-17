@@ -13,15 +13,15 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "cswap",
     version,
-    about = "Fast multi-account switcher for Claude Code",
-    long_about = "Fast multi-account switcher for Claude Code.\n\n\
-Accounts are keyed by email; aliases are the labels you type. Anywhere an\n\
-account is expected you can pass an alias or the email — or pass nothing on\n\
-a terminal and pick from an interactive menu.\n\n\
-The default is not stored, it's derived: whoever is logged into the live\n\
-~/.claude IS the default. `cswap default <account>` swaps that login — the\n\
-one command that writes into ~/.claude; everything else only reads it. All\n\
-cswap state lives in ~/.config/cswap and ~/.local/share/cswap.",
+    about = "Fast multi-profile switcher for Claude Code",
+    long_about = "Fast multi-profile switcher for Claude Code.\n\n\
+A PROFILE is a whole entity: its own directory, its own login, its own\n\
+tokens. It IS an account — one profile per account, keyed by email, with\n\
+aliases as the labels you type.\n\n\
+`default` is the live ~/.claude — a separate entity that does not know cswap\n\
+exists. cswap only READS it, never writes it, and it is the ONE thing that\n\
+may hold the same account as a profile. All cswap state lives in\n\
+~/.config/cswap and ~/.local/share/cswap.",
     arg_required_else_help = true,
     // clap 4 can't group subcommands into sections, so the command list is
     // hand-written here instead of via {subcommands}. Keep these one-liners
@@ -32,21 +32,21 @@ cswap state lives in ~/.config/cswap and ~/.local/share/cswap.",
 
 Setup:
   shell-init  Print shell integration (bash|zsh) — eval it from your rc file
-  login       Register the current claude login; --new logs into a fresh account
+  login       Create a profile by logging into it: cswap login <email>
   upgrade     Self-update from GitHub Releases
 
-Accounts:
-  list        Table of all accounts: status, email, aliases, usage
+Profiles:
+  list        Table of the default and every profile: status, account, usage
   alias       Manage aliases: list, create, remove
-  default     Show or swap the default account (the live ~/.claude login)
-  remove      Forget an account (menu when no argument; always confirms)
+  default     Show who the live ~/.claude is (read-only)
+  remove      Forget a profile (menu when no argument; always confirms)
 
 Session:
-  activate    Set the account for THIS terminal (menu when no argument)
-  run         Run claude as an account: cswap run [ALIAS|EMAIL] [CLAUDE_ARGS]...
+  activate    Set the profile for THIS terminal (menu when no argument)
+  run         Run claude as a profile: cswap run [PROFILE] [CLAUDE_ARGS]...
 
 Limits:
-  usage       Detailed per-account usage with bars and reset times
+  usage       Detailed per-profile usage with bars and reset times
   watch       Live usage dashboard (redraws every INTERVAL seconds)
 
 Options:
@@ -55,13 +55,16 @@ Options:
     after_help = "\
 QUICK START:
   1. eval \"$(cswap shell-init zsh)\"   # add to ~/.zshrc (or bash), once
-  2. cswap login                      # register the current claude login
-  3. cswap login --new                # log into more accounts, inside cswap
+  2. cswap login you@corp.com --alias work   # log into a profile
+  3. cswap login you@gmail.com --alias home  # ...and another
 
-  cswap default work        set what bare `claude` uses everywhere
-  cswap activate            pick the account for THIS terminal (menu)
-  cswap list                see everyone at a glance
+  cswap activate work       use that profile in THIS terminal
+  cswap activate default    back to the live ~/.claude
+  cswap list                see everything at a glance
   cswap usage               see the full picture
+
+`default` is your existing ~/.claude, untouched. cswap never writes there, so
+changing it means logging in with claude itself.
 
 Run `cswap help <command>` for details and examples of each command."
 )]
@@ -85,27 +88,34 @@ SETUP (once, in ~/.zshrc or ~/.bashrc):\n  eval \"$(cswap shell-init zsh)\""
     )]
     ShellInit { shell: String },
 
-    /// Register the current claude login; --new logs into a fresh account
+    /// Create a profile by logging into it: cswap login <email>
     #[command(
-        long_about = "Register the account currently logged into ~/.claude, keyed by\n\
-its email. If that email is already registered its stored tokens are\n\
-refreshed. On a terminal you are offered an optional alias right away.\n\n\
---new launches claude in an empty staging profile so you can log into a\n\
-DIFFERENT account from inside cswap — the live ~/.claude login is never\n\
-touched; exit claude (/exit) and the account is captured automatically.\n\n\
-cswap only READS ~/.claude — captures are stored under ~/.local/share/cswap.\n\n\
-EXAMPLES:\n  cswap login                    # register current login\n  \
-cswap login --new              # log into another account inside cswap\n  \
-cswap login --new --alias work # ...and label it immediately"
+        long_about = "Build the profile directory, then launch claude inside it with\n\
+no credentials so claude walks its own login. Exit claude (/exit) and cswap\n\
+checks that the account which arrived is the one you asked for.\n\n\
+You name the account up front because it keys the directory, and that\n\
+directory has to exist and be linked BEFORE claude runs. One profile per\n\
+account: `default` may hold the same account, nothing else may.\n\n\
+Every profile logs in for itself. cswap never copies credentials out of\n\
+~/.claude or between profiles — one account with two copies of its\n\
+refresh-token family means whichever side ran last leaves the other holding\n\
+a dead ancestor.\n\n\
+Naming an existing profile (by email or alias) logs it in again, after a\n\
+confirmation: its current tokens are discarded first, or claude would see a\n\
+live session and never offer the login.\n\n\
+EXAMPLES:\n  cswap login you@corp.com                # new profile\n  \
+cswap login you@corp.com --alias work   # ...and label it immediately\n  \
+cswap login work                        # re-login an existing profile"
     )]
     Login {
-        /// Alias to attach to the account
+        /// Account email, or an existing profile (asked for when omitted)
+        key: Option<String>,
+        /// Alias to attach to the profile
         #[arg(long)]
         alias: Option<String>,
-        /// Log into a NEW account inside cswap (staging profile; the live
-        /// ~/.claude login is not touched)
+        /// Skip the confirmation when re-logging in an existing profile
         #[arg(long)]
-        new: bool,
+        yes: bool,
     },
 
     /// Self-update from GitHub Releases
@@ -118,13 +128,13 @@ CSWAP_NO_UPDATE_CHECK=1 to disable that check."
     Upgrade,
 
     // ------------------------------------------------------------- Accounts
-    /// Table of all accounts: status, email, aliases, usage
+    /// Table of the default and every profile: status, account, usage
     #[command(
-        long_about = "One borderless row per account — which are active/default,\n\
-the email, its aliases, and the 5h/7d gates at a glance. Percentages are\n\
-colored <70 green, <90 yellow, else red.\n\n\
+        long_about = "The default on its own line, then one borderless row per\n\
+profile — which is active, the account behind it, its aliases, and the 5h/7d\n\
+gates. Percentages are colored <70 green, <90 yellow, else red.\n\n\
 For bars, per-model windows and reset times, use `cswap usage`.\n\n\
-EXAMPLES:\n  cswap list             # with usage (one API call per account)\n  \
+EXAMPLES:\n  cswap list             # with usage (one API call per profile)\n  \
 cswap list --quick     # instant, no network"
     )]
     List {
@@ -135,9 +145,10 @@ cswap list --quick     # instant, no network"
 
     /// Manage aliases: list, create, remove (interactive when args omitted)
     #[command(
-        long_about = "Aliases are the labels over email identities; they resolve\n\
-everywhere an account is referenced.\n\n\
-EXAMPLES:\n  cswap alias list\n  cswap alias create            # pick account, type alias\n  \
+        long_about = "A profile IS its account, keyed by email; an alias is a shorter\n\
+Aliases resolve everywhere a profile is referenced. `default` is a reserved\n\
+word, not a profile, so it has no aliases.\n\n\
+EXAMPLES:\n  cswap alias list\n  cswap alias create            # pick profile, type alias\n  \
 cswap alias create work w     # scripted\n  cswap alias remove            # pick from a menu\n  \
 cswap alias remove w"
     )]
@@ -146,36 +157,33 @@ cswap alias remove w"
         action: AliasCmd,
     },
 
-    /// Show or swap the default account (the live ~/.claude login)
+    /// Show who the live ~/.claude is (read-only)
     #[command(
-        long_about = "The default is not stored — it IS whoever is logged into the\n\
-live ~/.claude, i.e. what a bare `claude` uses when nothing is activated.\n\n\
-With no argument: report the live login and whether it's registered.\n\
-With an account: SWAP the live login by copying that account's credentials\n\
-into ~/.claude (the only command that writes there). If the account being\n\
-displaced isn't registered its credentials would be lost, so you must type\n\
-`yes` (or pass --yes) — `cswap login` it first to keep it.\n\n\
-EXAMPLES:\n  cswap default             # who is live? (menu when on a tty)\n  \
-cswap default work        # make work the live ~/.claude login\n  \
-cswap default me@corp.com --yes"
+        long_about = "Report which account is logged into the live ~/.claude, and\n\
+which profiles happen to hold that same account independently.\n\n\
+`default` is its own entity. It is not a pointer at a profile, no profile is\n\
+a pointer at it, and cswap only ever READS it. There is nothing to swap here:\n\
+to change who ~/.claude is, log in with claude itself.\n\n\
+EXAMPLES:\n  cswap default             # who is the live ~/.claude?\n  \
+cswap activate work       # use a profile in this terminal instead"
     )]
     Default {
-        /// Alias or email (interactive menu when omitted)
+        /// Accepted only to explain that swapping is gone
+        #[arg(hide = true)]
         key: Option<String>,
-        /// Overwrite an unregistered live login without the typed confirmation
-        #[arg(long)]
-        yes: bool,
     },
 
-    /// Forget an account (menu when no argument; always confirms)
+    /// Forget a profile (menu when no argument; always confirms)
     #[command(
-        long_about = "Remove a registered profile: its config entry, stored tokens,\n\
-and profile directory — after a confirmation (skip with --yes). The profile\n\
-contains only symlinks into ~/.claude plus the account's own identity\n\
-files; your real Claude data (history, settings, plugins) is never touched."
+        long_about = "Remove a profile: its config entry and its directory — after a\n\
+confirmation (skip with --yes). That directory holds the profile's only\n\
+credentials, so you would have to log in again.\n\n\
+The directory is mostly symlinks into ~/.claude and they are removed without\n\
+being followed, so your real Claude data (history, settings, plugins) is\n\
+never touched. `default` cannot be removed: cswap owns no state for it."
     )]
     Remove {
-        /// Alias or email (interactive menu when omitted)
+        /// Account or alias (interactive menu when omitted)
         key: Option<String>,
         /// Skip the confirmation prompt
         #[arg(long)]
@@ -183,51 +191,56 @@ files; your real Claude data (history, settings, plugins) is never touched."
     },
 
     // -------------------------------------------------------------- Session
-    /// Set the account for THIS terminal (menu when no argument)
+    /// Set the profile for THIS terminal (menu when no argument)
     #[command(
-        long_about = "Set the active account for THIS terminal only. With no\n\
-argument, an interactive menu lists every account (plus a back-to-default\n\
-choice). Requires the shell integration (eval \"$(cswap shell-init zsh)\").\n\
-Other terminals are unaffected; new terminals start on the default.\n\n\
+        long_about = "Set the active profile for THIS terminal only. With no\n\
+argument, an interactive menu lists `default` and every profile. Requires the\n\
+shell integration (eval \"$(cswap shell-init zsh)\"). Other terminals are\n\
+unaffected; new terminals start on the default.\n\n\
 EXAMPLES:\n  cswap activate            # interactive picker\n  \
-cswap activate work       # by alias\n  cswap activate you@x.com  # by email\n  \
-cswap activate default    # back to the default account"
+cswap activate you@corp.com  # by account\n  cswap activate w          # by alias\n  \
+cswap activate default    # back to the live ~/.claude"
     )]
     Activate {
-        /// Alias or email (interactive menu when omitted)
+        /// Account, alias, or `default` (menu when omitted)
         key: Option<String>,
         /// Emit the export line for the shell wrapper to eval
         #[arg(long, hide = true)]
         print: bool,
     },
 
-    /// Run claude as an account: cswap run [ALIAS|EMAIL] [CLAUDE_ARGS]...
-    #[command(long_about = "Run claude once as a specific account, ignoring\n\
-active/default. The first argument is treated as an account only when it\n\
-matches an alias or email; everything else passes to claude verbatim. With\n\
-no arguments on a terminal, an interactive picker asks which account.\n\
+    /// Run claude as a profile: cswap run [NAME] [CLAUDE_ARGS]...
+    #[command(
+        long_about = "Run claude once as a specific profile, ignoring what this\n\
+terminal activated. The first argument is treated as a target only when it\n\
+matches an account, an alias, or `default`; everything else passes to\n\
+claude verbatim. With no arguments on a terminal, a picker asks.\n\
 cswap exec()s the real claude binary — signals and exit codes are native.\n\n\
-The account logged into the live ~/.claude runs against ~/.claude itself\n\
-(no profile) so cswap never touches its tokens.\n\n\
+`default` runs against ~/.claude itself, with no CLAUDE_CONFIG_DIR, so cswap\n\
+never touches its tokens. A profile always runs from its own directory — even\n\
+when it holds the same account as the default.\n\n\
 EXAMPLES:\n  cswap run                      # interactive picker\n  \
 cswap run work -r              # resume picker, work pays\n  \
-cswap run -- --model opus      # active/default account, flags pass through")]
+cswap run default              # explicitly the live ~/.claude\n  \
+cswap run -- --model opus      # active profile, flags pass through"
+    )]
     Run {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
 
     // --------------------------------------------------------------- Limits
-    /// Detailed per-account usage with bars and reset times
+    /// Detailed per-profile usage with bars and reset times
     #[command(
-        long_about = "A card per account: every window (5h, 7d, per-model weekly)\n\
-with a bar, percentage and reset countdown. Same source as `cswap list`,\n\
-which shows only the 5h/7d numbers on one line.\n\n\
-EXAMPLES:\n  cswap usage          # every account\n  \
-cswap usage work     # just one"
+        long_about = "A card for the default and one per profile: every window (5h,\n\
+7d, per-model weekly) with a bar, percentage and reset countdown. Same source\n\
+as `cswap list`, which shows only the 5h/7d numbers on one line.\n\n\
+EXAMPLES:\n  cswap usage          # everything\n  \
+cswap usage work     # just one profile\n  \
+cswap usage default  # just the live ~/.claude"
     )]
     Usage {
-        /// Alias or email (all accounts when omitted)
+        /// Account, alias, or `default` (everything when omitted)
         key: Option<String>,
     },
 
@@ -254,11 +267,11 @@ EXAMPLES:\n  cswap watch\n  cswap watch -i 120"
 
 #[derive(Subcommand)]
 enum AliasCmd {
-    /// List every alias and the email it points to
+    /// List every profile and its aliases
     List,
-    /// Add an alias: cswap alias create [ACCOUNT] [ALIAS]
+    /// Add an alias: cswap alias create [PROFILE] [ALIAS]
     Create {
-        account: Option<String>,
+        profile: Option<String>,
         alias: Option<String>,
     },
     /// Remove an alias: cswap alias remove [ALIAS]
@@ -271,10 +284,10 @@ fn main() {
     }
     let cli = Cli::parse();
     let result = match cli.cmd {
-        Cmd::Login { alias, new } => cmds::login::run(alias, new),
+        Cmd::Login { key, alias, yes } => cmds::login::run(key, alias, yes),
         Cmd::Activate { key, print } => cmds::activate::run(key, print),
         Cmd::List { quick } => cmds::list::run(quick),
-        Cmd::Default { key, yes } => cmds::default_cmd::run(key, yes),
+        Cmd::Default { key } => cmds::default_cmd::run(key),
         Cmd::Run { args } => cmds::run::run(args),
         Cmd::Usage { key } => cmds::usage::run(key),
         Cmd::Watch { interval } => cmds::watch::run(interval),
@@ -282,7 +295,7 @@ fn main() {
         Cmd::Upgrade => cmds::upgrade::run(),
         Cmd::Alias { action } => match action {
             AliasCmd::List => cmds::alias::list(),
-            AliasCmd::Create { account, alias } => cmds::alias::create(account, alias),
+            AliasCmd::Create { profile, alias } => cmds::alias::create(profile, alias),
             AliasCmd::Remove { alias } => cmds::alias::remove(alias),
         },
         Cmd::Remove { key, yes } => cmds::remove::run(key, yes),
