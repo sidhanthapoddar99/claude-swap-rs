@@ -90,6 +90,32 @@ pub fn render(cfg: &Config, only: Option<&str>) {
         }
     }
 
+    // Codex last, and only in the full view. Absent, logged out, expired or
+    // offline all render nothing at all — a cswap user who does not use Codex
+    // should never find out this section exists.
+    if only.is_none() && crate::codex::is_configured() {
+        if let Ok(cx) = crate::codex::usage() {
+            if !cx.windows.is_empty() {
+                if !first {
+                    println!();
+                }
+                first = false;
+                let plan = cx
+                    .plan
+                    .map(|p| format!("  {}", ui::paint(color, DIM, &format!("[{p}]"))))
+                    .unwrap_or_default();
+                println!(
+                    "{} {}{plan}",
+                    ui::paint(color, DIM, "codex —"),
+                    ui::paint(color, BOLD, &cx.email)
+                );
+                for line in render_windows(&cx.windows, color) {
+                    println!("  {line}");
+                }
+            }
+        }
+    }
+
     if first {
         println!(
             "{}",
@@ -115,6 +141,12 @@ fn card_lines(target: &Target, color: bool) -> Vec<String> {
         Ok(w) => w,
         Err(e) => return vec![ui::paint(color, DIM, &format!("usage unavailable ({e:#})"))],
     };
+    render_windows(&windows, color)
+}
+
+/// One padded `label bar pct reset` line per window. Shared so a Codex block
+/// and a Claude card line up column for column.
+fn render_windows(windows: &[oauth::Window], color: bool) -> Vec<String> {
     let label_w = windows
         .iter()
         .map(|w| w.label.chars().count())

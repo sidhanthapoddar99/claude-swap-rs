@@ -1161,3 +1161,48 @@ fn shell_init_emits_wrappers() {
     }
     assert!(!env.cswap(&["shell-init", "fish"]).status.success());
 }
+
+// ---------------------------------------------------------------------- codex
+
+/// The fabricated $HOME has no ~/.codex, which is the common case for a cswap
+/// user who does not use Codex. They must never see the section, or a hint that
+/// it exists, or pay a network call for it.
+#[test]
+fn codex_is_invisible_when_it_is_not_configured() {
+    let env = Env::new();
+    assert_ok(&env.login("one@x.com", "tok-one"));
+    assert!(!env.home.path().join(".codex").exists());
+
+    for args in [vec!["usage"], vec!["list"], vec!["list", "--quick"]] {
+        let o = env.cswap_env(&args, &[("CSWAP_USAGE_URL", "http://127.0.0.1:1/u")]);
+        assert_ok(&o);
+        let all = stdout(&o) + &stderr(&o);
+        assert!(
+            !all.to_lowercase().contains("codex"),
+            "`cswap {}` leaked codex: {all}",
+            args.join(" ")
+        );
+    }
+}
+
+/// A ~/.codex that exists but carries no usable token must also render nothing.
+/// Best-effort means silent, not an error line in the middle of the report.
+#[test]
+fn codex_stays_silent_when_the_login_is_unusable() {
+    let env = Env::new();
+    assert_ok(&env.login("one@x.com", "tok-one"));
+    let codex = env.home.path().join(".codex");
+    fs::create_dir_all(&codex).unwrap();
+    fs::write(codex.join("auth.json"), r#"{"auth_mode":"chatgpt"}"#).unwrap();
+
+    let o = env.cswap_env(
+        &["usage"],
+        &[
+            ("CSWAP_USAGE_URL", "http://127.0.0.1:1/u"),
+            ("CSWAP_CODEX_USAGE_URL", "http://127.0.0.1:1/cx"),
+        ],
+    );
+    assert_ok(&o);
+    let all = stdout(&o) + &stderr(&o);
+    assert!(!all.to_lowercase().contains("codex"), "{all}");
+}
