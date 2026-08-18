@@ -33,6 +33,12 @@ pub fn live_credentials() -> PathBuf {
     claude_dir().join(".credentials.json")
 }
 
+/// Codex's own login file. Read-only to cswap, like ~/.claude: we report what
+/// is in it and never write or refresh it.
+pub fn codex_auth() -> PathBuf {
+    home().join(".codex").join("auth.json")
+}
+
 fn xdg(var: &str, fallback: &[&str]) -> PathBuf {
     match std::env::var_os(var) {
         Some(v) if !v.is_empty() => PathBuf::from(v),

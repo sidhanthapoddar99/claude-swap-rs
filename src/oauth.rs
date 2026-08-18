@@ -20,7 +20,7 @@ pub const REFRESH_MARGIN_MS: i64 = 5 * 60 * 1000;
 /// call per account, so an unreachable or hanging endpoint must fail fast
 /// instead of freezing the terminal. Also disables ureq's retries — a usage
 /// number isn't worth waiting through a backoff for.
-fn agent() -> ureq::Agent {
+pub(crate) fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
         .timeout(Duration::from_secs(20))

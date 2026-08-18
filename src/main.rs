@@ -1,4 +1,5 @@
 mod cmds;
+mod codex;
 mod config;
 mod interactive;
 mod oauth;

@@ -53,7 +53,7 @@ Three names are never linked into a profile:
 
 cswap **never** writes into `~/.claude` or `~/.claude.json`. All cswap state lives in `~/.config/cswap/` and `~/.local/share/cswap/`; uninstalling is `rm -rf` of those two directories.
 
-Network: exactly two first-party endpoints (Anthropic's OAuth token refresh and usage API). No telemetry of any kind.
+Network: Anthropic's OAuth token refresh and usage API. If — and only if — `~/.codex/auth.json` exists, `cswap usage` also reads OpenAI's Codex usage endpoint (`chatgpt.com/backend-api/codex/usage`) to show that account's limits. No telemetry of any kind.
 
 ## Install
 
@@ -134,6 +134,7 @@ cswap run default      # one-off against the live ~/.claude
 cswap usage            # bars, per-model windows and reset times
 cswap usage work       # just one profile
 cswap usage default    # just the live ~/.claude
+                       # Codex usage is appended last, when ~/.codex is logged in
 
 cswap watch            # the same view, redrawn every 300s ([r] refresh, [q] quit)
 cswap watch -i 120
@@ -189,6 +190,7 @@ What it does, and says:
 - **Token refresh:** before launching a profile, cswap refreshes its OAuth token if it expires within 5 minutes and persists the rotation. `default` is never refreshed by cswap — that's Claude's job. A rejected refresh (`invalid_grant`) is reported as terminal — that token family is dead and the account has to log in again — and usage failures carry their HTTP status, so a 401 reads differently from a 429.
 - **Shadowed shares:** if a real file or directory ends up where a share link belongs, claude writes into it and the data is invisible to `~/.claude` and to every other profile. cswap never clobbers such a file, but it now reports it on every launch and in `cswap doctor`. `cswap doctor --repair` moves it into `~/.local/share/cswap/shadowed/` and restores the link; it never merges into `~/.claude` and never deletes anything. Links are replaced atomically, so the window that creates this in the first place is gone.
 - **Live sessions are respected:** `cswap migrate`, `cswap remove` and `cswap doctor --repair` refuse to touch a profile that has a running claude (detected via `/proc` on Linux). Rearranging a directory under a live session is how transcripts get stranded.
+- **Codex usage (optional):** if `~/.codex/auth.json` exists, `cswap usage` appends one read-only block for the Codex account and its windows. cswap never writes that file and never refreshes its token — the same rule `default` gets, and for the same reason: two refreshers on one token family leaves one of them holding a dead ancestor. Not installed, not logged in, token expired or offline all render nothing at all. There is no profile, alias or switching for Codex; it is a report.
 - **Windows:** not supported (symlink + exec semantics differ). WSL works fully.
 
 ## Development
@@ -211,8 +213,8 @@ Releases are built by CI from version tags on `main`:
 # 1. bump version in Cargo.toml (on dev), PR into main
 # 2. tag the merge commit on main:
 git checkout main && git pull
-git tag v0.6.2
-git push origin v0.6.2
+git tag v0.6.3
+git push origin v0.6.3
 ```
 
 The `Release` workflow builds static binaries for Linux (x86_64/aarch64 musl) and macOS (x86_64/aarch64), and publishes them to GitHub Releases with SHA-256 checksums and auto-generated notes.
