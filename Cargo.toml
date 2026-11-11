@@ -1,6 +1,6 @@
 [package]
 name = "claude-swap-rs"
-version = "0.8.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Account dashboard and launcher for coding agents (Claude Code, Codex, Antigravity, Grok): one terminal UI for usage, weekly resets and renewals, and a wrapper that picks the right account"

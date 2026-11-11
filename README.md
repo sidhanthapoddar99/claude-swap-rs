@@ -10,7 +10,7 @@ One place for the accounts of your coding agents: **Claude Code**, **Codex**, **
 `cswap` is a single Rust binary for Linux, macOS and Windows. Starting an agent through it adds a few milliseconds and no network call. The agent then runs as itself: cswap replaces its own process with the agent's, so signals, exit codes and the terminal are the agent's own.
 
 ```
-  ◆ cswap  v0.8.0                                             updated 3m ago  ·  next in 10m     Thu 12 Nov  01:29
+  ◆ cswap  v1.0.0                                             updated 3m ago  ·  next in 10m     Thu 12 Nov  01:30
 
 ╭───────────────────────╮
 │ ▌ Overview          1 │  Overview   what to use next, and every account at a glance
