@@ -1,5 +1,5 @@
 //! Overview: four numbers, what to use next for each agent, and every account
-//! on one line. Only cswap's accounts: each agent's own login is on Defaults.
+//! on one line. Only cswap's accounts: each agent's own login is on Root.
 
 use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -17,7 +17,7 @@ use crate::health::{self, Level};
 use crate::model;
 use crate::store::Account;
 use crate::tui::app::{Action, App, Focus, Page};
-use crate::tui::theme::{DOT, STAR};
+use crate::tui::theme::{ARROW, DOT};
 use crate::tui::widgets::{self, card, fit, fit_right, width, Hits};
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
@@ -254,7 +254,8 @@ fn use_next(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits, agents: &[Har
                 // command, which the Accounts page also shows.
                 let cmd_w = if w < 72 { 0 } else { width(&cmd).min(w / 3) };
                 let room = w.saturating_sub(3 + agent_w + 2 + name_w + 2 + cmd_w + 1);
-                spans.push(Span::styled(format!("{STAR} "), t.s(t.accent())));
+                // An arrow, not a star: the star marks an agent's default.
+                spans.push(Span::styled(format!("{ARROW} "), t.s(t.accent())));
                 spans.push(Span::styled(fit(&acc.title(), name_w), t.s_bold()));
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(fit(&pick.headline, room), t.s_dim()));

@@ -7,6 +7,7 @@
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Datelike, Months, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -39,6 +40,9 @@ pub struct Settings {
     pub auto_skip_above_pct: f64,
     /// Check GitHub for a newer cswap, at most once a day.
     pub update_check: bool,
+    /// The agents each shell wraps, by shell name. A shell that is not here
+    /// has no list of its own yet: see `shell::chosen`.
+    pub shells: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Settings {
@@ -54,6 +58,7 @@ impl Default for Settings {
             history_days: 90,
             auto_skip_above_pct: 97.0,
             update_check: true,
+            shells: BTreeMap::new(),
         }
     }
 }
@@ -108,11 +113,11 @@ impl Default for SyncSettings {
 #[serde(default)]
 pub struct HarnessSettings {
     pub schema: u32,
-    /// When off, `cswap <harness>` hands straight to the real binary unless an
-    /// account is named with `--cswap=`.
+    /// From before wrapping was chosen per shell. It is only the starting
+    /// point for a shell that has no list of its own: see `shell::chosen`.
     pub wrapped: bool,
-    /// Which account a bare launch starts on: `default` (the agent's own
-    /// login), `auto`, or an account id.
+    /// The default: which account a launch that names none starts on. `root`
+    /// (the agent's own login), `auto`, or an account id.
     #[serde(alias = "default")]
     pub start: String,
     /// Path to the real binary, when it is not the first one on `PATH`.
@@ -130,7 +135,7 @@ impl Default for HarnessSettings {
         HarnessSettings {
             schema: SCHEMA,
             wrapped: true,
-            start: "default".to_string(),
+            start: "root".to_string(),
             binary: None,
             announce: true,
             cli_identity: true,
@@ -143,9 +148,9 @@ impl HarnessSettings {
     pub fn load(h: Harness) -> Result<HarnessSettings> {
         let mut s: HarnessSettings =
             fsx::read_json(&paths::harness_settings(h.id()))?.unwrap_or_default();
-        // The word an early build stored for the agent's own login.
-        if s.start == "native" {
-            s.start = "default".to_string();
+        // The words earlier builds stored for the agent's own login.
+        if matches!(s.start.as_str(), "native" | "default" | "") {
+            s.start = "root".to_string();
         }
         Ok(s)
     }
@@ -340,10 +345,10 @@ impl Account {
     }
 
     /// What to call this account in a list: its name. The agent's own login
-    /// is `default`.
+    /// is `root`.
     pub fn title(&self) -> String {
         if self.is_native() {
-            "default".to_string()
+            "root".to_string()
         } else if !self.meta.label.is_empty() {
             self.meta.label.clone()
         } else if let Some(e) = &self.meta.identity.email {
@@ -384,7 +389,8 @@ impl Account {
         if sel.is_empty() {
             return false;
         }
-        if self.is_native() && matches!(sel.as_str(), "native" | "default") {
+        // `root` is the word; the other two are what earlier builds called it.
+        if self.is_native() && matches!(sel.as_str(), "root" | "native" | "default") {
             return true;
         }
         sel == self.meta.id.to_string()
@@ -434,7 +440,7 @@ pub fn valid_label(label: &str) -> bool {
         && !label.chars().all(|c| c.is_ascii_digit())
         && !matches!(
             label.to_lowercase().as_str(),
-            "native" | "default" | "auto" | "select"
+            "root" | "native" | "default" | "auto" | "select"
         )
 }
 
@@ -494,7 +500,7 @@ impl Registry {
     }
 
     /// The agents' own logins, one per installed agent.
-    pub fn defaults(&self) -> impl Iterator<Item = &Account> {
+    pub fn roots(&self) -> impl Iterator<Item = &Account> {
         self.accounts.iter().filter(|a| a.is_native())
     }
 

@@ -18,7 +18,7 @@ use crate::store::Settings;
 use crate::{fsx, http, paths};
 
 pub const REPO: &str = "sidhanthapoddar99/claude-swap-rs";
-const CURRENT: &str = env!("CARGO_PKG_VERSION");
+pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Cache {
@@ -108,6 +108,26 @@ pub fn check_if_due() -> Option<String> {
         );
     }
     known_newer()
+}
+
+/// Ask GitHub now, however fresh the last check is. `Ok(None)` when this is
+/// the newest release. A check that got no answer is an error: the person
+/// asked, so "could not tell" must not read as "up to date".
+pub fn check_now() -> Result<Option<String>> {
+    if http::offline() {
+        bail!("cswap is offline (CSWAP_OFFLINE is set), so it cannot check for updates");
+    }
+    let Some(latest) = fetch_latest(10) else {
+        bail!("could not reach GitHub to check for updates");
+    };
+    let _ = fsx::write_json(
+        &cache_path(),
+        &Cache {
+            checked_at: Utc::now(),
+            latest: latest.clone(),
+        },
+    );
+    Ok(Some(latest).filter(|v| newer(v, CURRENT)))
 }
 
 /// One dim line on stderr when a newer release exists. Only when a person is

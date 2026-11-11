@@ -49,7 +49,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             app,
             "Nothing to sync yet",
             &[
-                "Each agent's default login uses the agent's own config dir, as it always did.",
+                "Each agent's root login uses the agent's own config dir, as it always did.",
                 "Add an account (a) and cswap gives it a dir of links to that one,",
                 "so settings, history, skills and plugins are shared and only the login differs.",
             ],
@@ -95,7 +95,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     if inner.height >= 3 {
         f.render_widget(
             Paragraph::new(Span::styled(
-                truncate(" the agents' default logins need no sync", w),
+                truncate(" the agents' root logins need no sync", w),
                 t.s_faint(),
             )),
             Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1),

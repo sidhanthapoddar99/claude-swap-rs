@@ -28,6 +28,9 @@ impl Sandbox {
         // real ones.
         std::env::set_var("CSWAP_PROC", dir.path().join("proc"));
         std::env::set_var("CSWAP_OFFLINE", "1");
+        // The shell page lists the login shell and reads its rc file.
+        std::env::set_var("SHELL", "/bin/zsh");
+        std::env::remove_var("ZDOTDIR");
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("XDG_DATA_HOME");
         for h in Harness::ALL {

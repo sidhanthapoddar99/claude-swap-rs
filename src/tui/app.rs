@@ -25,7 +25,7 @@ use crate::sessions::{self, Live};
 use crate::store::{Account, Cycle, HarnessSettings, Registry, Settings};
 use crate::suggest::{self, Pick};
 use crate::sync::{self, Report};
-use crate::{manage, refresh, store};
+use crate::{manage, paths, refresh, store};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Page {
@@ -33,7 +33,7 @@ pub enum Page {
     Usage,
     Resets,
     Accounts,
-    Defaults,
+    Root,
     Sync,
     Sessions,
     Analytics,
@@ -48,7 +48,7 @@ impl Page {
         Page::Usage,
         Page::Resets,
         Page::Accounts,
-        Page::Defaults,
+        Page::Root,
         Page::Sync,
         Page::Sessions,
         Page::Analytics,
@@ -61,7 +61,7 @@ impl Page {
             Page::Overview => "Overview",
             Page::Usage => "Usage",
             Page::Accounts => "Accounts",
-            Page::Defaults => "Defaults",
+            Page::Root => "Root",
             Page::Sessions => "Sessions",
             Page::Resets => "Resets",
             Page::Sync => "Sync",
@@ -76,13 +76,13 @@ impl Page {
             Page::Overview => "what to use next, and every account at a glance",
             Page::Usage => "how much of each limit is used, and when it resets",
             Page::Accounts => "add, sign in, name and remove accounts",
-            Page::Defaults => "each agent's own login, used when no account is asked for",
+            Page::Root => "each agent's own login, the one it had before cswap",
             Page::Sessions => "the agents running right now",
             Page::Resets => "what resets when, and the resets you hold · view only",
             Page::Sync => "what each account shares with the agent's own config dir",
             Page::Analytics => "how fast each account burns through its week",
             Page::Health => "checks for the problems that are otherwise silent",
-            Page::Settings => "theme, refresh, startup account, wrapping and sync rules",
+            Page::Settings => "the dashboard, every agent's options, and the shells that wrap them",
         }
     }
 
@@ -114,8 +114,8 @@ pub enum Action {
     AddAccount,
     /// Ask for the new account's name; the text is a suggestion.
     NewAccountName(Harness, String),
-    /// Make an account for the login an agent's default holds.
-    NewFromDefault(String),
+    /// Make an account for the login an agent's root holds.
+    NewFromRoot(String),
     AccountMenu(String),
     Login(String),
     DoLogin(String),
@@ -139,11 +139,37 @@ pub enum Action {
     /// -1 and +1 step a value; 0 activates the row (toggle or edit).
     SettingChange(i32),
     ModalPick(usize),
+    /// Tick or clear one box of a list of ticks.
+    Tick(usize),
+    /// A click that lands on a dialog and on nothing in it.
+    Ignore,
     ModalOk,
     ModalCancel,
     Help,
     /// One step back: from the page to the menu, from the menu out.
     Back,
+}
+
+/// Menu items in groups: the first item of each group carries its title.
+fn grouped(groups: Vec<(&'static str, Vec<ChoiceItem>)>) -> Vec<ChoiceItem> {
+    groups
+        .into_iter()
+        .flat_map(|(heading, mut items)| {
+            if let Some(first) = items.first_mut() {
+                first.heading = Some(heading);
+            }
+            items
+        })
+        .collect()
+}
+
+/// What "Set as default" means, said beside it in a menu.
+fn default_detail(bin: &str, is_default: bool) -> String {
+    if is_default {
+        "it already is".to_string()
+    } else {
+        format!("what `cswap {bin}` starts on")
+    }
 }
 
 /// What to do with the text an input modal collected.
@@ -160,11 +186,34 @@ pub enum Then {
 
 #[derive(Debug, Clone)]
 pub struct ChoiceItem {
+    /// The title of the group this item starts. An empty one only sets the
+    /// item apart from the group above it.
+    pub heading: Option<&'static str>,
     pub label: String,
     pub detail: String,
     pub enabled: bool,
     pub key: Option<char>,
     pub action: Action,
+}
+
+/// One box in a list of ticks.
+#[derive(Debug, Clone)]
+pub struct TickItem {
+    /// What the tick stands for, such as an agent's id.
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub enabled: bool,
+    /// Ticked when the dialog opened: what is saved now.
+    pub was: bool,
+    pub on: bool,
+}
+
+/// What a list of ticks is for.
+#[derive(Debug, Clone)]
+pub enum Ticks {
+    /// The agents a shell wraps.
+    Shell(String),
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +223,14 @@ pub enum Modal {
         hint: String,
         items: Vec<ChoiceItem>,
         sel: usize,
+    },
+    /// Boxes to tick. Nothing changes until it is saved.
+    Ticks {
+        title: String,
+        hint: String,
+        items: Vec<TickItem>,
+        sel: usize,
+        then: Ticks,
     },
     Input {
         title: String,
@@ -211,7 +268,23 @@ pub struct Toast {
 }
 
 pub enum Msg {
-    Refreshed { key: String, error: Option<String> },
+    Refreshed {
+        key: String,
+        error: Option<String>,
+    },
+    /// The answer to a check asked for in Settings: a newer version, or none.
+    UpdateChecked(Result<Option<String>, String>),
+}
+
+/// Where the check for a newer cswap asked for in Settings stands.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UpdateCheck {
+    #[default]
+    NotAsked,
+    Checking,
+    Newest,
+    Newer(String),
+    Failed(String),
 }
 
 /// Work that needs the real terminal back: the agent's own sign-in.
@@ -243,6 +316,8 @@ pub struct Derived {
     pub checks: Vec<Check>,
     /// A newer cswap release, when the last check found one.
     pub newer: Option<String>,
+    /// The shells on this machine and the agents each one wraps.
+    pub shells: Vec<crate::shell::Status>,
 }
 
 pub struct App {
@@ -250,7 +325,7 @@ pub struct App {
     pub hs: HashMap<Harness, HarnessSettings>,
     /// The accounts cswap holds. Every list of accounts shows these.
     pub reg: Registry,
-    /// The same, plus each agent's own login. Only the Defaults page and the
+    /// The same, plus each agent's own login. Only the Root page and the
     /// work behind the scenes (refresh, health, sessions) look here.
     pub all: Registry,
     pub live: Live,
@@ -263,6 +338,7 @@ pub struct App {
     /// Selected row per page.
     pub sel: [usize; 10],
     pub settings_tab: usize,
+    pub update: UpdateCheck,
     pub modal: Option<Modal>,
     pub toast: Option<Toast>,
     pub hits: Hits,
@@ -328,6 +404,7 @@ impl App {
             focus: Focus::Nav,
             sel: [0; 10],
             settings_tab: 0,
+            update: UpdateCheck::default(),
             modal: None,
             toast: None,
             hits: Hits::default(),
@@ -383,6 +460,7 @@ impl App {
             d.bins.insert(h, manage::find_bin(h, &self.hs[&h]).ok());
         }
         d.checks = health::run(&self.all, &self.live);
+        d.shells = crate::shell::all(&self.settings, &self.hs);
         // What the last check stored. The check itself runs on its own thread.
         d.newer = crate::update::enabled(&self.settings)
             .then(crate::update::known_newer)
@@ -462,8 +540,8 @@ impl App {
     }
 
     /// Keys of the agents' own logins, in display order.
-    pub fn default_keys(&self) -> Vec<String> {
-        self.all.defaults().map(|a| a.key()).collect()
+    pub fn root_keys(&self) -> Vec<String> {
+        self.all.roots().map(|a| a.key()).collect()
     }
 
     pub fn rows_len(&self) -> usize {
@@ -471,7 +549,7 @@ impl App {
             Page::Overview | Page::Usage | Page::Accounts | Page::Analytics => {
                 self.reg.accounts.len()
             }
-            Page::Defaults => self.default_keys().len(),
+            Page::Root => self.root_keys().len(),
             Page::Sessions => self.sessions.len(),
             Page::Sync => self.sync_keys().len(),
             Page::Resets => pages::resets::rows(self).len(),
@@ -497,7 +575,7 @@ impl App {
                 self.account_keys().get(self.row()).cloned()
             }
             Page::Sync => self.sync_keys().get(self.row()).cloned(),
-            Page::Defaults => self.default_keys().get(self.row()).cloned(),
+            Page::Root => self.root_keys().get(self.row()).cloned(),
             _ => None,
         }
     }
@@ -511,7 +589,8 @@ impl App {
         self.derived.picks.get(&h)?.iter().find(|p| p.usable)
     }
 
-    /// Is `acc` what a bare launch of its harness uses?
+    /// Is `acc` the default of its agent: where a launch that names no
+    /// account starts?
     pub fn is_default(&self, acc: &Account) -> bool {
         self.hs
             .get(&acc.harness)
@@ -634,7 +713,46 @@ impl App {
                     }
                 }
             }
+            Msg::UpdateChecked(found) => {
+                let have = crate::update::CURRENT;
+                match found {
+                    Ok(Some(v)) => {
+                        self.say(
+                            Tone::Info,
+                            format!(
+                                "cswap {v} is out (you have {have}). Install it with: cswap update"
+                            ),
+                        );
+                        self.derived.newer = Some(v.clone());
+                        self.update = UpdateCheck::Newer(v);
+                    }
+                    Ok(None) => {
+                        self.say(Tone::Good, format!("cswap {have} is the newest release."));
+                        self.derived.newer = None;
+                        self.update = UpdateCheck::Newest;
+                    }
+                    Err(e) => {
+                        self.say(Tone::Warn, e.clone());
+                        self.update = UpdateCheck::Failed(e);
+                    }
+                }
+            }
         }
+    }
+
+    /// Ask GitHub for the newest release on a thread of its own. The answer
+    /// comes back as a message, so the dashboard never waits on the network.
+    pub fn check_update(&mut self) {
+        if self.update == UpdateCheck::Checking {
+            return;
+        }
+        self.update = UpdateCheck::Checking;
+        let tx = self.tx.clone();
+        self.workers.retain(|w| !w.is_finished());
+        self.workers.push(std::thread::spawn(move || {
+            let found = crate::update::check_now().map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::UpdateChecked(found));
+        }));
     }
 
     // ------------------------------------------------------------ navigation
@@ -734,12 +852,10 @@ impl App {
             ('l', Some(k)) if on_account => self.dispatch(Action::Login(k)),
             ('e', Some(k)) if on_account => self.dispatch(Action::EditLabel(k)),
             ('E', Some(k)) if on_account => self.dispatch(Action::EditAliases(k)),
-            ('c', Some(k)) if self.page == Page::Defaults => {
-                self.dispatch(Action::NewFromDefault(k))
-            }
-            ('o', Some(k)) if self.page == Page::Defaults => self.dispatch(Action::Launch(k)),
-            ('d', Some(k)) if self.page == Page::Defaults => self.dispatch(Action::SetDefault(k)),
-            ('u', Some(k)) if self.page == Page::Defaults => self.dispatch(Action::Refresh(k)),
+            ('c', Some(k)) if self.page == Page::Root => self.dispatch(Action::NewFromRoot(k)),
+            ('o', Some(k)) if self.page == Page::Root => self.dispatch(Action::Launch(k)),
+            ('d', Some(k)) if self.page == Page::Root => self.dispatch(Action::SetDefault(k)),
+            ('u', Some(k)) if self.page == Page::Root => self.dispatch(Action::Refresh(k)),
             ('p', Some(k)) if on_account => self.dispatch(Action::EditPlan(k)),
             ('b', Some(k)) if on_account => self.dispatch(Action::EditBilling(k)),
             ('n', Some(k)) if on_account => self.dispatch(Action::AddGrant(k)),
@@ -766,9 +882,13 @@ impl App {
     }
 
     fn scroll(&mut self, delta: i64) {
-        if let Some(Modal::Choice { items, sel, .. }) = &mut self.modal {
-            let n = items.len() as i64;
-            *sel = (*sel as i64 + delta).clamp(0, (n - 1).max(0)) as usize;
+        let list = match &mut self.modal {
+            Some(Modal::Choice { items, sel, .. }) => Some((items.len(), sel)),
+            Some(Modal::Ticks { items, sel, .. }) => Some((items.len(), sel)),
+            _ => None,
+        };
+        if let Some((n, sel)) = list {
+            *sel = (*sel as i64 + delta).clamp(0, (n as i64 - 1).max(0)) as usize;
         } else if self.modal.is_none() {
             self.move_row(delta);
         }
@@ -801,6 +921,19 @@ impl App {
                         self.dispatch(Action::ModalPick(i));
                     }
                 }
+                _ => {}
+            },
+            Modal::Ticks { items, sel, .. } => match key.code {
+                KeyCode::Esc => self.modal = None,
+                KeyCode::Up | KeyCode::Char('k') => *sel = sel.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *sel = (*sel + 1).min(items.len().saturating_sub(1))
+                }
+                KeyCode::Char(' ') | KeyCode::Char('x') => {
+                    let i = *sel;
+                    self.dispatch(Action::Tick(i));
+                }
+                KeyCode::Enter | KeyCode::Char('s') => self.dispatch(Action::ModalOk),
                 _ => {}
             },
             Modal::Input { value, error, .. } => match key.code {
@@ -926,6 +1059,7 @@ impl App {
                 }
                 Ok(Some(date)) => {
                     let item = |label: &str, detail: &str, k: char, cycle| ChoiceItem {
+                        heading: None,
                         label: label.to_string(),
                         detail: detail.to_string(),
                         enabled: true,
@@ -1044,7 +1178,7 @@ impl App {
                         });
                     }
                 }
-                Page::Defaults => {
+                Page::Root => {
                     if let Some(k) = self.selected_key() {
                         self.dispatch(Action::AccountMenu(k));
                     }
@@ -1071,7 +1205,7 @@ impl App {
                 "a short name such as work, used as --cswap=work · Enter goes on to the sign-in",
                 Then::CreateAccount(h),
             ),
-            Action::NewFromDefault(key) => self.new_from_default(&key),
+            Action::NewFromRoot(key) => self.new_from_root(&key),
             Action::AccountMenu(key) => self.account_menu(&key),
             Action::Login(key) => self.login(&key),
             Action::DoLogin(key) => {
@@ -1152,6 +1286,7 @@ impl App {
             }
             Action::BillingCycle(key, date, cycle) => {
                 let item = |label: &str, detail: &str, k: char, cancelled| ChoiceItem {
+                    heading: None,
                     label: label.to_string(),
                     detail: detail.to_string(),
                     enabled: true,
@@ -1201,13 +1336,25 @@ impl App {
                 self.modal = None;
                 let Some(acc) = self.all.get(&key) else { return };
                 let (h, id) = (acc.harness, acc.meta.id.to_string());
-                let title = acc.title();
+                let bin = h.spec().bins[0];
+                let who = if acc.is_native() {
+                    format!("{}'s root login", h.name())
+                } else {
+                    acc.title()
+                };
+                if self.is_default(acc) {
+                    self.say(
+                        Tone::Info,
+                        format!("{who} is already the default for `cswap {bin}`."),
+                    );
+                    return;
+                }
                 match manage::set_start(h, &id) {
                     Ok(_) => {
                         self.reload();
                         self.say(
                             Tone::Good,
-                            format!("`{}` now starts on {title}.", h.spec().bins[0]),
+                            format!("{who} is now the default for `cswap {bin}`."),
                         );
                     }
                     Err(e) => self.fail(e),
@@ -1294,6 +1441,17 @@ impl App {
                     }
                 }
             }
+            Action::Ignore => {}
+            Action::Tick(i) => {
+                if let Some(Modal::Ticks { items, sel, .. }) = &mut self.modal {
+                    if let Some(item) = items.get_mut(i) {
+                        *sel = i;
+                        if item.enabled {
+                            item.on = !item.on;
+                        }
+                    }
+                }
+            }
             Action::ModalOk => match self.modal.clone() {
                 Some(Modal::Confirm { action, .. }) => {
                     self.modal = None;
@@ -1301,6 +1459,10 @@ impl App {
                 }
                 Some(Modal::Input { then, value, .. }) => self.submit(then, value),
                 Some(Modal::Choice { sel, .. }) => self.dispatch(Action::ModalPick(sel)),
+                Some(Modal::Ticks { items, then, .. }) => {
+                    self.modal = None;
+                    self.save_ticks(then, items);
+                }
                 _ => self.modal = None,
             },
         }
@@ -1324,6 +1486,7 @@ impl App {
                     detail.push_str(" · experimental");
                 }
                 ChoiceItem {
+                    heading: None,
                     label: h.name().to_string(),
                     detail,
                     enabled: installed && h.wrappable(),
@@ -1341,10 +1504,10 @@ impl App {
         });
     }
 
-    /// Start an account for the login an agent's default holds. The login is
+    /// Start an account for the login an agent's root holds. The login is
     /// not copied: one login in two places stops working as soon as either
     /// side renews it. The agent's sign-in runs, and you sign in again.
-    fn new_from_default(&mut self, key: &str) {
+    fn new_from_root(&mut self, key: &str) {
         let Some(acc) = self.all.get(key) else { return };
         let h = acc.harness;
         if !self.derived.logged_in.contains(key) {
@@ -1377,7 +1540,7 @@ impl App {
             e => e.to_string(),
         };
         self.input(
-            &format!("Account from {}'s default login", h.name()),
+            &format!("Account from {}'s root login", h.name()),
             "Name",
             &suggestion,
             &format!("next you sign in as {who} again · cswap never copies a login"),
@@ -1385,66 +1548,162 @@ impl App {
         );
     }
 
+    /// Tick the agents a shell wraps. A tick is what the shell does now: an
+    /// agent counts only once the shell's rc file loads cswap.
+    pub fn shell_menu(&mut self, at: usize) {
+        let Some(shell) = self.derived.shells.get(at) else {
+            return;
+        };
+        let items = Harness::ALL
+            .into_iter()
+            .map(|h| {
+                let installed = self.derived.bins.get(&h).is_some_and(|b| b.is_some());
+                let on = shell.wraps(h);
+                TickItem {
+                    id: h.id().to_string(),
+                    label: h.spec().bins[0].to_string(),
+                    detail: if installed {
+                        h.name().to_string()
+                    } else {
+                        format!("{} · not installed", h.name())
+                    },
+                    enabled: installed,
+                    was: on,
+                    on,
+                }
+            })
+            .collect();
+        let hint = match (&shell.rc, shell.loaded) {
+            (Some(rc), Some(true)) => format!("{} loads cswap", paths::tilde(rc)),
+            (Some(rc), _) => format!("saving adds one line to {}", paths::tilde(rc)),
+            (None, _) => {
+                "cswap cannot write this shell's profile: it shows the line to add".to_string()
+            }
+        };
+        self.modal = Some(Modal::Ticks {
+            title: format!("Agents wrapped in {}", shell.name),
+            hint,
+            items,
+            sel: 0,
+            then: Ticks::Shell(shell.name.to_string()),
+        });
+    }
+
+    fn save_ticks(&mut self, then: Ticks, items: Vec<TickItem>) {
+        if items.iter().all(|it| it.on == it.was) {
+            self.say(Tone::Info, "Nothing changed.");
+            return;
+        }
+        match then {
+            Ticks::Shell(name) => {
+                let agents: Vec<Harness> = Harness::ALL
+                    .into_iter()
+                    .filter(|h| items.iter().any(|it| it.on && it.id == h.id()))
+                    .collect();
+                let saved = crate::shell::set_chosen(&name, &agents);
+                self.reload();
+                let saved = match saved {
+                    Ok(saved) => saved,
+                    Err(e) => return self.fail(e),
+                };
+                let bins: Vec<&str> = agents.iter().map(|h| h.spec().bins[0]).collect();
+                let what = if bins.is_empty() {
+                    format!("{name} wraps no agent now.")
+                } else {
+                    format!("{name} now wraps {}.", bins.join(", "))
+                };
+                if let Some(line) = saved.by_hand {
+                    self.modal = Some(Modal::Info {
+                        title: what,
+                        body: vec![
+                            format!("Add this line to {name}'s profile, then open a new terminal:"),
+                            String::new(),
+                            line,
+                        ],
+                    });
+                    return;
+                }
+                let added = match saved.added_to {
+                    Some(rc) => format!(" Added the cswap line to {}.", paths::tilde(&rc)),
+                    None => String::new(),
+                };
+                self.say(
+                    Tone::Good,
+                    format!("{what}{added} Open a new terminal to use it."),
+                );
+            }
+        }
+    }
+
     /// What can be done with an agent's own login.
-    fn default_menu(&mut self, key: &str) {
+    fn root_menu(&mut self, key: &str) {
         let Some(acc) = self.all.get(key) else { return };
         let h = acc.harness;
         let bin = h.spec().bins[0];
         let signed_in = self.derived.logged_in.contains(key);
+        let is_default = self.is_default(acc);
         let twin = manage::duplicate_of(&self.all, acc).map(|t| t.title());
         let k = key.to_string();
         let item =
             |label: String, detail: String, key: char, enabled: bool, action: Action| ChoiceItem {
+                heading: None,
                 label,
                 detail,
                 enabled,
                 key: Some(key),
                 action,
             };
-        let items = vec![
-            item(
-                "Create an account from this login".to_string(),
-                match &twin {
-                    Some(t) => format!("{t} already holds it"),
-                    None if !signed_in => "not signed in".to_string(),
-                    None => "name it, then sign in again".to_string(),
-                },
-                'c',
-                signed_in && twin.is_none() && h.wrappable(),
-                Action::NewFromDefault(k.clone()),
+        let items = grouped(vec![
+            (
+                "LAUNCH",
+                vec![
+                    item(
+                        format!("Open {bin} on its root login"),
+                        "closes the dashboard and starts the agent".to_string(),
+                        'o',
+                        signed_in,
+                        Action::Launch(k.clone()),
+                    ),
+                    item(
+                        "Set as default".to_string(),
+                        default_detail(bin, is_default),
+                        'd',
+                        !is_default,
+                        Action::SetDefault(k.clone()),
+                    ),
+                ],
             ),
-            item(
-                format!("Open {bin} on its default login"),
-                "closes the dashboard and starts the agent".to_string(),
-                'o',
-                signed_in,
-                Action::Launch(k.clone()),
+            (
+                "USAGE",
+                vec![item(
+                    "Refresh usage".to_string(),
+                    String::new(),
+                    'u',
+                    signed_in,
+                    Action::Refresh(k.clone()),
+                )],
             ),
-            item(
-                format!("Start a bare `{bin}` here"),
-                if self.is_default(acc) {
-                    "it already does".to_string()
-                } else {
-                    "instead of on an account".to_string()
-                },
-                'd',
-                !self.is_default(acc),
-                Action::SetDefault(k.clone()),
+            (
+                "ACCOUNT",
+                vec![item(
+                    "Create an account from this login".to_string(),
+                    match &twin {
+                        Some(t) => format!("{t} already holds it"),
+                        None if !signed_in => "not signed in".to_string(),
+                        None => "name it, then sign in again".to_string(),
+                    },
+                    'c',
+                    signed_in && twin.is_none() && h.wrappable(),
+                    Action::NewFromRoot(k),
+                )],
             ),
-            item(
-                "Refresh usage".to_string(),
-                String::new(),
-                'u',
-                signed_in,
-                Action::Refresh(k),
-            ),
-        ];
+        ]);
         let mut hint = acc.email().to_string();
         if hint.is_empty() {
             hint = "not signed in".to_string();
         }
         self.modal = Some(Modal::Choice {
-            title: format!("{} · default login", h.name()),
+            title: format!("{} · root login", h.name()),
             hint,
             items,
             sel: 0,
@@ -1454,94 +1713,33 @@ impl App {
     fn account_menu(&mut self, key: &str) {
         let Some(acc) = self.all.get(key) else { return };
         if acc.is_native() {
-            self.default_menu(key);
+            self.root_menu(key);
             return;
         }
         let h = acc.harness;
         let signed_in = self.derived.logged_in.contains(key);
-        let native = acc.is_native();
+        let is_default = self.is_default(acc);
         let bin = h.spec().bins[0];
         let k = key.to_string();
         let item =
-            |label: String, detail: &str, key: char, enabled: bool, action: Action| ChoiceItem {
-                label,
+            |label: &str, detail: &str, key: char, enabled: bool, action: Action| ChoiceItem {
+                heading: None,
+                label: label.to_string(),
                 detail: detail.to_string(),
                 enabled,
                 key: Some(key),
                 action,
             };
-        let mut items = vec![
+        let mut usage = vec![
             item(
-                format!("Open {bin} on this account"),
-                "closes the dashboard and starts the agent",
-                'o',
-                signed_in,
-                Action::Launch(k.clone()),
-            ),
-            item(
-                format!("Start a bare `{bin}` here"),
-                if self.is_default(acc) {
-                    "it already does"
-                } else {
-                    "what runs with no --cswap"
-                },
-                'd',
-                !self.is_default(acc),
-                Action::SetDefault(k.clone()),
-            ),
-            item(
-                "Refresh usage".to_string(),
+                "Refresh usage",
                 "",
                 'u',
                 signed_in,
                 Action::Refresh(k.clone()),
             ),
             item(
-                if signed_in {
-                    "Sign in again"
-                } else {
-                    "Sign in"
-                }
-                .to_string(),
-                if native {
-                    "the agent's own login: sign in by running it"
-                } else {
-                    ""
-                },
-                'l',
-                !native,
-                Action::Login(k.clone()),
-            ),
-            item(
-                "Rename".to_string(),
-                "",
-                'e',
-                true,
-                Action::EditLabel(k.clone()),
-            ),
-            item(
-                "Set aliases".to_string(),
-                "extra names it answers to",
-                'E',
-                true,
-                Action::EditAliases(k.clone()),
-            ),
-            item(
-                "Set plan name".to_string(),
-                "",
-                'p',
-                true,
-                Action::EditPlan(k.clone()),
-            ),
-            item(
-                "Set renewal date".to_string(),
-                "monthly or yearly",
-                'b',
-                true,
-                Action::EditBilling(k.clone()),
-            ),
-            item(
-                "Note an available reset".to_string(),
+                "Note an available reset",
                 "for resets the vendor does not report",
                 'n',
                 true,
@@ -1549,25 +1747,79 @@ impl App {
             ),
         ];
         if !acc.meta.grants.is_empty() {
-            items.push(item(
-                "Clear hand-noted resets".to_string(),
+            usage.push(item(
+                "Clear hand-noted resets",
                 "",
                 'c',
                 true,
                 Action::ClearGrants(k.clone()),
             ));
         }
-        items.push(item(
-            "Remove account".to_string(),
-            if native {
-                "not cswap's to remove"
-            } else {
-                "deletes its login"
-            },
-            'x',
-            !native,
-            Action::Remove(k),
-        ));
+        let items = grouped(vec![
+            (
+                "LAUNCH",
+                vec![
+                    item(
+                        &format!("Open {bin} on this account"),
+                        "closes the dashboard and starts the agent",
+                        'o',
+                        signed_in,
+                        Action::Launch(k.clone()),
+                    ),
+                    item(
+                        "Set as default",
+                        &default_detail(bin, is_default),
+                        'd',
+                        !is_default,
+                        Action::SetDefault(k.clone()),
+                    ),
+                ],
+            ),
+            ("USAGE", usage),
+            (
+                "ACCOUNT",
+                vec![
+                    item(
+                        if signed_in {
+                            "Sign in again"
+                        } else {
+                            "Sign in"
+                        },
+                        "",
+                        'l',
+                        true,
+                        Action::Login(k.clone()),
+                    ),
+                    item("Rename", "", 'e', true, Action::EditLabel(k.clone())),
+                    item(
+                        "Set aliases",
+                        "extra names it answers to",
+                        'E',
+                        true,
+                        Action::EditAliases(k.clone()),
+                    ),
+                    item("Set plan name", "", 'p', true, Action::EditPlan(k.clone())),
+                    item(
+                        "Set renewal date",
+                        "monthly or yearly",
+                        'b',
+                        true,
+                        Action::EditBilling(k.clone()),
+                    ),
+                ],
+            ),
+            // Set apart, so it is not picked by a slip.
+            (
+                "",
+                vec![item(
+                    "Remove account",
+                    "deletes its login",
+                    'x',
+                    true,
+                    Action::Remove(k),
+                )],
+            ),
+        ]);
         let mut hint = acc.email().to_string();
         if hint.is_empty() {
             hint = key.to_string();

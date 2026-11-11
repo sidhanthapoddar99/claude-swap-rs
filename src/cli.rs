@@ -17,7 +17,7 @@ use crate::store::{Account, HarnessSettings, Registry, Settings};
 use crate::sync::{self, State};
 use crate::text::{fit, fit_right, Paint};
 use crate::view::{self, Kind};
-use crate::{manage, model, paths, picker, refresh, suggest, wrap};
+use crate::{manage, model, paths, picker, refresh, shell, suggest, wrap};
 
 /// Everything a command needs, read once.
 pub struct Ctx {
@@ -90,7 +90,7 @@ impl Ctx {
     fn agent_header(&self, h: Harness) -> String {
         let hs = &self.hs[&h];
         let default = match hs.start.as_str() {
-            "default" => "its default login".to_string(),
+            "root" => "its root login".to_string(),
             "auto" => "the best account (auto)".to_string(),
             id => self
                 .reg
@@ -100,9 +100,6 @@ impl Ctx {
                 .unwrap_or_else(|| format!("{id} (missing)")),
         };
         let mut notes = vec![format!("`{}` starts on {default}", h.spec().bins[0])];
-        if !hs.wrapped {
-            notes.push("not wrapped".to_string());
-        }
         if !manage::installed(h) {
             notes.push("not installed".to_string());
         }
@@ -243,18 +240,18 @@ pub fn list(as_json: bool) -> Result<()> {
     println!();
     println!(
         "{}",
-        p.dim("★ a bare launch starts here · `cswap usage` for every limit · `cswap` alone opens the dashboard")
+        p.dim("★ the default: where `cswap <agent>` starts · `cswap usage` for every limit · `cswap` alone opens the dashboard")
     );
     Ok(())
 }
 
 /// `cswap defaults`: each agent's own login.
-pub fn defaults(as_json: bool) -> Result<()> {
+pub fn root(as_json: bool) -> Result<()> {
     let c = Ctx::load()?;
     if as_json {
         let all: Vec<_> = c
             .reg
-            .defaults()
+            .roots()
             .map(|a| {
                 let mut v = account_json(&c, a);
                 v["same_login_as"] = json!(c.twin(a).map(|t| t.title()));
@@ -264,17 +261,17 @@ pub fn defaults(as_json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&all)?);
         return Ok(());
     }
-    if c.reg.defaults().next().is_none() {
+    if c.reg.roots().next().is_none() {
         println!("No agent found. cswap looks for claude, codex, agy and grok.");
         return Ok(());
     }
     let p = &c.p;
-    println!("{}", p.bold("Defaults"));
+    println!("{}", p.bold("Root logins"));
     println!(
         "  {}",
-        p.dim("each agent's own login, used when no account is asked for")
+        p.dim("each agent's own login, the one it had before cswap")
     );
-    for acc in c.reg.defaults() {
+    for acc in c.reg.roots() {
         let h = acc.harness;
         let star = if c.is_default(acc) {
             p.accent("★")
@@ -298,7 +295,7 @@ pub fn defaults(as_json: bool) -> Result<()> {
     println!();
     println!(
         "{}",
-        p.dim("★ a bare launch starts here · make an account from a login with: cswap add <agent> <name>")
+        p.dim("★ the default: where `cswap <agent>` starts · make an account from a login with: cswap add <agent> <name>")
     );
     Ok(())
 }
@@ -593,8 +590,9 @@ pub fn suggest_cmd(agent: Option<&str>) -> Result<()> {
             if pick.usable {
                 first = false;
             }
+            // An arrow, not a star: the star marks an agent's default.
             let star = if best {
-                p.accent("★")
+                p.accent("▸")
             } else {
                 " ".to_string()
             };
@@ -796,7 +794,7 @@ pub fn login(account: &str) -> Result<()> {
     let acc = reg.get_mut(&key).context("the account is gone")?;
     if acc.is_native() {
         bail!(
-            "{key} is {}'s default login. Sign in by running `{}` itself",
+            "{key} is {}'s root login. Sign in by running `{}` itself",
             acc.harness.name(),
             acc.harness.spec().bins[0]
         );
@@ -871,13 +869,13 @@ pub fn alias(account: &str, aliases: &[String], clear: bool) -> Result<()> {
     Ok(())
 }
 
-/// `cswap use`: which account a bare launch of an agent starts on.
+/// `cswap use`: an agent's default, the account a launch that names none starts on.
 pub fn use_cmd(agent: &str, account: Option<&str>) -> Result<()> {
     let h = harness(agent)?;
     let bin = h.spec().bins[0];
     let describe = |value: &str| -> Result<String> {
         Ok(match value {
-            "default" => format!("{}'s default login", h.name()),
+            "root" => format!("{}'s root login", h.name()),
             "auto" => "the best account at every launch (auto)".to_string(),
             id => {
                 let reg = Registry::load()?;
@@ -895,7 +893,7 @@ pub fn use_cmd(agent: &str, account: Option<&str>) -> Result<()> {
             let hs = HarnessSettings::load(h)?;
             println!("`{bin}` starts on {}.", describe(&hs.start)?);
             println!(
-                "Change it with: cswap use {} <account | default | auto>",
+                "Change it with: cswap use {} <account | root | auto>",
                 h.id()
             );
         }
@@ -1078,52 +1076,16 @@ pub fn start(default_only: bool, agent: Option<&str>, args: Vec<String>) -> Resu
 // ----------------------------------------------------------------- shell-init
 
 pub fn shell_init(shell: &str) -> Result<()> {
-    let bins: Vec<(&str, &str)> = Harness::ALL
-        .into_iter()
-        .filter(|h| manage::installed(*h))
-        .flat_map(|h| h.spec().bins.iter().map(move |b| (*b, h.id())))
-        .collect();
-    let mut out = String::new();
-    match shell {
-        "bash" | "zsh" | "sh" => {
-            out.push_str("# cswap shell integration. Each agent runs through cswap, which picks the account.\n");
-            for (bin, id) in &bins {
-                // An alias of the same name would win over the function.
-                out.push_str(&format!(
-                    "unalias {bin} 2>/dev/null\n{bin}() {{ command cswap {id} \"$@\"; }}\n"
-                ));
-            }
-        }
-        "fish" => {
-            out.push_str("# cswap shell integration. Each agent runs through cswap, which picks the account.\n");
-            for (bin, id) in &bins {
-                out.push_str(&format!(
-                    "function {bin} --description 'cswap: {bin}'\n    command cswap {id} $argv\nend\n"
-                ));
-            }
-        }
-        "powershell" | "pwsh" => {
-            out.push_str("# cswap shell integration. Each agent runs through cswap, which picks the account.\n");
-            for (bin, id) in &bins {
-                out.push_str(&format!("function {bin} {{ cswap.exe {id} @args }}\n"));
-            }
-        }
-        other => bail!("'{other}' is not a shell cswap knows. Use bash, zsh, fish or powershell"),
-    }
-    print!("{out}");
+    let settings = Settings::load()?;
+    // A function for every agent this shell wraps that is installed.
+    let agents: Vec<Harness> = shell::chosen(&settings, shell, |h| {
+        HarnessSettings::load(h).map(|s| s.wrapped).unwrap_or(true)
+    })
+    .into_iter()
+    .filter(|h| manage::installed(*h))
+    .collect();
+    print!("{}", shell::init_text(shell, &agents)?);
     Ok(())
-}
-
-/// The line to put in an rc file for `shell`.
-pub fn shell_hint(shell: &str) -> String {
-    match shell {
-        "fish" => "cswap shell-init fish | source".to_string(),
-        "powershell" | "pwsh" => {
-            "Invoke-Expression (& cswap shell-init powershell | Out-String)".to_string()
-        }
-        "zsh" => "eval \"$(cswap shell-init zsh)\"".to_string(),
-        _ => "eval \"$(cswap shell-init bash)\"".to_string(),
-    }
 }
 
 #[cfg(test)]

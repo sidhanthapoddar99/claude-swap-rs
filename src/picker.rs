@@ -146,7 +146,7 @@ fn account_row(
     p: &Paint,
 ) -> String {
     let now = Utc::now();
-    let star = if best { "★" } else { " " };
+    let star = if best { "▸" } else { " " };
     let mut title = acc.title();
     if view::is_default(acc, hs) {
         title.push_str(" (default)");
@@ -265,7 +265,7 @@ pub fn pick_harness(reg: &Registry) -> Result<Option<Harness>> {
             let n = reg.of(h).count();
             let hs = HarnessSettings::load(h).unwrap_or_default();
             let default = match hs.start.as_str() {
-                "default" => "its default login".to_string(),
+                "root" => "its root login".to_string(),
                 "auto" => "auto".to_string(),
                 id => reg
                     .of(h)

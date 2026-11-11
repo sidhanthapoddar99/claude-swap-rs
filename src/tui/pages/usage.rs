@@ -13,22 +13,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Borders, Paragraph};
 use ratatui::Frame;
 
-use super::{
-    dot, fit_date, head, name_cell, no_data, paint_row, plan_text, row_style, window_cells,
-    window_w, IN_W,
-};
+use super::{dot, head, limit_lines, name_cell, paint_row, plan_text, row_style, LimitCols};
 use crate::harness::Harness;
 use crate::store::Account;
 use crate::tui::app::{Action, App, Focus};
-use crate::tui::widgets::{self, card_with, fit, truncate, Hits};
-use crate::view::{self, all_windows, credits_text, pace_warning};
+use crate::tui::widgets::{self, card_with, fit, Hits};
 
-/// The limit's name: `week`, `Fable`, `5h`, `extra`.
-const LABEL_W: usize = 7;
 /// The widest the bar gets.
 const BAR_MAX: usize = 30;
-/// The narrowest it gets before the date gives way to it.
-const BAR_MIN: usize = 8;
 
 /// Column widths for a box whose inside is `w` cells wide.
 struct Cols {
@@ -41,32 +33,26 @@ struct Cols {
 impl Cols {
     fn new(w: usize, clock_24h: bool) -> Cols {
         let name = (w / 5).clamp(14, 22);
-        // marker, dot, name, limit, the bar's own cells and the spaces between.
-        let fixed = 3 + name + 1 + LABEL_W + 1 + window_w(0);
-        let rest = w.saturating_sub(fixed);
-        // `Fri 13 Nov · 13:05`, or `Fri 13 Nov · 12:05 pm`; sixteen cells
-        // hold either once `fit_date` has shortened it.
-        let full = if clock_24h { 18 } else { 21 };
-        let date = [full, 16]
-            .into_iter()
-            .find(|d| rest > BAR_MIN + d)
-            .unwrap_or(0);
-        let taken = if date > 0 { date + 1 } else { 0 };
+        // The marker, the dot, the name and a space; the limit has the rest.
+        let lim = LimitCols::new(w.saturating_sub(3 + name + 1), BAR_MAX, clock_24h);
         Cols {
             name,
-            bar: rest.saturating_sub(taken).clamp(BAR_MIN, BAR_MAX),
-            date,
+            bar: lim.bar,
+            date: lim.date,
         }
     }
 
-    /// Everything from the bar to the end of the line.
-    fn cells_w(&self) -> usize {
-        window_w(self.bar) + if self.date > 0 { 1 + self.date } else { 0 }
+    /// The part of the line that is about one limit.
+    fn lim(&self) -> LimitCols {
+        LimitCols {
+            bar: self.bar,
+            date: self.date,
+        }
     }
 
     /// The whole line.
     fn width(&self) -> usize {
-        3 + self.name + 1 + LABEL_W + 1 + self.cells_w()
+        3 + self.name + 1 + self.lim().width()
     }
 }
 
@@ -81,70 +67,8 @@ fn block(
     now: DateTime<Utc>,
 ) -> Vec<Line<'static>> {
     let t = &app.theme;
-    let rest_w = LABEL_W + 1 + c.cells_w();
-    let note_w = rest_w - LABEL_W - 1;
     // What goes right of the name, a line at a time.
-    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
-
-    let signed_in = app.derived.logged_in.contains(&acc.key());
-    match acc.snapshot().filter(|_| signed_in) {
-        None => {
-            let (text, color) = no_data(app, acc);
-            rows.push(vec![Span::styled(
-                truncate(&text, rest_w),
-                Style::default().fg(color),
-            )]);
-        }
-        Some(snap) => {
-            for (i, win) in all_windows(snap).into_iter().enumerate() {
-                let mut cells = vec![
-                    Span::styled(
-                        fit(&win.label, LABEL_W),
-                        if i == 0 { t.s_text() } else { t.s_dim() },
-                    ),
-                    Span::raw(" "),
-                ];
-                cells.extend(window_cells(app, win, c.bar, now));
-                if c.date > 0 {
-                    let date = match win.resets_at {
-                        Some(at) if at > now => {
-                            fit_date(view::when(at, now, app.settings.clock_24h), c.date)
-                        }
-                        _ => "–".to_string(),
-                    };
-                    cells.push(Span::raw(" "));
-                    cells.push(Span::styled(fit(&date, c.date), t.s_dim()));
-                }
-                rows.push(cells);
-                // Said only when the limit will be hit before it resets: the
-                // bar and its pace marker already show everything else.
-                if let Some(warning) = pace_warning(win, now) {
-                    rows.push(vec![
-                        Span::raw(" ".repeat(LABEL_W + 1)),
-                        Span::styled(truncate(&warning, note_w), t.s(t.warn())),
-                    ]);
-                }
-            }
-            if let Some(text) = snap.credits.as_ref().and_then(credits_text) {
-                rows.push(vec![
-                    Span::styled(fit("extra", LABEL_W + 1), t.s_dim()),
-                    Span::styled(truncate(&text, note_w), t.s_dim()),
-                ]);
-            }
-            if rows.is_empty() {
-                rows.push(vec![Span::styled(
-                    truncate("the vendor reported no limits", rest_w),
-                    t.s_dim(),
-                )]);
-            }
-            if let Some(e) = &acc.meta.refresh.error {
-                rows.push(vec![
-                    Span::styled(fit("stale", LABEL_W + 1), t.s(t.warn())),
-                    Span::styled(truncate(e, note_w), t.s(t.warn())),
-                ]);
-            }
-        }
-    }
+    let mut rows = limit_lines(app, acc, &c.lim(), now);
 
     // The plan has the second line of the name column, so it gets a line
     // even when the account has one limit only.
@@ -273,17 +197,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
 
     // One header for all the boxes, above the first.
     let view_h = area.height as usize - 1;
-    let mut header = vec![
-        Span::raw("   "),
-        head(t, "ACCOUNT", c.name + 1),
-        head(t, "LIMIT", LABEL_W + 1),
-        head(t, "USED", c.bar + 1 + 4 + 2),
-        head(t, "IN", IN_W),
-    ];
-    if c.date > 0 {
-        header.push(Span::raw(" "));
-        header.push(head(t, "DATE", c.date));
-    }
+    let mut header = vec![Span::raw("   "), head(t, "ACCOUNT", c.name + 1)];
+    header.extend(c.lim().header(t));
     f.render_widget(
         Paragraph::new(Line::from(header)),
         Rect::new(area.x + 2, area.y, area.width - 4, 1),
@@ -364,6 +279,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::pages::BAR_MIN;
 
     #[test]
     fn the_columns_never_ask_for_more_than_the_width() {

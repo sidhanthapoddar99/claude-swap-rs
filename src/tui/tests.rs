@@ -6,7 +6,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use std::sync::mpsc;
 
-use super::app::{Action, App, Focus, Modal, Msg, Page, Session, Suspend};
+use super::app::{Action, App, Focus, Modal, Msg, Page, Session, Suspend, UpdateCheck};
 use super::ui;
 use crate::harness::Harness;
 use crate::store::Registry;
@@ -91,19 +91,20 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
                 "Renewal",
                 "Sign-in",
                 "Launch",
+                "Usage",
                 "Resets",
                 "Details",
             ],
         ),
         (
-            Page::Defaults,
+            Page::Root,
             &[
                 "AGENT",
                 "LOGIN",
                 "dev@example.com",
                 "Max",
                 "SuperGrok",
-                "default login",
+                "root login",
             ],
         ),
         (Page::Sessions, &["Nothing is running"]),
@@ -132,7 +133,9 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
                 "Refresh every",
                 "10 min",
                 "General",
+                "Harness",
                 "Shell",
+                "Check for updates now",
             ],
         ),
     ];
@@ -145,9 +148,10 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
                 text.contains(page.title()),
                 "{page:?} at {w}x{h} has no title"
             );
-            // The agent's own login is its "default", never "native". The
-            // short windows are listed on the Usage page and nowhere else.
-            let short = if page == Page::Usage {
+            // The agent's own login is its "root", never "native". The short
+            // windows are listed on the Usage page and in an account's own
+            // Usage card, and nowhere else.
+            let short = if matches!(page, Page::Usage | Page::Accounts) {
                 "5-hour"
             } else {
                 "  5h "
@@ -174,17 +178,14 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
 }
 
 #[test]
-fn the_default_logins_are_on_their_own_page_and_nowhere_else() {
+fn the_root_logins_are_on_their_own_page_and_nowhere_else() {
     let sb = Sandbox::new();
     sb.demo();
     let (mut app, _rx) = app();
     // Only cswap's accounts are rows; an agent's own login is not an account.
     assert_eq!(app.account_keys(), ["claude-1", "claude-2", "codex-1"]);
-    assert_eq!(
-        app.default_keys(),
-        ["claude-0", "codex-0", "agy-0", "grok-0"]
-    );
-    // What only the default logins have: a login and a plan of their own.
+    assert_eq!(app.root_keys(), ["claude-0", "codex-0", "agy-0", "grok-0"]);
+    // What only the root logins have: a login and a plan of their own.
     for page in [
         Page::Overview,
         Page::Usage,
@@ -199,9 +200,9 @@ fn the_default_logins_are_on_their_own_page_and_nowhere_else() {
             assert!(!text.contains(word), "{page:?} shows '{word}'\n{text}");
         }
     }
-    app.dispatch(Action::Go(Page::Defaults));
+    app.dispatch(Action::Go(Page::Root));
     let text = screen(&mut app, 132, 40);
-    show("defaults", &text);
+    show("root", &text);
     for word in ["Claude Code", "Codex", "Antigravity", "Grok", "47%"] {
         assert!(text.contains(word), "missing '{word}'\n{text}");
     }
@@ -260,11 +261,17 @@ fn the_account_selected_on_the_accounts_page_is_spelled_out() {
         "Ultra",
         "claude --cswap=work",
         "accounts/claude-1",
-        // The resets it holds and its credits, in a part of their own.
+        // Every limit it has, the short one too, and its credits.
+        "╭ Usage",
+        "LIMIT",
+        "week",
+        "Opus",
+        "5h",
+        "$12.40 of $50.00 spent",
+        // The resets it holds, in a part of their own.
         "1 to spend",
         "COUNT",
         "weekly",
-        "$12.40 of $50.00 spent",
         // The wordy part comes last.
         "Details",
         "monthly · set by hand",
@@ -281,12 +288,13 @@ fn the_account_selected_on_the_accounts_page_is_spelled_out() {
         !renewal.contains("monthly") && !renewal.contains("press"),
         "{renewal}"
     );
-    // The three parts, in order, with the add button on the last line of the list.
+    // The four parts, in order, with the add button on the last line of the list.
     let at = |word: &str| {
         text.find(word)
             .unwrap_or_else(|| panic!("no '{word}'\n{text}"))
     };
-    assert!(at("Login") < at("╭ Resets") && at("╭ Resets") < at("╭ Details"));
+    assert!(at("Login") < at("╭ Usage") && at("╭ Usage") < at("╭ Resets"));
+    assert!(at("╭ Resets") < at("╭ Details"));
     let rows: Vec<&str> = text.lines().collect();
     let add = rows
         .iter()
@@ -410,8 +418,8 @@ fn adding_an_account_asks_for_the_agent_then_a_name_then_hands_over() {
 
 /// Press `c` on the Claude row of the Defaults page, accept the name on
 /// offer, and let the fake agent sign in. Returns the new account's key.
-fn account_from_default(app: &mut App) -> String {
-    app.dispatch(Action::Go(Page::Defaults));
+fn account_from_root(app: &mut App) -> String {
+    app.dispatch(Action::Go(Page::Root));
     assert_eq!(app.selected_key().as_deref(), Some("claude-0"));
     key(app, KeyCode::Char('c'));
     key(app, KeyCode::Enter);
@@ -429,18 +437,18 @@ fn account_from_default(app: &mut App) -> String {
 }
 
 #[test]
-fn a_default_login_becomes_an_account_by_naming_it_and_signing_in_again() {
+fn a_root_login_becomes_an_account_by_naming_it_and_signing_in_again() {
     let sb = Sandbox::new();
     sb.demo();
     sb.fake_agents();
     let (mut app, _rx) = app();
-    app.dispatch(Action::Go(Page::Defaults));
+    app.dispatch(Action::Go(Page::Root));
     key(&mut app, KeyCode::Char('c'));
     let text = screen(&mut app, 132, 40);
-    show("defaults: make account", &text);
+    show("root: make account", &text);
     // The name on offer comes from the login's email, and nothing is copied.
     assert!(
-        text.contains("default login") && text.contains("never copies a login"),
+        text.contains("root login") && text.contains("never copies a login"),
         "{text}"
     );
     assert!(
@@ -450,12 +458,12 @@ fn a_default_login_becomes_an_account_by_naming_it_and_signing_in_again() {
     );
     key(&mut app, KeyCode::Esc);
 
-    let new_key = account_from_default(&mut app);
+    let new_key = account_from_root(&mut app);
     let reg = Registry::load().unwrap();
     let acc = reg.get(&new_key).unwrap();
     assert_eq!(acc.meta.label, "dev");
     assert_eq!(acc.email(), "new@example.com");
-    // Its login is its own: nothing of the default's was copied into it.
+    // Its login is its own: nothing of the root's was copied into it.
     assert!(!acc.is_native());
     assert_eq!(app.page, Page::Accounts);
     assert_eq!(app.selected_key().as_deref(), Some(new_key.as_str()));
@@ -468,7 +476,7 @@ fn a_login_can_be_held_by_one_account_only() {
     sb.fake_agents();
     let (mut app, _rx) = app();
     // The fake agent always signs in as the same person.
-    let first = account_from_default(&mut app);
+    let first = account_from_root(&mut app);
     assert!(Registry::load().unwrap().get(&first).is_some());
 
     key(&mut app, KeyCode::Char('a'));
@@ -545,7 +553,7 @@ fn the_sessions_page_lists_what_is_running_and_where() {
         "2h",
         "/srv/api",
         "Codex",
-        "default",
+        "root",
         "77",
     ] {
         assert!(text.contains(word), "missing '{word}'\n{text}");
@@ -579,7 +587,7 @@ fn keys_move_between_the_menu_and_the_page() {
     key(&mut app, KeyCode::Char('3'));
     assert_eq!(app.page, Page::Resets);
     key(&mut app, KeyCode::Char('5'));
-    assert_eq!(app.page, Page::Defaults);
+    assert_eq!(app.page, Page::Root);
     key(&mut app, KeyCode::Char('7'));
     assert_eq!(app.page, Page::Sessions);
     key(&mut app, KeyCode::Char('0'));
@@ -653,27 +661,268 @@ fn settings_change_on_disk() {
     key(&mut app, KeyCode::Down); // past the theme
     key(&mut app, KeyCode::Right); // refresh every: 10 -> 15
     assert_eq!(crate::store::Settings::load().unwrap().refresh_minutes, 15);
-    key(&mut app, KeyCode::Char(']')); // the Claude Code tab
-    let text = screen(&mut app, 132, 40);
-    show("settings/claude", &text);
+
+    // One tab holds every agent's options, a group each, after the ones
+    // they share. Where a launch starts is not set here.
+    key(&mut app, KeyCode::Char(']'));
+    let text = screen(&mut app, 132, 60);
+    show("settings/harness", &text);
+    for word in [
+        "ALL AGENTS",
+        "Auto-pick skips above",
+        "CLAUDE CODE",
+        "CODEX",
+        "ANTIGRAVITY",
+        "GROK BUILD",
+        "Auto-pick the account",
+        "Read spare resets",
+    ] {
+        assert!(text.contains(word), "missing '{word}'\n{text}");
+    }
     assert!(
-        text.contains("Wrap `claude`") && text.contains("A bare `claude` starts on"),
+        !text.contains("starts on") && !text.contains("Wrap `"),
         "{text}"
     );
-    assert!(text.contains("its default login"), "{text}");
-    // Row 3 is where a bare launch starts: step it from the default login
-    // to auto, then on to the first account.
-    for _ in 0..3 {
-        key(&mut app, KeyCode::Down);
-    }
-    key(&mut app, KeyCode::Right);
-    let hs = crate::store::HarnessSettings::load(Harness::Claude).unwrap();
-    assert_eq!(hs.start, "auto");
-    key(&mut app, KeyCode::Right);
-    let hs = crate::store::HarnessSettings::load(Harness::Claude).unwrap();
-    assert_eq!(hs.start, "1");
+
+    // Auto-pick is a switch: on stores `auto`, off goes back to the root login.
+    let rows = crate::tui::pages::settings::rows(&app);
+    let at = rows
+        .iter()
+        .position(|r| r.label == "Auto-pick the account")
+        .unwrap();
+    app.sel[Page::Settings.index()] = at;
+    let start = || {
+        crate::store::HarnessSettings::load(Harness::Claude)
+            .unwrap()
+            .start
+    };
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(start(), "auto");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(start(), "root");
+
+    // The list is longer than a short screen: the selection stays in view.
+    app.sel[Page::Settings.index()] = rows.len() - 1;
+    let text = screen(&mut app, ui::MIN_W, ui::MIN_H);
+    assert!(text.contains("GROK BUILD"), "{text}");
+}
+
+#[test]
+fn an_update_check_can_be_asked_for_and_says_what_it_found() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, rx) = app();
+    key(&mut app, KeyCode::Char('0'));
+    let rows = crate::tui::pages::settings::rows(&app);
+    let at = rows
+        .iter()
+        .position(|r| r.label == "Check for updates now")
+        .unwrap();
+    app.sel[Page::Settings.index()] = at;
+    let have = env!("CARGO_PKG_VERSION");
+    assert!(screen(&mut app, 132, 40).contains(&format!("you have {have}")));
+
+    // The tests run offline: the check says it could not tell, and never
+    // that this is the newest.
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.update, UpdateCheck::Checking);
+    let msg = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the check never answered");
+    app.on_msg(msg);
+    assert!(
+        matches!(app.update, UpdateCheck::Failed(_)),
+        "{:?}",
+        app.update
+    );
     let text = screen(&mut app, 132, 40);
-    assert!(text.contains("account work"), "{text}");
+    assert!(text.contains("could not check"), "{text}");
+    assert!(text.contains("offline"), "{text}");
+
+    // What the two answers look like.
+    app.on_msg(Msg::UpdateChecked(Ok(None)));
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains(&format!("{have} is the newest")), "{text}");
+    app.on_msg(Msg::UpdateChecked(Ok(Some("99.0.0".into()))));
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("99.0.0 is out"), "{text}");
+    assert!(text.contains("cswap update"), "{text}");
+}
+
+#[test]
+fn the_shell_tab_lists_shells_and_a_dialog_wraps_agents_in_one() {
+    let sb = Sandbox::new();
+    sb.demo();
+    sb.fake_agents();
+    let (mut app, _rx) = app();
+    key(&mut app, KeyCode::Char('0'));
+    key(&mut app, KeyCode::Char(']'));
+    key(&mut app, KeyCode::Char(']'));
+    let text = screen(&mut app, 132, 40);
+    show("settings/shell", &text);
+    for word in [
+        "INTEGRATION",
+        "SHELL",
+        "INTEGRATED",
+        "NOT INTEGRATED",
+        "zsh",
+        "yours",
+    ] {
+        assert!(text.contains(word), "missing '{word}'\n{text}");
+    }
+    // The rc file does not load cswap yet, so zsh wraps nothing.
+    let zsh = app
+        .derived
+        .shells
+        .iter()
+        .position(|s| s.name == "zsh")
+        .unwrap();
+    assert_eq!(app.derived.shells[zsh].loaded, Some(false));
+    assert!(!app.derived.shells[zsh].wraps(Harness::Claude));
+    let rc = crate::shell::rc_file("zsh").unwrap();
+    assert!(!rc.exists());
+
+    // Enter opens the boxes. Nothing is ticked, and escape changes nothing.
+    app.sel[Page::Settings.index()] = zsh;
+    key(&mut app, KeyCode::Enter);
+    let text = screen(&mut app, 132, 40);
+    show("settings/shell dialog", &text);
+    assert!(text.contains("Agents wrapped in zsh"), "{text}");
+    assert!(text.contains("saving adds one line to ~/.zshrc"), "{text}");
+    assert!(
+        text.contains("[ ] claude") && text.contains("[ ] codex"),
+        "{text}"
+    );
+    key(&mut app, KeyCode::Char(' '));
+    let text = screen(&mut app, 132, 40);
+    assert!(
+        text.contains("[x] claude") && text.contains("not saved"),
+        "{text}"
+    );
+    key(&mut app, KeyCode::Esc);
+    assert!(app.modal.is_none() && !rc.exists());
+    assert!(crate::store::Settings::load().unwrap().shells.is_empty());
+
+    // Tick two and save: the list is stored and the line is added once.
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Char(' ')); // claude
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Char(' ')); // codex
+    key(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none(), "{:?}", app.modal);
+    let saved = crate::store::Settings::load().unwrap();
+    assert_eq!(saved.shells["zsh"], ["claude", "codex"]);
+    let text = std::fs::read_to_string(&rc).unwrap();
+    assert_eq!(text.matches("cswap shell-init zsh").count(), 1, "{text}");
+    let toast = app
+        .toast
+        .as_ref()
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    assert!(
+        toast.contains("zsh now wraps claude, codex") && toast.contains("~/.zshrc"),
+        "{toast}"
+    );
+    assert!(app.derived.shells[zsh].wraps(Harness::Claude));
+    assert!(!app.derived.shells[zsh].wraps(Harness::Grok));
+
+    // Opened again, what is saved is ticked. Unticking one and saving
+    // unwraps it, and the rc file is left as it is.
+    key(&mut app, KeyCode::Enter);
+    let dialog = screen(&mut app, 132, 40);
+    assert!(
+        dialog.contains("[x] claude") && dialog.contains("[x] codex"),
+        "{dialog}"
+    );
+    assert!(dialog.contains("~/.zshrc loads cswap"), "{dialog}");
+    key(&mut app, KeyCode::Char(' ')); // claude off
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        crate::store::Settings::load().unwrap().shells["zsh"],
+        ["codex"]
+    );
+    assert_eq!(std::fs::read_to_string(&rc).unwrap(), text);
+    // What `cswap shell-init zsh` prints follows the list.
+    let agents = crate::shell::chosen(&crate::store::Settings::load().unwrap(), "zsh", |_| true);
+    assert_eq!(agents, [Harness::Codex]);
+}
+
+#[test]
+fn an_account_is_made_the_default_and_wears_a_star_before_its_name() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Accounts));
+    app.focus = Focus::Main;
+    let text = screen(&mut app, 132, 40);
+    // Nothing is starred while the root login is the default; the section says so.
+    assert!(!text.contains('★'), "{text}");
+    assert!(text.contains("default: root"), "{text}");
+
+    // The actions come in groups, and one of them sets the default.
+    key(&mut app, KeyCode::Enter);
+    let menu = screen(&mut app, 132, 40);
+    show("accounts/menu", &menu);
+    for word in [
+        "LAUNCH",
+        "USAGE",
+        "ACCOUNT",
+        "Set as default",
+        "what `cswap claude` starts on",
+    ] {
+        assert!(menu.contains(word), "missing '{word}'\n{menu}");
+    }
+    assert!(!menu.contains("Start a bare"), "{menu}");
+    let at = |word: &str| menu.find(word).unwrap();
+    assert!(at("LAUNCH") < at("Set as default") && at("Set as default") < at("USAGE"));
+    assert!(at("ACCOUNT") < at("Rename") && at("Rename") < at("Remove account"));
+    // On a screen too short for the titles, every action is still there.
+    let short = screen(&mut app, ui::MIN_W, ui::MIN_H);
+    assert!(short.contains("Remove account"), "{short}");
+
+    key(&mut app, KeyCode::Char('d'));
+    assert!(app.modal.is_none());
+    let start = |h| crate::store::HarnessSettings::load(h).unwrap().start;
+    assert_eq!(start(Harness::Claude), "1");
+    assert_eq!(start(Harness::Codex), "root");
+    let text = screen(&mut app, 132, 40);
+    show("accounts/default", &text);
+    assert!(text.contains("★ work"), "{text}");
+    assert_eq!(text.matches("default: root").count(), 1, "{text}");
+    assert!(text.contains("★ `cswap claude` starts here."), "{text}");
+
+    // One default per agent: making another the default moves the star.
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Char('d'));
+    assert_eq!(start(Harness::Claude), "2");
+    let text = screen(&mut app, 132, 40);
+    assert!(
+        text.contains("★ side") && !text.contains("★ work"),
+        "{text}"
+    );
+    // Asking again says so and changes nothing.
+    key(&mut app, KeyCode::Char('d'));
+    let toast = app
+        .toast
+        .as_ref()
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    assert!(toast.contains("already the default"), "{toast}");
+
+    // The star is in front of the name on the other pages too, and the
+    // root login gets it back from its own page.
+    app.dispatch(Action::Go(Page::Overview));
+    assert!(screen(&mut app, 132, 40).contains("★ side"));
+    app.dispatch(Action::Go(Page::Root));
+    app.focus = Focus::Main;
+    key(&mut app, KeyCode::Char('d'));
+    assert_eq!(start(Harness::Claude), "root");
+    let text = screen(&mut app, 132, 40);
+    show("root/default", &text);
+    assert!(
+        text.contains("★ Claude Code") && text.contains("The default:"),
+        "{text}"
+    );
 }
 
 #[test]

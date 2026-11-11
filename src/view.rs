@@ -30,10 +30,11 @@ pub fn facts(reg: &mut Registry) -> (HashSet<String>, HashMap<String, Local>) {
     (logged_in, local)
 }
 
-/// Is `acc` what a bare launch of its agent uses?
+/// Is `acc` its agent's default: what a bare launch of the agent uses? An
+/// agent has one default at most, and none when it picks by itself (`auto`).
 pub fn is_default(acc: &Account, hs: &HarnessSettings) -> bool {
     match hs.start.as_str() {
-        "default" => acc.is_native(),
+        "root" => acc.is_native(),
         "auto" => false,
         id => id == acc.meta.id.to_string(),
     }
@@ -46,7 +47,7 @@ pub fn launch_hint(acc: &Account, is_default: bool) -> String {
         return bin.to_string();
     }
     let sel = if acc.is_native() {
-        "default".to_string()
+        "root".to_string()
     } else if !acc.meta.label.is_empty() {
         acc.meta.label.clone()
     } else {
@@ -778,8 +779,8 @@ mod tests {
             start: start.to_string(),
             ..HarnessSettings::default()
         };
-        assert!(is_default(&account(0), &hs("default")));
-        assert!(!is_default(&account(1), &hs("default")));
+        assert!(is_default(&account(0), &hs("root")));
+        assert!(!is_default(&account(1), &hs("root")));
         assert!(is_default(&account(2), &hs("2")));
         assert!(!is_default(&account(0), &hs("2")));
         assert!(!is_default(&account(0), &hs("auto")) && !is_default(&account(2), &hs("auto")));
@@ -792,7 +793,7 @@ mod tests {
         a.meta.label = "work".into();
         assert_eq!(launch_hint(&a, false), "claude --cswap=work");
         assert_eq!(launch_hint(&a, true), "claude");
-        assert_eq!(launch_hint(&account(0), false), "claude --cswap=default");
+        assert_eq!(launch_hint(&account(0), false), "claude --cswap=root");
     }
 
     #[test]

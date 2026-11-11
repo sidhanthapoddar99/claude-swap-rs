@@ -14,10 +14,10 @@ use crate::store::Account;
 
 pub mod accounts;
 pub mod analytics;
-pub mod defaults;
 pub mod health;
 pub mod overview;
 pub mod resets;
+pub mod root;
 pub mod sessions;
 pub mod settings;
 pub mod sync;
@@ -57,10 +57,12 @@ pub fn status_span(t: &Theme, s: Status) -> Span<'static> {
     Span::styled(format!("{glyph} {}", s.label()), Style::default().fg(color))
 }
 
-/// `● ` in the agent's colour.
+/// `● ` in the agent's colour, in front of an account's name. The default
+/// account of its agent wears a star there instead.
 pub fn dot(app: &App, acc: &Account) -> Span<'static> {
+    let glyph = if app.is_default(acc) { STAR } else { DOT };
     Span::styled(
-        format!("{DOT} "),
+        format!("{glyph} "),
         Style::default().fg(app.theme.harness(acc.harness)),
     )
 }
@@ -145,6 +147,149 @@ pub const fn window_w(bar_w: usize) -> usize {
     bar_w + 1 + 4 + 2 + IN_W
 }
 
+/// The width of a limit's name: `week`, `Fable`, `5h`, `extra`.
+pub const LIMIT_W: usize = 7;
+/// The narrowest a limit's bar gets before the date gives way to it.
+pub const BAR_MIN: usize = 8;
+
+/// The widths of one limit's line: its bar, and the date the limit resets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitCols {
+    /// Zero leaves the bar out, on a line too narrow for one.
+    pub bar: usize,
+    /// Zero leaves the date out.
+    pub date: usize,
+}
+
+impl LimitCols {
+    /// Fit a limit's line into `w` cells, with a bar of `bar_max` cells at
+    /// the most. The date goes when there is no room for it and the bar.
+    pub fn new(w: usize, bar_max: usize, clock_24h: bool) -> LimitCols {
+        let rest = w.saturating_sub(LIMIT_W + 1 + window_w(0));
+        // `Fri 13 Nov · 13:05`, or `Fri 13 Nov · 12:05 pm`; sixteen cells
+        // hold either once `fit_date` has shortened it.
+        let full = if clock_24h { 18 } else { 21 };
+        let date = [full, 16]
+            .into_iter()
+            .find(|d| rest > BAR_MIN + d)
+            .unwrap_or(0);
+        let taken = if date > 0 { date + 1 } else { 0 };
+        LimitCols {
+            bar: rest.saturating_sub(taken).clamp(BAR_MIN, bar_max),
+            date,
+        }
+    }
+
+    /// Everything from the bar to the end of the line.
+    pub fn cells_w(&self) -> usize {
+        let bar = if self.bar > 0 {
+            window_w(self.bar)
+        } else {
+            4 + 2 + IN_W
+        };
+        bar + if self.date > 0 { 1 + self.date } else { 0 }
+    }
+
+    /// The whole line, the limit's name included.
+    pub fn width(&self) -> usize {
+        LIMIT_W + 1 + self.cells_w()
+    }
+
+    /// The titles of the columns, as wide as the lines under them.
+    pub fn header(&self, t: &Theme) -> Vec<Span<'static>> {
+        let mut out = vec![head(t, "LIMIT", LIMIT_W + 1)];
+        if self.bar > 0 {
+            out.push(head(t, "USED", self.bar + 1 + 4 + 2));
+        } else {
+            out.push(head(t, "USED", 4 + 2));
+        }
+        out.push(head(t, "IN", IN_W));
+        if self.date > 0 {
+            out.push(Span::raw(" "));
+            out.push(head(t, "DATE", self.date));
+        }
+        out
+    }
+}
+
+/// Every limit of an account, a line each: its name, the bar, the percent
+/// used, how long until it resets and the date. A warning goes under the
+/// limit it is about; pay-as-you-go credit and a failed refresh come last.
+/// An account with nothing to show gets one line saying why.
+pub fn limit_lines(
+    app: &App,
+    acc: &Account,
+    c: &LimitCols,
+    now: DateTime<Utc>,
+) -> Vec<Vec<Span<'static>>> {
+    let t = &app.theme;
+    let line_w = c.width();
+    let note_w = c.cells_w();
+    let signed_in = app.derived.logged_in.contains(&acc.key());
+    let Some(snap) = acc.snapshot().filter(|_| signed_in) else {
+        let (text, color) = no_data(app, acc);
+        return vec![vec![Span::styled(
+            widgets::truncate(&text, line_w),
+            Style::default().fg(color),
+        )]];
+    };
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    for (i, win) in crate::view::all_windows(snap).into_iter().enumerate() {
+        let mut cells = vec![
+            Span::styled(
+                fit(&win.label, LIMIT_W),
+                if i == 0 { t.s_text() } else { t.s_dim() },
+            ),
+            Span::raw(" "),
+        ];
+        if c.bar > 0 {
+            cells.extend(window_cells(app, win, c.bar, now));
+        } else {
+            cells.push(widgets::pct_span(t, win.used_now(now)));
+            cells.push(Span::raw("  "));
+            cells.push(Span::styled(fit(&resets_in(win, now), IN_W), t.s_dim()));
+        }
+        if c.date > 0 {
+            let date = match win.resets_at {
+                Some(at) if at > now => {
+                    fit_date(crate::view::when(at, now, app.settings.clock_24h), c.date)
+                }
+                _ => "–".to_string(),
+            };
+            cells.push(Span::raw(" "));
+            cells.push(Span::styled(fit(&date, c.date), t.s_dim()));
+        }
+        rows.push(cells);
+        // Said only when the limit will be hit before it resets: the bar and
+        // its pace marker already show everything else.
+        if let Some(warning) = crate::view::pace_warning(win, now) {
+            rows.push(vec![
+                Span::raw(" ".repeat(LIMIT_W + 1)),
+                Span::styled(widgets::truncate(&warning, note_w), t.s(t.warn())),
+            ]);
+        }
+    }
+    if let Some(text) = snap.credits.as_ref().and_then(crate::view::credits_text) {
+        rows.push(vec![
+            Span::styled(fit("extra", LIMIT_W + 1), t.s_dim()),
+            Span::styled(widgets::truncate(&text, note_w), t.s_dim()),
+        ]);
+    }
+    if rows.is_empty() {
+        rows.push(vec![Span::styled(
+            widgets::truncate("the vendor reported no limits", line_w),
+            t.s_dim(),
+        )]);
+    }
+    if let Some(e) = &acc.meta.refresh.error {
+        rows.push(vec![
+            Span::styled(fit("stale", LIMIT_W + 1), t.s(t.warn())),
+            Span::styled(widgets::truncate(e, note_w), t.s(t.warn())),
+        ]);
+    }
+    rows
+}
+
 /// Why an account has no usage to show, and how loud to say it.
 pub fn no_data(app: &App, acc: &Account) -> (String, ratatui::style::Color) {
     let t = &app.theme;
@@ -169,31 +314,26 @@ pub fn no_data(app: &App, acc: &Account) -> (String, ratatui::style::Color) {
     }
 }
 
-/// The account's name for a list, with a star when a bare launch of its agent
-/// starts on it. `tag` is for lists that mix agents: the dot in front of the
-/// name tells them apart by colour, so the agent's command is written after
-/// the name only in a theme that has no colour.
+/// The account's name for a list. The star of a default account is not here:
+/// it goes in front of the name, where `dot` puts it. `tag` is for lists that
+/// mix agents: the dot in front of the name tells them apart by colour, so the
+/// agent's command is written after the name only in a theme that has no
+/// colour.
 pub fn name_cell(app: &App, acc: &Account, w: usize, bold: bool, tag: bool) -> Vec<Span<'static>> {
     let t = &app.theme;
     let bin = acc.harness.spec().bins[0];
     let title = acc.title();
-    // When the column is narrow the star goes first, then the tag.
     let tag_w = widgets::width(bin) + 1;
     let tag = tag && !t.agents_by_colour() && w >= widgets::width(&title) + tag_w;
     let tag_used = if tag { tag_w } else { 0 };
-    let star = app.is_default(acc) && w >= widgets::width(&title) + tag_used + 2;
-    let star_w = if star { 2 } else { 0 };
-    let shown = widgets::truncate(&title, w.saturating_sub(tag_used + star_w));
-    let mut used = widgets::width(&shown) + tag_used + star_w;
+    let shown = widgets::truncate(&title, w.saturating_sub(tag_used));
+    let mut used = widgets::width(&shown) + tag_used;
     let mut spans = vec![Span::styled(
         shown,
         if bold { t.s_bold() } else { t.s_text() },
     )];
     if tag {
         spans.push(Span::styled(format!(" {bin}"), t.s_faint()));
-    }
-    if star {
-        spans.push(Span::styled(format!(" {STAR}"), t.s(t.accent())));
     }
     used = used.min(w);
     spans.push(Span::raw(" ".repeat(w - used)));
@@ -253,16 +393,16 @@ pub fn no_accounts(f: &mut Frame, area: Rect, app: &App) {
     }
     let signed_in = app
         .all
-        .defaults()
+        .roots()
         .any(|a| app.derived.logged_in.contains(&a.key()));
-    let key = super::app::Page::Defaults.hotkey();
-    let from_default = format!(
-        "Already signed in to an agent? Press {key} for Defaults, then c to make an account from that login."
+    let key = super::app::Page::Root.hotkey();
+    let from_root = format!(
+        "Already signed in to an agent? Press {key} for Root, then c to make an account from that login."
     );
     let mut lines = vec!["Press a to add one: name it, then the agent's own sign-in runs."];
     if signed_in {
         lines.push("");
-        lines.push(&from_default);
+        lines.push(&from_root);
     }
     empty(f, area, app, "No accounts yet", &lines);
 }
@@ -315,7 +455,7 @@ pub fn help() -> Modal {
         ("ON AN ACCOUNT", ""),
         ("Enter", "all actions for the account"),
         ("o", "open the agent on it (closes the dashboard)"),
-        ("d", "start a bare launch of its agent here"),
+        ("d", "make it the default: where `cswap <agent>` starts"),
         ("l", "sign in, or sign in again"),
         ("e  E", "rename · set aliases"),
         ("p  b", "plan name · renewal date"),
@@ -323,9 +463,9 @@ pub fn help() -> Modal {
         ("u", "refresh just this account"),
         ("x", "remove"),
         ("", ""),
-        ("DEFAULTS PAGE", ""),
+        ("ROOT PAGE", ""),
         ("c", "make an account from the selected login"),
-        ("o  d  u", "open · start bare launches here · refresh"),
+        ("o  d  u", "open · make it the default · refresh"),
         ("", ""),
         ("SYNC PAGE", ""),
         ("s", "sync every account"),
@@ -334,7 +474,14 @@ pub fn help() -> Modal {
         ("", ""),
         ("SETTINGS PAGE", ""),
         ("[ ]", "previous / next tab"),
-        ("← → Enter", "change the selected value"),
+        (
+            "← → Enter",
+            "change the selected value, or do what the row says",
+        ),
+        (
+            "Space, Enter",
+            "in a list of boxes: tick one, save them all",
+        ),
     ];
     Modal::Info {
         title: "Keys".to_string(),

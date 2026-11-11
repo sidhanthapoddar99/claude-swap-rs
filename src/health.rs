@@ -9,7 +9,7 @@ use std::fs;
 use crate::harness::Harness;
 use crate::sessions::Live;
 use crate::store::{self, HarnessSettings, Registry};
-use crate::{manage, model, paths};
+use crate::{manage, model, paths, shell};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
@@ -35,23 +35,6 @@ fn check(level: Level, area: &str, title: impl Into<String>, detail: impl Into<S
         title: title.into(),
         detail: detail.into(),
     }
-}
-
-/// Which rc file the user's shell reads, and whether it loads cswap.
-pub fn shell_integration() -> (String, Option<bool>) {
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let name = shell.rsplit('/').next().unwrap_or("").to_string();
-    let rc = match name.as_str() {
-        "zsh" => ".zshrc",
-        "bash" => ".bashrc",
-        "fish" => ".config/fish/config.fish",
-        _ => return (name, None),
-    };
-    let text = fs::read_to_string(paths::home().join(rc)).unwrap_or_default();
-    let on = text
-        .lines()
-        .any(|l| !l.trim_start().starts_with('#') && l.contains("cswap shell-init"));
-    (name, Some(on))
 }
 
 pub fn run(reg: &Registry, live: &Live) -> Vec<Check> {
@@ -92,7 +75,8 @@ pub fn run(reg: &Registry, live: &Live) -> Vec<Check> {
             "Run: cswap migrate. Each becomes a Claude account and keeps its names.",
         ));
     }
-    match shell_integration() {
+    let name = shell::current();
+    match (name.clone(), shell::loaded(&name)) {
         (name, Some(true)) => out.push(check(
             Level::Ok,
             "shell",
@@ -104,15 +88,15 @@ pub fn run(reg: &Registry, live: &Live) -> Vec<Check> {
             "shell",
             format!("{name} does not load the cswap wrappers"),
             format!(
-                "`claude`, `codex` and the rest bypass cswap. Add to your rc file: {}",
-                crate::cli::shell_hint(&name)
+                "`claude`, `codex` and the rest bypass cswap. Wrap them in the dashboard under Settings > Shell, or add to your rc file: {}",
+                shell::line(&name)
             ),
         )),
         (name, None) => out.push(check(
             Level::Info,
             "shell",
             format!("shell '{name}' has no cswap integration"),
-            "bash and zsh are supported. Elsewhere, alias each agent to `cswap <agent>`.",
+            "bash, zsh and fish are supported. Elsewhere, alias each agent to `cswap <agent>`.",
         )),
     }
 
@@ -148,25 +132,25 @@ pub fn run(reg: &Registry, live: &Live) -> Vec<Check> {
                 Level::Info,
                 h.id(),
                 format!("{} cannot be moved to another config dir", h.name()),
-                "cswap shows its default login but cannot hold accounts for it.",
+                "cswap shows its root login but cannot hold accounts for it.",
             ));
         }
-        if hs.start != "default" && hs.start != "auto" && reg.find(h, &hs.start).is_err() {
+        if hs.start != "root" && hs.start != "auto" && reg.find(h, &hs.start).is_err() {
             out.push(check(
                 Level::Warn,
                 h.id(),
                 format!(
-                    "the account a bare launch starts on ('{}') is gone",
+                    "the default account ('{}') is gone",
                     hs.start
                 ),
-                "Launches fall back to the agent's default login. Pick another in Settings.",
+                "Launches fall back to the agent's root login. Pick another default on the Accounts page.",
             ));
         }
 
         for acc in accounts {
             let key = acc.key();
             let name = if acc.is_native() {
-                format!("{}'s default login", h.name())
+                format!("{}'s root login", h.name())
             } else {
                 format!("{} ({key})", acc.title())
             };

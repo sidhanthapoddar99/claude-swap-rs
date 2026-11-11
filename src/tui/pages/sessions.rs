@@ -37,7 +37,7 @@ fn row(app: &App, s: &Session, name_w: usize, room: usize, selected: bool) -> Li
         Some(a) => (a.harness.name(), t.harness(a.harness)),
         None => ("–", t.faint()),
     };
-    let on_default = acc.is_some_and(|a| a.is_native());
+    let on_root = acc.is_some_and(|a| a.is_native());
     let name = acc.map(|a| a.title()).unwrap_or_else(|| s.key.clone());
     let since = match s.started {
         Some(at) => model::ago(at, now).replace(" ago", ""),
@@ -54,7 +54,7 @@ fn row(app: &App, s: &Session, name_w: usize, room: usize, selected: bool) -> Li
         Span::raw(" "),
         Span::styled(
             fit(&name, name_w),
-            if on_default {
+            if on_root {
                 t.s_dim()
             } else if selected {
                 t.s_bold()

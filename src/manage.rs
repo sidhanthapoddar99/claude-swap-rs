@@ -258,7 +258,7 @@ pub fn remove(acc: &Account, live: &Live) -> Result<()> {
     let id = acc.meta.id.to_string();
     let hs = HarnessSettings::load(acc.harness)?;
     if hs.start == id {
-        HarnessSettings::update(acc.harness, |s| s.start = "default".to_string())?;
+        HarnessSettings::update(acc.harness, |s| s.start = "root".to_string())?;
     }
     Ok(())
 }
@@ -267,7 +267,7 @@ pub fn remove(acc: &Account, live: &Live) -> Result<()> {
 pub fn rename(acc: &mut Account, name: &str) -> Result<()> {
     if acc.is_native() {
         bail!(
-            "{}'s own login is called default and cannot be renamed",
+            "{}'s own login is called root and cannot be renamed",
             acc.harness.name()
         );
     }
@@ -280,7 +280,7 @@ pub fn rename(acc: &mut Account, name: &str) -> Result<()> {
 pub fn set_aliases(acc: &mut Account, aliases: &[String]) -> Result<()> {
     if acc.is_native() {
         bail!(
-            "{}'s own login is called default and takes no alias",
+            "{}'s own login is called root and takes no alias",
             acc.harness.name()
         );
     }
@@ -298,17 +298,18 @@ pub fn set_aliases(acc: &mut Account, aliases: &[String]) -> Result<()> {
     acc.update(|m| m.aliases = clean)
 }
 
-/// Make `sel` the account a bare launch of `h` starts on. `sel` is `default`
-/// (the agent's own login), `auto`, or anything that names one account.
+/// Make `sel` the default of `h`: the account a bare launch starts on. `sel`
+/// is `root` (the agent's own login), `auto`, or anything that names one
+/// account.
 pub fn set_start(h: Harness, sel: &str) -> Result<String> {
     let value = match sel.trim().to_lowercase().as_str() {
         "auto" => "auto".to_string(),
-        "native" | "default" | "0" => "default".to_string(),
+        "root" | "native" | "default" | "0" => "root".to_string(),
         other => {
             let reg = Registry::load()?;
             let acc = reg.find(h, other)?;
             if acc.is_native() {
-                "default".to_string()
+                "root".to_string()
             } else {
                 acc.meta.id.to_string()
             }
@@ -383,7 +384,7 @@ mod tests {
             reg.find(Harness::Claude, "office").unwrap().key(),
             work.key()
         );
-        let mut own = reg.find(Harness::Claude, "default").unwrap().clone();
+        let mut own = reg.find(Harness::Claude, "root").unwrap().clone();
         assert!(rename(&mut own, "mine").is_err());
         assert!(set_aliases(&mut own, &["mine".into()]).is_err());
     }
@@ -445,7 +446,7 @@ mod tests {
         assert!(native.join("projects/keep.jsonl").is_file());
         assert_eq!(
             HarnessSettings::load(Harness::Claude).unwrap().start,
-            "default"
+            "root"
         );
     }
 
@@ -473,7 +474,7 @@ mod tests {
         live.insert(a.key(), vec![42]);
         assert!(remove(&a, &live).is_err());
         let reg = Registry::load().unwrap();
-        let native = reg.find(Harness::Claude, "default").unwrap();
+        let native = reg.find(Harness::Claude, "root").unwrap();
         assert!(remove(native, &Live::new()).is_err());
     }
 
@@ -484,9 +485,12 @@ mod tests {
         create(Harness::Claude, "work").unwrap();
         assert_eq!(set_start(Harness::Claude, "work").unwrap(), "1");
         assert_eq!(set_start(Harness::Claude, "AUTO").unwrap(), "auto");
-        assert_eq!(set_start(Harness::Claude, "0").unwrap(), "default");
+        assert_eq!(set_start(Harness::Claude, "0").unwrap(), "root");
         assert_eq!(set_start(Harness::Claude, "1").unwrap(), "1");
-        assert_eq!(set_start(Harness::Claude, "default").unwrap(), "default");
+        assert_eq!(set_start(Harness::Claude, "root").unwrap(), "root");
+        // The words earlier builds used for the agent's own login still work.
+        assert_eq!(set_start(Harness::Claude, "default").unwrap(), "root");
+        assert_eq!(set_start(Harness::Claude, "native").unwrap(), "root");
         assert!(set_start(Harness::Claude, "nobody").is_err());
     }
 }

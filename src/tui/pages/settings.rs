@@ -1,4 +1,5 @@
-//! Settings: one tab of global options, one per agent, one for the shell.
+//! Settings, in three tabs: the dashboard's own options, the options of
+//! every agent in one list, and the shells with the agents each one wraps.
 
 use anyhow::Result;
 use ratatui::layout::Rect;
@@ -7,44 +8,36 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::{paint_row, row_style, scroll_start};
+use super::{head, paint_row, row_style, scroll_start};
 use crate::harness::Harness;
-use crate::health;
 use crate::manage;
 use crate::paths;
+use crate::shell;
 use crate::store::{HarnessSettings, Settings, MIN_REFRESH_MINUTES};
-use crate::tui::app::{Action, App, Focus, Modal, Page, Then, Tone};
+use crate::tui::app::{Action, App, Focus, Modal, Page, Then, Tone, UpdateCheck};
 use crate::tui::theme::{DOT, RING};
-use crate::tui::widgets::{card, fit, width, Hits};
+use crate::tui::widgets::{self, card, clip, fit, truncate, width, Hits};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     General,
-    Agent(Harness),
+    Harness,
     Shell,
 }
 
-pub const TABS: [Tab; 6] = [
-    Tab::General,
-    Tab::Agent(Harness::Claude),
-    Tab::Agent(Harness::Codex),
-    Tab::Agent(Harness::Agy),
-    Tab::Agent(Harness::Grok),
-    Tab::Shell,
-];
+pub const TABS: [Tab; 3] = [Tab::General, Tab::Harness, Tab::Shell];
 
 impl Tab {
     fn title(self) -> &'static str {
         match self {
             Tab::General => "General",
-            // The first word is enough here: `Claude`, `Grok`.
-            Tab::Agent(h) => h.name().split(' ').next().unwrap_or(h.name()),
+            Tab::Harness => "Harness",
             Tab::Shell => "Shell",
         }
     }
 }
 
-/// One thing that can be changed.
+/// One thing that can be changed or done.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Id {
     RefreshMinutes,
@@ -56,13 +49,29 @@ pub enum Id {
     PaintBackground,
     Theme,
     UpdateCheck,
-    Wrapped(Harness),
-    Default(Harness),
+    /// Ask GitHub now whether a newer cswap is out.
+    CheckNow,
+    AutoPick(Harness),
     Announce(Harness),
     SyncEnabled(Harness),
     Exclude(Harness),
     Binary(Harness),
     CliIdentity(Harness),
+    /// The agents a shell wraps: an index into the shells found.
+    Shell(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A line that only informs.
+    Note,
+    Toggle(bool),
+    /// A value that steps, or is typed in.
+    Value,
+    /// Something to do: enter does it.
+    Button,
+    /// One shell of the table: an index into the shells found.
+    Shell(usize),
 }
 
 pub struct Row {
@@ -71,234 +80,276 @@ pub struct Row {
     pub label: String,
     pub value: String,
     pub help: String,
-    /// `Some` for an on/off switch.
-    pub on: Option<bool>,
+    pub kind: Kind,
+    /// The title of the group this row starts, and the agent it is about.
+    pub group: Option<(String, Option<Harness>)>,
+}
+
+impl Row {
+    fn new(id: Option<Id>, kind: Kind, label: &str, value: String, help: &str) -> Row {
+        Row {
+            id,
+            label: label.to_string(),
+            value,
+            help: help.to_string(),
+            kind,
+            group: None,
+        }
+    }
+
+    /// Start a group at this row.
+    fn under(mut self, title: &str, agent: Option<Harness>) -> Row {
+        self.group = Some((title.to_string(), agent));
+        self
+    }
 }
 
 fn toggle(id: Id, label: &str, on: bool, help: &str) -> Row {
-    Row {
-        id: Some(id),
-        label: label.to_string(),
-        value: if on { "on" } else { "off" }.to_string(),
-        help: help.to_string(),
-        on: Some(on),
-    }
+    let value = if on { "on" } else { "off" }.to_string();
+    Row::new(Some(id), Kind::Toggle(on), label, value, help)
 }
 
 fn value(id: Id, label: &str, value: String, help: &str) -> Row {
-    Row {
-        id: Some(id),
-        label: label.to_string(),
-        value,
-        help: help.to_string(),
-        on: None,
-    }
+    Row::new(Some(id), Kind::Value, label, value, help)
+}
+
+fn button(id: Id, label: &str, value: String, help: &str) -> Row {
+    Row::new(Some(id), Kind::Button, label, value, help)
 }
 
 fn note(label: &str, value: String, help: &str) -> Row {
-    Row {
-        id: None,
-        label: label.to_string(),
-        value,
-        help: help.to_string(),
-        on: None,
-    }
+    Row::new(None, Kind::Note, label, value, help)
 }
 
-/// What a bare launch of `h` uses, in words.
-fn default_text(app: &App, h: Harness, hs: &HarnessSettings) -> String {
-    match hs.start.as_str() {
-        "default" => "its default login".to_string(),
-        "auto" => "auto: the best account".to_string(),
-        id => match app.reg.of(h).find(|a| a.meta.id.to_string() == id) {
-            Some(acc) => format!("account {}", acc.title()),
-            None => format!("{id} (missing)"),
+/// Where the check for a newer cswap stands, in a few words.
+fn update_text(app: &App) -> String {
+    let have = crate::update::CURRENT;
+    match &app.update {
+        UpdateCheck::Checking => "checking…".to_string(),
+        UpdateCheck::Newest => format!("{have} is the newest"),
+        UpdateCheck::Newer(v) => format!("{v} is out · you have {have}"),
+        UpdateCheck::Failed(_) => format!("could not check · you have {have}"),
+        UpdateCheck::NotAsked => match &app.derived.newer {
+            Some(v) => format!("{v} is out · you have {have}"),
+            None => format!("you have {have}"),
         },
     }
 }
 
-pub fn rows(app: &App) -> Vec<Row> {
+fn general(app: &App) -> Vec<Row> {
     let s = &app.settings;
+    vec![
+        value(
+            Id::Theme,
+            "Theme",
+            {
+                let scheme = app.theme.scheme();
+                format!("{} · {}", scheme.name(), scheme.blurb())
+            },
+            "The dashboard's colours. Violet, blue and green are tinted; dark is true black; grey has no colour at all; terminal uses your terminal's own 16 colours, so it follows the theme you already have.",
+        ),
+        value(
+            Id::RefreshMinutes,
+            "Refresh every",
+            format!("{} min", s.refresh_minutes),
+            "How often usage is fetched while this dashboard is open. A launch through cswap never fetches: it reads what the dashboard last stored.",
+        ),
+        toggle(
+            Id::RefreshOnOpen,
+            "Refresh when opened",
+            s.refresh_on_open,
+            "Fetch whatever is older than the interval as soon as the dashboard opens.",
+        ),
+        value(
+            Id::HistoryDays,
+            "Keep history for",
+            format!("{} days", s.history_days),
+            "How long usage samples are kept for the Analytics page.",
+        ),
+        toggle(Id::Clock24h, "24-hour clock", s.clock_24h, "Off shows times as 9:30 pm."),
+        toggle(
+            Id::Mouse,
+            "Mouse",
+            s.mouse,
+            "Click and scroll in the dashboard. Off gives selecting text back to your terminal.",
+        ),
+        toggle(
+            Id::PaintBackground,
+            "Paint the background",
+            s.paint_background,
+            "Off keeps your terminal's own background, for a transparent or a light terminal.",
+        ),
+        toggle(
+            Id::UpdateCheck,
+            "Check once a day",
+            s.update_check,
+            "Looks at GitHub at most once a day and tells you on the command line. It never updates on its own: `cswap update` does that.",
+        )
+        .under("Updates", None),
+        button(
+            Id::CheckNow,
+            "Check for updates now",
+            update_text(app),
+            "Asks GitHub for the newest release right now and says what it found. Installing it is still `cswap update`.",
+        ),
+    ]
+}
+
+/// Every agent's options in one list, a group per agent, after the options
+/// they all share.
+fn harness(app: &App) -> Vec<Row> {
+    let mut out = vec![value(
+        Id::AutoSkip,
+        "Auto-pick skips above",
+        format!("{:.0}%", app.settings.auto_skip_above_pct),
+        "Auto-pick and the suggestions leave out an account whose week is this full.",
+    )
+    .under("All agents", None)];
+    for h in Harness::ALL {
+        let hs = app.hs.get(&h).cloned().unwrap_or_default();
+        let spec = h.spec();
+        let bin = spec.bins[0];
+        let program = match (
+            &hs.binary,
+            app.derived.bins.get(&h).and_then(|b| b.as_ref()),
+        ) {
+            (Some(set), _) => format!("{set} · set here"),
+            (None, Some(found)) => paths::tilde(found),
+            (None, None) => "not installed".to_string(),
+        };
+        out.push(
+            value(
+                Id::Binary(h),
+                "Program",
+                program,
+                "The real program cswap starts: the first one on your PATH. Enter sets a full path instead; an empty one goes back to searching PATH.",
+            )
+            .under(h.name(), Some(h)),
+        );
+        out.push(note(
+            "Its own config dir",
+            paths::tilde(&h.native_dir()),
+            "Where the agent keeps its state. cswap reads it and links to it, and never writes into it.",
+        ));
+        out.push(toggle(
+            Id::AutoPick(h),
+            "Auto-pick the account",
+            hs.start == "auto",
+            &format!("On: `cswap {bin}` with no account named takes the best account at every launch, so no account is the default. Off: it starts on the default. Set the default with d on the Accounts page, or on the Root page for the agent's own login."),
+        ));
+        out.push(toggle(
+            Id::Announce(h),
+            "Say which account at launch",
+            hs.announce,
+            "One dim line on stderr before the agent starts, and only when cswap chose something other than the agent's root login.",
+        ));
+        out.push(toggle(
+            Id::SyncEnabled(h),
+            "Sync links at launch",
+            hs.sync.enabled,
+            "Bring each account's links up to date with the agent's own config dir every time it starts, so new files there are shared at once.",
+        ));
+        out.push(value(
+            Id::Exclude(h),
+            "Extra private names",
+            if hs.sync.exclude.is_empty() {
+                "none".to_string()
+            } else {
+                hs.sync.exclude.join(", ")
+            },
+            "Names every account keeps to itself, on top of the built-in list. Separate with commas; * matches at either end.",
+        ));
+        if h == Harness::Claude {
+            out.push(toggle(
+                Id::CliIdentity(h),
+                "Read spare resets",
+                hs.cli_identity,
+                "Anthropic reports spare resets only to its own CLI. On: cswap names Claude Code in the User-Agent for that one read-only call, at most every 6 hours. Off: no resets are read; note them by hand instead.",
+            ));
+        }
+        if spec.experimental {
+            out.push(note(
+                "Status",
+                "experimental".to_string(),
+                "cswap accounts for this agent rely on behaviour its vendor does not document. The agent's root login always works.",
+            ));
+        }
+    }
+    out
+}
+
+/// What a shell's row means, and what enter does to it.
+fn shell_help(sh: &shell::Status) -> String {
+    match (&sh.rc, sh.loaded) {
+        (Some(rc), Some(true)) => format!(
+            "{} loads cswap. An integrated agent runs through cswap when you type its name in {}, so it starts on the account cswap picks. Enter chooses the agents.",
+            paths::tilde(rc),
+            sh.name
+        ),
+        (Some(rc), _) => format!(
+            "{} does not load cswap, so {} wraps no agent yet. Enter chooses the agents; saving adds one line to that file: {}",
+            paths::tilde(rc),
+            sh.name,
+            shell::line(sh.name)
+        ),
+        (None, _) => format!(
+            "cswap cannot read {}'s profile, so this is what its list holds. Enter chooses the agents; the line to add to the profile yourself is: {}",
+            sh.name,
+            shell::line(sh.name)
+        ),
+    }
+}
+
+fn shells(app: &App) -> Vec<Row> {
+    let mut out: Vec<Row> = app
+        .derived
+        .shells
+        .iter()
+        .enumerate()
+        .map(|(i, sh)| {
+            Row::new(
+                Some(Id::Shell(i)),
+                Kind::Shell(i),
+                sh.name,
+                String::new(),
+                &shell_help(sh),
+            )
+        })
+        .collect();
+    if out.is_empty() {
+        out.push(note(
+            "Shells",
+            "none found".to_string(),
+            "cswap wraps agents in zsh, bash, fish and PowerShell, and none of them is on your PATH. `cswap claude` and friends still work.",
+        ));
+    }
+    out[0].group = Some(("Integration".to_string(), None));
+    out.push(
+        note(
+            "Pick an account once",
+            "claude --cswap=work".to_string(),
+            "--cswap=<name or number> picks the account for one launch. --cswap=auto takes the best one, --cswap=root the agent's root login. --cswap-select asks.",
+        )
+        .under("In a terminal", None),
+    );
+    out.push(note(
+        "Pin a terminal",
+        "export CSWAP_CLAUDE=work".to_string(),
+        "CSWAP_<AGENT> pins every launch from one terminal. A session started through cswap sets it for its own children, so they stay on its account.",
+    ));
+    out.push(note(
+        "Without integration",
+        "cswap claude".to_string(),
+        "`cswap <agent>` always goes through cswap, in any shell, whether or not the agent is integrated there.",
+    ));
+    out
+}
+
+pub fn rows(app: &App) -> Vec<Row> {
     match TABS[app.settings_tab.min(TABS.len() - 1)] {
-        Tab::General => vec![
-            value(
-                Id::Theme,
-                "Theme",
-                {
-                    let scheme = app.theme.scheme();
-                    format!("{} · {}", scheme.name(), scheme.blurb())
-                },
-                "The dashboard's colours. Violet, blue and green are tinted; dark is true black; grey has no colour at all; terminal uses your terminal's own 16 colours, so it follows the theme you already have.",
-            ),
-            value(
-                Id::RefreshMinutes,
-                "Refresh every",
-                format!("{} min", s.refresh_minutes),
-                "How often usage is fetched while this dashboard is open. A wrapped agent never fetches: it reads what the dashboard last stored.",
-            ),
-            toggle(
-                Id::RefreshOnOpen,
-                "Refresh when opened",
-                s.refresh_on_open,
-                "Fetch whatever is older than the interval as soon as the dashboard opens.",
-            ),
-            value(
-                Id::AutoSkip,
-                "Auto-pick skips above",
-                format!("{:.0}%", s.auto_skip_above_pct),
-                "--cswap=auto and the suggestions leave out an account whose week is this full.",
-            ),
-            value(
-                Id::HistoryDays,
-                "Keep history for",
-                format!("{} days", s.history_days),
-                "How long usage samples are kept for the Analytics page.",
-            ),
-            toggle(Id::Clock24h, "24-hour clock", s.clock_24h, "Off shows times as 9:30 pm."),
-            toggle(
-                Id::Mouse,
-                "Mouse",
-                s.mouse,
-                "Click and scroll in the dashboard. Off gives selecting text back to your terminal.",
-            ),
-            toggle(
-                Id::PaintBackground,
-                "Paint the background",
-                s.paint_background,
-                "Off keeps your terminal's own background, for a transparent or a light terminal.",
-            ),
-            toggle(
-                Id::UpdateCheck,
-                "Check for updates",
-                s.update_check,
-                "Looks at GitHub at most once a day and tells you on the command line. It never updates on its own: `cswap update` does that.",
-            ),
-        ],
-        Tab::Agent(h) => {
-            let hs = app.hs.get(&h).cloned().unwrap_or_default();
-            let spec = h.spec();
-            let bin = spec.bins[0];
-            let found = match app.derived.bins.get(&h).and_then(|b| b.as_ref()) {
-                Some(p) => paths::tilde(p),
-                None => "not installed".to_string(),
-            };
-            let mut out = vec![
-                note(
-                    "Program",
-                    found,
-                    "The real program cswap starts. Set a path below when it is not the first one on your PATH.",
-                ),
-                note(
-                    "Its own config dir",
-                    paths::tilde(&h.native_dir()),
-                    "Where the agent keeps its state. cswap reads it and links to it, and never writes into it.",
-                ),
-                toggle(
-                    Id::Wrapped(h),
-                    &format!("Wrap `{bin}`"),
-                    hs.wrapped,
-                    &format!("On: a bare `{bin}` starts where the next row says. Off: cswap passes straight through unless you give --cswap=."),
-                ),
-                value(
-                    Id::Default(h),
-                    &format!("A bare `{bin}` starts on"),
-                    default_text(app, h, &hs),
-                    &format!("What `{bin}` uses when you name no account: its default login, one of your accounts, or auto, which picks the best account at every launch."),
-                ),
-                toggle(
-                    Id::Announce(h),
-                    "Say which account at launch",
-                    hs.announce,
-                    "One dim line on stderr before the agent starts, and only when cswap chose something other than the agent's default login.",
-                ),
-                toggle(
-                    Id::SyncEnabled(h),
-                    "Sync links at launch",
-                    hs.sync.enabled,
-                    "Bring each account's links up to date with the agent's own config dir every time it starts, so new files there are shared at once.",
-                ),
-                value(
-                    Id::Exclude(h),
-                    "Extra private names",
-                    if hs.sync.exclude.is_empty() {
-                        "none".to_string()
-                    } else {
-                        hs.sync.exclude.join(", ")
-                    },
-                    "Names every account keeps to itself, on top of the built-in list. Separate with commas; * matches at either end.",
-                ),
-                value(
-                    Id::Binary(h),
-                    "Program path",
-                    hs.binary.clone().unwrap_or_else(|| "found on PATH".to_string()),
-                    "A full path to the agent's program. Empty goes back to searching PATH.",
-                ),
-            ];
-            if h == Harness::Claude {
-                out.push(toggle(
-                    Id::CliIdentity(h),
-                    "Read spare resets",
-                    hs.cli_identity,
-                    "Anthropic reports spare resets only to its own CLI. On: cswap names Claude Code in the User-Agent for that one read-only call, at most every 6 hours. Off: no resets are read; note them by hand instead.",
-                ));
-            }
-            if spec.experimental {
-                out.push(note(
-                    "Status",
-                    "experimental".to_string(),
-                    "cswap accounts for this agent rely on behaviour its vendor does not document. The agent's default login always works.",
-                ));
-            }
-            out
-        }
-        Tab::Shell => {
-            let (shell, loaded) = health::shell_integration();
-            let shell_name = if shell.is_empty() { "your shell".to_string() } else { shell.clone() };
-            let state = match loaded {
-                Some(true) => "loaded".to_string(),
-                Some(false) => "not loaded".to_string(),
-                None => "cannot tell for this shell".to_string(),
-            };
-            let init = crate::cli::shell_hint(&shell);
-            let wrapped: Vec<&str> = Harness::ALL
-                .into_iter()
-                .filter(|h| app.hs.get(h).is_some_and(|s| s.wrapped))
-                .filter(|h| app.derived.bins.get(h).is_some_and(|b| b.is_some()))
-                .map(|h| h.spec().bins[0])
-                .collect();
-            vec![
-                note(
-                    "Shell",
-                    shell_name,
-                    "Read from $SHELL.",
-                ),
-                note(
-                    "Integration",
-                    state,
-                    "With it loaded, typing the agent's name goes through cswap. Without it, `cswap claude` and friends still work.",
-                ),
-                note(
-                    "Line for your rc file",
-                    init,
-                    "Add this line to your shell's rc file, then open a new terminal.",
-                ),
-                note(
-                    "Commands it wraps",
-                    if wrapped.is_empty() { "none".to_string() } else { wrapped.join(", ") },
-                    "Each is a small function that runs `cswap <agent>`. Turn wrapping on or off per agent on its tab.",
-                ),
-                note(
-                    "Pick an account once",
-                    "claude --cswap=work".to_string(),
-                    "--cswap=<name or number> picks the account for one launch. --cswap=auto takes the best one, --cswap=default the agent's default login. --cswap-select asks.",
-                ),
-                note(
-                    "Pin a terminal",
-                    "export CSWAP_CLAUDE=work".to_string(),
-                    "CSWAP_<AGENT> pins every launch from one terminal. A wrapped session sets it for its own children, so they stay on its account.",
-                ),
-            ]
-        }
+        Tab::General => general(app),
+        Tab::Harness => harness(app),
+        Tab::Shell => shells(app),
     }
 }
 
@@ -330,7 +381,8 @@ fn ask(app: &mut App, id: Id, title: &str, prompt: &str, current: String, hint: 
     });
 }
 
-/// Change the selected row: -1 and +1 step it, 0 toggles it or opens an editor.
+/// Change the selected row: -1 and +1 step it, 0 toggles it, opens its
+/// editor or does what it says.
 pub fn change(app: &mut App, dir: i32) {
     let Some(row) = rows(app).into_iter().nth(app.row()) else {
         return;
@@ -382,23 +434,26 @@ pub fn change(app: &mut App, dir: i32) {
         })
         .map(|_| ()),
         Id::UpdateCheck => Settings::update(|s| s.update_check = !s.update_check).map(|_| ()),
-        Id::Wrapped(h) => flip_h(h, |s| s.wrapped = !s.wrapped),
+        Id::CheckNow => {
+            if dir == 0 {
+                app.check_update();
+            }
+            return;
+        }
+        Id::Shell(at) => {
+            if dir == 0 {
+                app.shell_menu(at);
+            }
+            return;
+        }
         Id::Announce(h) => flip_h(h, |s| s.announce = !s.announce),
         Id::SyncEnabled(h) => flip_h(h, |s| s.sync.enabled = !s.sync.enabled),
         Id::CliIdentity(h) => flip_h(h, |s| s.cli_identity = !s.cli_identity),
-        Id::Default(h) => {
-            let mut options = vec!["default".to_string(), "auto".to_string()];
-            options.extend(
-                app.reg
-                    .of(h)
-                    .filter(|a| !a.is_native())
-                    .map(|a| a.meta.id.to_string()),
-            );
-            let current = app.hs.get(&h).map(|s| s.start.clone()).unwrap_or_default();
-            let at = options.iter().position(|o| *o == current).unwrap_or(0) as i64;
-            let n = options.len() as i64;
-            let next = (at + if dir < 0 { -1 } else { 1 }).rem_euclid(n) as usize;
-            manage::set_start(h, &options[next]).map(|_| ())
+        // Off goes back to the agent's root login: the account that was the
+        // default before auto-pick is not remembered.
+        Id::AutoPick(h) => {
+            let on = app.hs.get(&h).is_some_and(|s| s.start == "auto");
+            manage::set_start(h, if on { "root" } else { "auto" }).map(|_| ())
         }
         Id::Exclude(h) => {
             if dir != 0 {
@@ -489,6 +544,90 @@ pub fn set_text(_app: &mut App, id: Id, text: &str) -> Result<(), String> {
     saved.map_err(|e| format!("{e:#}"))
 }
 
+/// One line of the list as it is drawn: the rows, with the titles of their
+/// groups and the header of the shell table between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Vis {
+    Gap,
+    /// The title of the group the row at this index starts.
+    Title(usize),
+    /// The header of the shell table.
+    Head,
+    Row(usize),
+}
+
+fn layout(rows: &[Row]) -> Vec<Vis> {
+    let is_shell = |r: &Row| matches!(r.kind, Kind::Shell(_));
+    let mut out = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        if row.group.is_some() {
+            if !out.is_empty() {
+                out.push(Vis::Gap);
+            }
+            out.push(Vis::Title(i));
+        }
+        if is_shell(row) && !(i > 0 && is_shell(&rows[i - 1])) {
+            out.push(Vis::Head);
+        }
+        out.push(Vis::Row(i));
+    }
+    out
+}
+
+/// The width of the shell's name in the shell table.
+const SHELL_W: usize = 14;
+
+/// Spans cut or padded to exactly `w` cells, the last of them blank.
+fn cell(spans: Vec<Span<'static>>, w: usize) -> Vec<Span<'static>> {
+    let mut out = clip(spans, w.saturating_sub(1));
+    let used = widgets::line_width(&Line::from(out.clone()));
+    out.push(Span::raw(" ".repeat(w.saturating_sub(used))));
+    out
+}
+
+/// One shell: its name, the agents that run through cswap in it, and the
+/// installed agents that do not.
+fn shell_cells(
+    app: &App,
+    sh: &shell::Status,
+    selected: bool,
+    on_w: usize,
+    off_w: usize,
+) -> Vec<Span<'static>> {
+    let t = &app.theme;
+    let mut name = vec![Span::styled(
+        sh.name.to_string(),
+        if selected { t.s_bold() } else { t.s_text() },
+    )];
+    if sh.current {
+        name.push(Span::styled("  yours", t.s_faint()));
+    }
+    let agents = |on: bool| -> Vec<Span<'static>> {
+        let mut spans = Vec::new();
+        for h in Harness::ALL {
+            let installed = app.derived.bins.get(&h).is_some_and(|b| b.is_some());
+            if !installed || sh.wraps(h) != on {
+                continue;
+            }
+            if !spans.is_empty() {
+                spans.push(Span::raw("  "));
+            }
+            spans.push(Span::styled(
+                h.spec().bins[0].to_string(),
+                if on { t.s(t.harness(h)) } else { t.s_dim() },
+            ));
+        }
+        if spans.is_empty() {
+            spans.push(Span::styled("–", t.s_faint()));
+        }
+        spans
+    };
+    let mut out = cell(name, SHELL_W);
+    out.extend(cell(agents(true), on_w));
+    out.extend(cell(agents(false), off_w));
+    out
+}
+
 pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let t = &app.theme;
     if area.height < 5 {
@@ -503,15 +642,10 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             break;
         }
         let rect = Rect::new(x, area.y, w, 1);
-        let current = i == app.settings_tab;
-        let color = match tab {
-            Tab::Agent(h) => t.harness(*h),
-            _ => t.accent(),
-        };
-        let style = if current {
+        let style = if i == app.settings_tab {
             Style::default()
                 .fg(t.on_accent())
-                .bg(color)
+                .bg(t.accent())
                 .add_modifier(Modifier::BOLD)
         } else {
             t.s_dim()
@@ -525,51 +659,93 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let focused = app.focus == Focus::Main && app.page == Page::Settings;
     let inner = card(f, body, "", t, None);
     let rows = rows(app);
-    let help_h: u16 = 4;
+    let lines = layout(&rows);
+    let help_h: u16 = 5;
     let list_h = inner.height.saturating_sub(help_h) as usize;
     let sel = app.row().min(rows.len().saturating_sub(1));
-    let start = scroll_start(sel, rows.len(), list_h);
+    let sel_line = lines.iter().position(|l| *l == Vis::Row(sel)).unwrap_or(0);
+    let start = scroll_start(sel_line, lines.len(), list_h);
     let w = inner.width as usize;
     let label_w = (w / 2).clamp(18, 32);
+    // The shell table: the name, then two columns that share the rest.
+    let on_w = w.saturating_sub(1 + SHELL_W) / 2;
+    let off_w = w.saturating_sub(1 + SHELL_W) - on_w;
 
-    for (i, row) in rows.iter().enumerate().skip(start).take(list_h) {
-        let rect = Rect::new(inner.x, inner.y + (i - start) as u16, inner.width, 1);
+    for (n, line) in lines.iter().enumerate().skip(start).take(list_h) {
+        let rect = Rect::new(inner.x, inner.y + (n - start) as u16, inner.width, 1);
+        let i = match *line {
+            Vis::Gap => continue,
+            Vis::Title(i) => {
+                let Some((title, agent)) = &rows[i].group else {
+                    continue;
+                };
+                let (dot, color) = match agent {
+                    Some(h) => (
+                        Span::styled(format!(" {DOT} "), Style::default().fg(t.harness(*h))),
+                        t.dim(),
+                    ),
+                    None => (Span::raw(" "), t.faint()),
+                };
+                let title = Span::styled(
+                    title.to_uppercase(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                );
+                f.render_widget(Paragraph::new(Line::from(vec![dot, title])), rect);
+                continue;
+            }
+            Vis::Head => {
+                let line = Line::from(vec![
+                    Span::raw(" "),
+                    head(t, "SHELL", SHELL_W),
+                    head(t, "INTEGRATED", on_w),
+                    head(t, "NOT INTEGRATED", off_w),
+                ]);
+                f.render_widget(Paragraph::new(line), rect);
+                continue;
+            }
+            Vis::Row(i) => i,
+        };
+        let row = &rows[i];
         let selected = focused && i == sel;
         let (mark, bg) = row_style(app, selected);
         if selected {
             paint_row(f, rect, bg);
         }
-        let editable = row.id.is_some();
+        hits.add(rect, Action::Row(i));
+        if let Kind::Shell(at) = row.kind {
+            let Some(sh) = app.derived.shells.get(at) else {
+                continue;
+            };
+            let mut spans = vec![mark];
+            spans.extend(shell_cells(app, sh, selected, on_w, off_w));
+            f.render_widget(Paragraph::new(Line::from(spans)), rect);
+            continue;
+        }
         let label_style = if selected {
             t.s_bold()
-        } else if editable {
+        } else if row.id.is_some() {
             t.s_text()
         } else {
             t.s_dim()
         };
         let room = w.saturating_sub(label_w + 2);
-        let (text, style) = match row.on {
-            Some(true) => (format!("{DOT} on "), t.s(t.ok())),
-            Some(false) => (format!("{RING} off"), t.s_faint()),
-            None if editable && selected => (
-                format!(
-                    "‹ {} ›",
-                    crate::tui::widgets::truncate(&row.value, room.saturating_sub(4))
-                ),
+        let (text, style) = match row.kind {
+            Kind::Toggle(true) => (format!("{DOT} on "), t.s(t.ok())),
+            Kind::Toggle(false) => (format!("{RING} off"), t.s_faint()),
+            Kind::Value if selected => (
+                format!("‹ {} ›", truncate(&row.value, room.saturating_sub(4))),
                 t.s_accent(),
             ),
-            None if editable => (
-                format!(
-                    "{}  ",
-                    crate::tui::widgets::truncate(&row.value, room.saturating_sub(2))
-                ),
+            Kind::Button if selected => (
+                format!("{} ⏎", truncate(&row.value, room.saturating_sub(2))),
+                t.s_accent(),
+            ),
+            Kind::Value | Kind::Button => (
+                format!("{}  ", truncate(&row.value, room.saturating_sub(2))),
                 t.s_text(),
             ),
-            None => (
-                format!(
-                    "{}  ",
-                    crate::tui::widgets::truncate(&row.value, room.saturating_sub(2))
-                ),
+            Kind::Note | Kind::Shell(_) => (
+                format!("{}  ", truncate(&row.value, room.saturating_sub(2))),
                 t.s_dim(),
             ),
         };
@@ -582,9 +758,8 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             Span::styled(text, style),
         ]);
         f.render_widget(Paragraph::new(line), rect);
-        hits.add(rect, Action::Row(i));
         // The arrows of the selected value step it.
-        if selected && row.on.is_none() && editable {
+        if selected && row.kind == Kind::Value {
             let end = inner.x + inner.width - 1;
             let left = end.saturating_sub(text_w as u16);
             hits.add(Rect::new(left, rect.y, 2, 1), Action::SettingChange(-1));
@@ -628,5 +803,36 @@ mod tests {
         // A value typed by hand that is not an option still steps sensibly.
         assert_eq!(step(&o, 7, 1), 10);
         assert_eq!(step(&o, 7, -1), 5);
+    }
+
+    #[test]
+    fn a_group_gets_a_title_and_the_shells_one_header() {
+        let row = |kind: Kind, group: bool| {
+            let r = Row::new(None, kind, "x", String::new(), "");
+            if group {
+                r.under("G", None)
+            } else {
+                r
+            }
+        };
+        let rows = vec![
+            row(Kind::Shell(0), true),
+            row(Kind::Shell(1), false),
+            row(Kind::Note, true),
+            row(Kind::Note, false),
+        ];
+        assert_eq!(
+            layout(&rows),
+            vec![
+                Vis::Title(0),
+                Vis::Head,
+                Vis::Row(0),
+                Vis::Row(1),
+                Vis::Gap,
+                Vis::Title(2),
+                Vis::Row(2),
+                Vis::Row(3),
+            ]
+        );
     }
 }

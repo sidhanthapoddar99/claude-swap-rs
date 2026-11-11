@@ -1,6 +1,10 @@
-//! Defaults: each agent's own login, the one it uses when cswap is not asked
-//! for an account. They are shown here and nowhere else. An account can be
-//! made from one: you name it and sign in again.
+//! Root: each agent's own login, the one it had before cswap and still uses
+//! when cswap is not in the way. They are shown here and nowhere else. An
+//! account can be made from one: you name it and sign in again.
+//!
+//! A root login is not the same thing as the default. The default is where
+//! `cswap <agent>` starts when no account is named, and it can be the root
+//! login or any account.
 
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
@@ -40,7 +44,7 @@ fn cols(w: usize) -> Cols {
     }
 }
 
-/// The account that holds the same login as this default, when one does.
+/// The account that holds the same login as this root login, when one does.
 fn twin<'a>(app: &'a App, acc: &Account) -> Option<&'a Account> {
     manage::duplicate_of(&app.all, acc)
 }
@@ -49,22 +53,13 @@ fn row(app: &App, acc: &Account, c: &Cols, selected: bool, now: DateTime<Utc>) -
     let t = &app.theme;
     let (mark, _) = row_style(app, selected);
     let signed_in = app.derived.logged_in.contains(&acc.key());
-    let starts_here = app.is_default(acc);
     let name = acc.harness.name();
-    let mut spans = vec![
-        mark,
-        Span::styled(format!("{DOT} "), t.s(t.harness(acc.harness))),
-    ];
+    // A star in place of the dot when this login is the agent's default.
+    let mut spans = vec![mark, super::dot(app, acc)];
     spans.push(Span::styled(
-        fit(name, AGENT_W - 2),
+        fit(name, AGENT_W),
         if selected { t.s_bold() } else { t.s_text() },
     ));
-    // A star where a bare launch of the agent starts on this login.
-    spans.push(if starts_here {
-        Span::styled(format!(" {STAR}"), t.s_accent())
-    } else {
-        Span::raw("  ")
-    });
     spans.push(Span::raw(" "));
     let who = if signed_in {
         display_email(acc)
@@ -97,7 +92,7 @@ fn row(app: &App, acc: &Account, c: &Cols, selected: bool, now: DateTime<Utc>) -
     Line::from(spans)
 }
 
-/// What the selected default is for, and what can be made of it.
+/// What the selected root login is for, and what can be made of it.
 fn about(app: &App, acc: &Account, now: DateTime<Utc>) -> Vec<Line<'static>> {
     let t = &app.theme;
     let h = acc.harness;
@@ -105,12 +100,17 @@ fn about(app: &App, acc: &Account, now: DateTime<Utc>) -> Vec<Line<'static>> {
     let signed_in = app.derived.logged_in.contains(&acc.key());
     let mut lines = Vec::new();
 
-    // Where a bare launch goes.
+    // Where a launch that names no account goes.
     let start = app.hs.get(&h).map(|s| s.start.clone()).unwrap_or_default();
     let (text, style) = match start.as_str() {
-        "default" | "" => (format!("A bare `{bin}` starts here."), t.s_text()),
+        "root" => (
+            format!("The default: `cswap {bin}` with no account named starts here."),
+            t.s_text(),
+        ),
         "auto" => (
-            format!("A bare `{bin}` starts on the best account, not here · d changes that."),
+            format!(
+                "Not the default: `cswap {bin}` picks the best account · d makes this the default."
+            ),
             t.s_dim(),
         ),
         id => {
@@ -121,7 +121,9 @@ fn about(app: &App, acc: &Account, now: DateTime<Utc>) -> Vec<Line<'static>> {
                 .map(Account::title)
                 .unwrap_or_else(|| format!("account {id}"));
             (
-                format!("A bare `{bin}` starts on {name}, not here · d changes that."),
+                format!(
+                    "Not the default: `cswap {bin}` starts on {name} · d makes this the default."
+                ),
                 t.s_dim(),
             )
         }
@@ -130,7 +132,7 @@ fn about(app: &App, acc: &Account, now: DateTime<Utc>) -> Vec<Line<'static>> {
         Span::styled(
             format!("{STAR} "),
             if app.is_default(acc) {
-                t.s_accent()
+                t.s(t.harness(h))
             } else {
                 t.s_faint()
             },
@@ -185,7 +187,7 @@ fn about(app: &App, acc: &Account, now: DateTime<Utc>) -> Vec<Line<'static>> {
 pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let t = &app.theme;
     let now = Utc::now();
-    let rows: Vec<&Account> = app.all.defaults().collect();
+    let rows: Vec<&Account> = app.all.roots().collect();
     if rows.is_empty() {
         super::empty(
             f,
@@ -254,7 +256,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         Span::styled(format!("{DOT} "), t.s(t.harness(acc.harness))),
         Span::styled(
             truncate(
-                &format!("{}'s default login", acc.harness.name()),
+                &format!("{}'s root login", acc.harness.name()),
                 inner.width as usize - 2,
             ),
             t.s_bold(),

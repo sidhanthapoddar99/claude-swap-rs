@@ -24,6 +24,7 @@ mod picker;
 mod platform;
 mod refresh;
 mod sessions;
+mod shell;
 mod store;
 mod suggest;
 mod sync;
@@ -148,20 +149,21 @@ enum Cmd {
         clear: bool,
     },
 
-    /// Show or set which account a bare launch of an agent starts on
+    /// Show or set an agent's default: where `cswap <agent>` starts
     #[command(
         alias = "default",
-        after_help = "Examples:\n  cswap use claude            show it\n  cswap use claude work       always start on work\n  cswap use claude auto       let cswap pick at every launch\n  cswap use claude default    the agent's own login"
+        after_help = "Examples:\n  cswap use claude            show it\n  cswap use claude work       always start on work\n  cswap use claude auto       let cswap pick at every launch\n  cswap use claude root       the agent's own login"
     )]
     Use {
         /// claude, codex, agy or grok
         agent: String,
-        /// An account, `default` or `auto`
+        /// An account, `root` or `auto`
         account: Option<String>,
     },
 
     /// The agents' own logins
-    Defaults {
+    #[command(alias = "defaults")]
+    Root {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
@@ -254,7 +256,7 @@ fn help(p: &Paint) -> String {
     out.push_str("\n  Everything after the agent's name goes to the agent untouched, except:\n");
     out.push_str(&row(
         "  --cswap=<account>",
-        "run on this account: a name, a number, default or auto",
+        "run on this account: a name, a number, root or auto",
     ));
     out.push_str(&row(
         "  --cswap=a,b,c",
@@ -267,7 +269,7 @@ fn help(p: &Paint) -> String {
             "LOOK",
             &[
                 ("list", "every account and its state"),
-                ("defaults", "the agents' own logins"),
+                ("root", "the agents' own logins"),
                 ("ps", "which agents are running, on which account"),
                 ("usage [account]", "weekly limits and when they reset"),
                 ("resets", "spare resets and what resets when (view only)"),
@@ -286,7 +288,7 @@ fn help(p: &Paint) -> String {
                 ),
                 (
                     "use <agent> [account]",
-                    "which account a bare launch starts on",
+                    "the agent's default: where it starts",
                 ),
                 ("remove <account>", "delete an account's login"),
             ],
@@ -329,7 +331,7 @@ fn help(p: &Paint) -> String {
         p.info("work"),
         p.info("claude-2"),
         p.info("2"),
-        p.info("default")
+        p.info("root")
     ));
 
     out.push('\n');
@@ -411,7 +413,7 @@ fn run() -> Result<ExitCode> {
             | Cmd::Update { .. }
             | Cmd::Ps { json: true }
             | Cmd::List { json: true }
-            | Cmd::Defaults { json: true }
+            | Cmd::Root { json: true }
     );
     let mut ok = true;
     match cmd {
@@ -436,7 +438,7 @@ fn run() -> Result<ExitCode> {
             clear,
         } => cli::alias(&account, &aliases, clear)?,
         Cmd::Use { agent, account } => cli::use_cmd(&agent, account.as_deref())?,
-        Cmd::Defaults { json } => cli::defaults(json)?,
+        Cmd::Root { json } => cli::root(json)?,
         Cmd::Refresh { account } => cli::refresh_cmd(account.as_deref())?,
         Cmd::Sync {
             account,

@@ -4,7 +4,7 @@
 //! cswap keeps for itself and removes:
 //!
 //! - `--cswap=<account>` picks the account: a name, a number, an email,
-//!   `default`, or `auto`. A comma-separated list is an order of preference:
+//!   `root`, or `auto`. A comma-separated list is an order of preference:
 //!   the first one that can start a session now is used.
 //! - `--cswap-select` opens a picker.
 //!
@@ -188,14 +188,6 @@ pub fn run(h: Harness, args: Vec<String>) -> Result<()> {
         .ok()
         .filter(|v| !v.trim().is_empty());
 
-    // Not wrapped and nothing asked for: cswap is not in the way at all.
-    if flag.is_none() && from_env.is_none() && !hs.wrapped {
-        let bin = manage::find_bin(h, &hs)?;
-        let mut cmd = Command::new(&bin);
-        cmd.args(&rest);
-        match platform::become_program(cmd)? {}
-    }
-
     let (sel, via) = match (flag, from_env) {
         (Some(Selector::Auto), _) => (Selector::Auto, Via::Auto),
         (Some(Selector::Select), _) => (Selector::Select, Via::Picker),
@@ -219,7 +211,7 @@ pub fn run(h: Harness, args: Vec<String>) -> Result<()> {
                 .of(h)
                 .find(|a| a.is_native())
                 .with_context(|| format!("{e:#}"))?;
-            eprintln!("cswap: {e:#}; using {}'s default login", h.spec().bins[0]);
+            eprintln!("cswap: {e:#}; using {}'s root login", h.spec().bins[0]);
             (native, None)
         }
         Err(e) => return Err(e),

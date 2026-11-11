@@ -1,9 +1,10 @@
 //! Accounts: the list on the left, everything about the selected one on the
 //! right. Adding, signing in, naming and removing all start here.
 //!
-//! The right side has three parts. First the facts, a line each. Then the
-//! spare resets and the credits the account holds. Last, the wordy part: what
-//! each fact means and which key changes it.
+//! The right side has four parts. First the facts, a line each. Then every
+//! limit of the account and its pay-as-you-go credit, then the spare resets
+//! it holds. Last, the details: where the account lives, what each fact
+//! means and which key changes it.
 
 use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -13,8 +14,8 @@ use ratatui::widgets::{Borders, Paragraph};
 use ratatui::Frame;
 
 use super::{
-    dot, expiry_color, fit_date, head, launch_hint, main_window, name_cell, no_data, paint_row,
-    plan_text, row_style, scroll_start, status, status_span, window_cells,
+    dot, expiry_color, fit_date, head, launch_hint, limit_lines, name_cell, paint_row, plan_text,
+    row_style, scroll_start, status, status_span, LimitCols,
 };
 use crate::harness::Harness;
 use crate::model::{self, Source};
@@ -100,10 +101,23 @@ fn list(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
                         Style::default().fg(t.dim()).add_modifier(Modifier::BOLD),
                     ),
                 ];
-                if !installed {
-                    spans.push(Span::styled("  not installed", t.s_faint()));
-                } else if hn.spec().experimental {
-                    spans.push(Span::styled("  experimental", t.s_faint()));
+                // Where a launch that names no account goes, when it is not
+                // one of the accounts below: those wear a star.
+                let start = app.hs.get(hn).map(|s| s.start.as_str());
+                let note = match start {
+                    _ if !installed => "not installed",
+                    Some("auto") => "default: auto",
+                    Some("root") => "default: root",
+                    _ if hn.spec().experimental => "experimental",
+                    _ => "",
+                };
+                if !note.is_empty() {
+                    let used = widgets::line_width(&Line::from(spans.clone()));
+                    let room = w.saturating_sub(used + 1);
+                    if widgets::width(note) <= room {
+                        spans.push(Span::raw(" ".repeat(room - widgets::width(note))));
+                        spans.push(Span::styled(note, t.s_faint()));
+                    }
                 }
                 f.render_widget(Paragraph::new(Line::from(spans)), rect);
             }
@@ -116,7 +130,13 @@ fn list(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
                 }
                 let state = status(app, acc);
                 let state_w = 12.min(w / 3);
-                let mut spans = vec![mark, Span::raw("  ")];
+                // The default account of the agent has a star before its name.
+                let star = if app.is_default(acc) {
+                    Span::styled(format!("{STAR} "), t.s(t.harness(acc.harness)))
+                } else {
+                    Span::raw("  ")
+                };
+                let mut spans = vec![mark, star];
                 spans.extend(name_cell(
                     app,
                     acc,
@@ -287,42 +307,9 @@ fn info(
             lines.push(kv(t, "Token", LABEL_W, clip(spans, room)));
         }
     }
-    // Usage, in one line; the Usage page has the rest.
-    match acc.snapshot().and_then(main_window).filter(|_| signed_in) {
-        Some(win) => {
-            // The bar gives way on a screen too narrow for it.
-            let bar_w = room.saturating_sub(super::window_w(0)).min(24);
-            let cells = if bar_w >= 6 {
-                window_cells(app, win, bar_w, now)
-            } else {
-                vec![
-                    widgets::pct_span(t, win.used_now(now)),
-                    Span::styled(format!("  {}", super::resets_in(win, now)), t.s_dim()),
-                ]
-            };
-            lines.push(kv(
-                t,
-                &format!("This {}", win.period()),
-                LABEL_W,
-                clip(cells, room),
-            ));
-        }
-        None => {
-            let (text, color) = no_data(app, acc);
-            lines.push(kv(
-                t,
-                "Usage",
-                LABEL_W,
-                vec![Span::styled(
-                    truncate(&text, room),
-                    Style::default().fg(color),
-                )],
-            ));
-        }
-    }
     gap(&mut lines);
 
-    // How to use it and where it lives.
+    // How to start it.
     lines.push(kv(
         t,
         "Launch",
@@ -332,30 +319,6 @@ fn info(
             t.s(t.accent()),
         )],
     ));
-    lines.push(kv(t, "Folder", LABEL_W, dim(paths::tilde(&acc.dir()))));
-    {
-        let s = &acc.meta.sync;
-        let mut text = format!("{} linked · {} private", s.linked, s.private);
-        if !s.shadowed.is_empty() {
-            text.push_str(&format!(" · {} shadowed", s.shadowed.len()));
-        }
-        if let Some(at) = s.last_synced {
-            text.push_str(&format!(" · synced {}", model::ago(at, now)));
-        }
-        lines.push(kv(
-            t,
-            "Shared",
-            LABEL_W,
-            vec![Span::styled(
-                truncate(&text, room),
-                if s.shadowed.is_empty() {
-                    t.s_dim()
-                } else {
-                    t.s(t.warn())
-                },
-            )],
-        ));
-    }
     let used = match acc.meta.last_used {
         Some(at) => model::ago(at, now),
         None => "never".to_string(),
@@ -364,11 +327,38 @@ fn info(
     lines
 }
 
+// ------------------------------------------------------------------ the usage
+
+/// Every limit of the account, a line each, the same as on the Usage page.
+/// The header comes apart from the lines, as it does for the resets.
+fn usage(
+    app: &App,
+    acc: &Account,
+    now: DateTime<Utc>,
+    w: usize,
+) -> (Option<Line<'static>>, Vec<Line<'static>>) {
+    let mut c = LimitCols::new(w, 24, app.settings.clock_24h);
+    // The bar is the first thing to go on a card too narrow for the line.
+    if c.width() > w {
+        c.bar = 0;
+    }
+    let signed_in = app.derived.logged_in.contains(&acc.key());
+    let top = acc
+        .snapshot()
+        .filter(|s| signed_in && !s.windows.is_empty())
+        .map(|_| Line::from(clip(c.header(&app.theme), w)));
+    let lines = limit_lines(app, acc, &c, now)
+        .into_iter()
+        .map(|cells| Line::from(clip(cells, w)))
+        .collect();
+    (top, lines)
+}
+
 // ----------------------------------------------------------------- the resets
 
-/// Every spare reset the account holds, a line each, and its credits. The
-/// header of the table comes apart from it: a card with too little room
-/// leaves the header out and keeps the resets.
+/// Every spare reset the account holds, a line each. The header of the
+/// table comes apart from it: a card with too little room leaves the header
+/// out and keeps the resets.
 fn resets(
     app: &App,
     acc: &Account,
@@ -428,22 +418,6 @@ fn resets(
             lines.push(Line::from(spans));
         }
     }
-    // Pay-as-you-go credit, when the vendor reports any.
-    if let Some(text) = acc
-        .snapshot()
-        .and_then(|s| s.credits.as_ref())
-        .and_then(view::credits_text)
-    {
-        lines.push(kv(
-            t,
-            "Credits",
-            LABEL_W,
-            vec![Span::styled(
-                truncate(&text, w.saturating_sub(LABEL_W)),
-                t.s_text(),
-            )],
-        ));
-    }
     (top, lines)
 }
 
@@ -488,14 +462,35 @@ fn details(app: &App, acc: &Account, now: DateTime<Utc>, w: usize) -> Vec<Line<'
     }
     if app.is_default(acc) {
         say(
-            "Start",
+            "Default",
             vec![
-                Span::styled(format!("{STAR} "), t.s_accent()),
-                Span::styled(
-                    format!("A bare `{bin}` starts on this account. d changes that."),
-                    t.s_dim(),
-                ),
+                Span::styled(format!("{STAR} "), t.s(t.harness(h))),
+                Span::styled(format!("`cswap {bin}` starts here."), t.s_dim()),
             ],
+        );
+    }
+
+    // Where it lives.
+    say("Folder", dim(paths::tilde(&acc.dir())));
+    {
+        let s = &acc.meta.sync;
+        let mut text = format!("{} linked · {} private", s.linked, s.private);
+        if !s.shadowed.is_empty() {
+            text.push_str(&format!(" · {} shadowed", s.shadowed.len()));
+        }
+        if let Some(at) = s.last_synced {
+            text.push_str(&format!(" · synced {}", model::ago(at, now)));
+        }
+        say(
+            "Shared",
+            vec![Span::styled(
+                text,
+                if s.shadowed.is_empty() {
+                    t.s_dim()
+                } else {
+                    t.s(t.warn())
+                },
+            )],
         );
     }
 
@@ -568,6 +563,30 @@ fn details(app: &App, acc: &Account, now: DateTime<Utc>, w: usize) -> Vec<Line<'
 
 // ------------------------------------------------------------------ the cards
 
+/// How tall each of four cards is, top to bottom, in `avail` lines. `want`
+/// is what each asks for, borders included; the last one takes what is left.
+/// A card that cannot have three lines is left out, and so is every card
+/// after it. Whatever is over goes to the last card shown.
+fn heights(want: [u16; 3], avail: u16) -> [u16; 4] {
+    let mut out = [0u16; 4];
+    let mut left = avail;
+    for (i, need) in want.into_iter().enumerate() {
+        // The first card is always there, however little room it gets.
+        if i > 0 && left < 3 {
+            break;
+        }
+        out[i] = need.min(left);
+        left -= out[i];
+    }
+    let shown = out.iter().take(3).all(|h| *h > 0);
+    if shown && left >= 3 {
+        out[3] = left;
+    } else if let Some(last) = out.iter_mut().rev().find(|h| **h > 0) {
+        *last += left;
+    }
+    out
+}
+
 fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
     let t = &app.theme;
     let now = Utc::now();
@@ -576,42 +595,40 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
     }
     // Every card has a border and a cell of padding on each side.
     let w = area.width as usize - 4;
+    let (usage_head, mut usage_lines) = usage(app, acc, now, w);
+    let usage_n = usage_lines.len() + usize::from(usage_head.is_some());
     let (reset_head, mut reset_lines) = resets(app, acc, now, w);
     let reset_n = reset_lines.len() + usize::from(reset_head.is_some());
     let detail_lines = details(app, acc, now, w);
-    // The facts are set apart in groups when all three cards still fit.
+    // The facts are set apart in groups when all four cards still fit.
     let tight = info(app, acc, now, w, false);
-    let spaced = tight.len() + 2 + 2 + reset_n + 2 + detail_lines.len() + 2 <= area.height as usize;
-    let info_lines = if spaced {
+    let all = tight.len() + 2 + usage_n + 2 + reset_n + 2 + detail_lines.len() + 2;
+    let info_lines = if all + 2 <= area.height as usize {
         info(app, acc, now, w, true)
     } else {
         tight
     };
 
-    // Top to bottom: the facts get what they need, then the resets, and the
-    // wordy part what is left. The last card shown reaches the bottom.
-    let avail = area.height;
-    let info_h = (info_lines.len() as u16 + 2).min(avail);
-    let mut left = avail - info_h;
-    let resets_h = if left >= 3 {
-        (reset_n as u16 + 2).min(left)
-    } else {
-        0
-    };
-    // The table's header is the first thing to go when the card is cut.
+    // Top to bottom: the facts, the usage and the resets get what they need,
+    // and the wordy part what is left.
+    let [info_h, usage_h, resets_h, details_h] = heights(
+        [
+            info_lines.len() as u16 + 2,
+            usage_n as u16 + 2,
+            reset_n as u16 + 2,
+        ],
+        area.height,
+    );
+    // A table's header is the first thing to go when its card is cut.
+    if let Some(header) = usage_head.filter(|_| usage_h as usize >= usage_n + 2) {
+        usage_lines.insert(0, header);
+    }
     if let Some(header) = reset_head.filter(|_| resets_h as usize >= reset_n + 2) {
         reset_lines.insert(0, header);
     }
-    left -= resets_h;
-    let details_h = if left >= 3 { left } else { 0 };
-    left -= details_h;
-    let (info_h, resets_h) = match (resets_h, details_h) {
-        (0, _) => (info_h + left, 0),
-        (r, 0) => (info_h, r + left),
-        (r, _) => (info_h, r),
-    };
 
-    // Who it is, on the border of the first card.
+    // Who it is, on the border of the first card. A default account has a
+    // star in place of its dot.
     let mut title = vec![
         dot(app, acc),
         Span::styled(
@@ -619,9 +636,6 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
             Style::default().fg(t.text()).add_modifier(Modifier::BOLD),
         ),
     ];
-    if app.is_default(acc) {
-        title.push(Span::styled(format!(" {STAR}"), t.s_accent()));
-    }
     let state = status_span(t, status(app, acc));
     let sub = format!("  {} · {}", acc.key(), acc.harness.name());
     let used = widgets::line_width(&Line::from(title.clone())) + widgets::width(&state.content);
@@ -633,8 +647,26 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
     card_note(f, rect, Line::from(state), t);
     f.render_widget(Paragraph::new(info_lines), inner);
 
+    let mut y = area.y + info_h;
+    if usage_h > 0 {
+        let rect = Rect::new(area.x, y, area.width, usage_h);
+        let inner = card(f, rect, "Usage", t, None);
+        if let Some(at) = acc.snapshot().map(|s| s.fetched_at) {
+            card_note(
+                f,
+                rect,
+                Line::from(Span::styled(
+                    format!("read {}", model::ago(at, now)),
+                    t.s_faint(),
+                )),
+                t,
+            );
+        }
+        f.render_widget(Paragraph::new(usage_lines), inner);
+        y += usage_h;
+    }
     if resets_h > 0 {
-        let rect = Rect::new(area.x, area.y + info_h, area.width, resets_h);
+        let rect = Rect::new(area.x, y, area.width, resets_h);
         let inner = card(f, rect, "Resets", t, None);
         let n: u32 = acc.grants(now).iter().map(|g| g.count).sum();
         if n > 0 {
@@ -646,10 +678,32 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
             );
         }
         f.render_widget(Paragraph::new(reset_lines), inner);
+        y += resets_h;
     }
     if details_h > 0 {
-        let rect = Rect::new(area.x, area.y + info_h + resets_h, area.width, details_h);
+        let rect = Rect::new(area.x, y, area.width, details_h);
         let inner = card(f, rect, "Details", t, None);
         f.render_widget(Paragraph::new(detail_lines), inner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::heights;
+
+    #[test]
+    fn the_cards_share_the_height_top_to_bottom() {
+        // Room for all: the last card takes what is left.
+        assert_eq!(heights([9, 6, 4], 30), [9, 6, 4, 11]);
+        // No room for the last: what is over goes to the one before it.
+        assert_eq!(heights([9, 6, 4], 21), [9, 6, 6, 0]);
+        // A card is cut before it is left out, and left out under three lines.
+        assert_eq!(heights([9, 6, 4], 18), [9, 6, 3, 0]);
+        assert_eq!(heights([9, 6, 4], 17), [9, 8, 0, 0]);
+        // The first card is there on any screen.
+        assert_eq!(heights([9, 6, 4], 5), [5, 0, 0, 0]);
+        for avail in 3..40 {
+            assert_eq!(heights([9, 6, 4], avail).iter().sum::<u16>(), avail);
+        }
     }
 }

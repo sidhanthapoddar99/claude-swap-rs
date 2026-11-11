@@ -109,6 +109,8 @@ impl Env {
             .env("CSWAP_NO_UPDATE_CHECK", "1")
             .env("CSWAP_FAKE_LOG", self.log_path())
             .env("SHELL", "/bin/bash")
+            .env_remove("ZDOTDIR")
+            .env_remove("XDG_CONFIG_HOME")
             .env("NO_COLOR", "1")
             // Only the fake agents and the system's own tools.
             .env(
@@ -163,14 +165,14 @@ impl Env {
     }
 
     /// The agents' own logins.
-    fn defaults(&self) -> Vec<Value> {
-        serde_json::from_str(&self.ok(&["defaults", "--json"])).unwrap()
+    fn roots(&self) -> Vec<Value> {
+        serde_json::from_str(&self.ok(&["root", "--json"])).unwrap()
     }
 
     fn account(&self, key: &str) -> Value {
         self.list()
             .into_iter()
-            .chain(self.defaults())
+            .chain(self.roots())
             .find(|a| a["key"] == key)
             .unwrap_or_else(|| panic!("no account {key}"))
     }
@@ -292,9 +294,12 @@ fn the_cswap_flag_picks_the_account_and_is_removed() {
         );
     }
 
-    // The agent's own login is asked for as `default`.
-    env.ok(&["claude", "--cswap=default"]);
-    assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"));
+    // The agent's own login is asked for as `root`. `default` was its name
+    // in earlier builds and still works.
+    for selector in ["root", "default"] {
+        env.ok(&["claude", &format!("--cswap={selector}")]);
+        assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"), "{selector}");
+    }
 }
 
 #[test]
@@ -326,7 +331,7 @@ fn the_default_and_the_pin_variable_choose_the_account() {
     env.ok(&["claude"]);
     assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"));
     assert_eq!(env.account("claude-0")["starts_here"], true);
-    assert!(env.ok(&["use", "claude"]).contains("default login"));
+    assert!(env.ok(&["use", "claude"]).contains("root login"));
 
     // A pin for one shell wins over the default.
     let out = env
@@ -422,17 +427,17 @@ fn add_shares_everything_but_the_login() {
 }
 
 #[test]
-fn the_agents_own_logins_are_defaults_and_not_accounts() {
+fn the_agents_own_logins_are_roots_and_not_accounts() {
     let env = Env::new();
     assert!(env.list().is_empty());
     let keys: Vec<String> = env
-        .defaults()
+        .roots()
         .iter()
         .map(|d| d["key"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(keys, ["claude-0", "codex-0"]);
-    for d in env.defaults() {
-        assert_eq!(d["name"], "default");
+    for d in env.roots() {
+        assert_eq!(d["name"], "root");
         assert_eq!(d["same_login_as"], Value::Null);
     }
 
@@ -446,23 +451,19 @@ fn the_agents_own_logins_are_defaults_and_not_accounts() {
     assert_eq!(keys, ["claude-1"]);
     assert_eq!(env.account("claude-0")["same_login_as"], "mine");
 
-    let text = env.ok(&["defaults"]);
+    let text = env.ok(&["root"]);
     assert!(
         text.contains("own@example.com") && text.contains("same login as mine"),
         "{text}"
     );
+    // The command's name in earlier builds still works.
+    assert_eq!(env.ok(&["defaults"]), text);
     let list = env.ok(&["list"]);
     // One row: the account. The agent's own login is not listed with it.
     assert!(list.contains("mine"), "{list}");
     assert_eq!(list.matches("own@example.com").count(), 1, "{list}");
     // Nowhere is the old word for it.
-    for cmd in [
-        &["list"][..],
-        &["defaults"],
-        &["usage"],
-        &["resets"],
-        &["-h"],
-    ] {
+    for cmd in [&["list"][..], &["root"], &["usage"], &["resets"], &["-h"]] {
         let out = env.ok(cmd).to_lowercase();
         assert!(!out.contains("native"), "cswap {cmd:?}\n{out}");
     }
@@ -474,7 +475,7 @@ fn every_account_has_a_name() {
     // No name and nobody to ask: nothing is added and no sign-in runs.
     let err = env.fails(&["add", "claude"]);
     assert!(err.contains("name"), "{err}");
-    for bad in ["3", "default", "auto", "two words"] {
+    for bad in ["3", "root", "default", "auto", "two words"] {
         let err = env.fails(&["add", "claude", bad]);
         assert!(err.contains("name"), "{bad}: {err}");
     }
@@ -495,7 +496,7 @@ fn every_account_has_a_name() {
     env.ok(&["claude", "--cswap=play"]);
     assert!(env.log().contains("CSWAP_ACCOUNT=claude-2\n"));
     env.fails(&["claude", "--cswap=side"]);
-    // The agent's own login is called default, and that cannot change.
+    // The agent's own login is called root, and that cannot change.
     env.fails(&["rename", "claude-0", "mine"]);
 }
 
@@ -641,7 +642,7 @@ fn help_names_every_command_in_groups() {
             "EXAMPLES",
             "cswap start",
             "ps  ",
-            "defaults  ",
+            "root  ",
             "add <agent> <name>",
             "rename <account> <name>",
             "use <agent> [account]",
@@ -674,7 +675,7 @@ fn the_text_views_work_without_a_terminal() {
     for cmd in [
         &["usage"][..],
         &["usage", "work"],
-        &["defaults"],
+        &["root"],
         &["resets"],
         &["suggest"],
         &["suggest", "claude"],
@@ -738,6 +739,22 @@ fn shell_init_wraps_the_installed_agents() {
     let log = env.log();
     assert_eq!(args_of(&log), ["--print", "a b"], "{log}");
     assert!(log.contains("CSWAP_ACCOUNT=claude-0\n"), "{log}");
+
+    // A shell with a list of its own wraps what the list holds and no more.
+    // The dashboard writes the list, under Settings > Shell.
+    fs::create_dir_all(env.cswap_home()).unwrap();
+    fs::write(
+        env.cswap_home().join("settings.json"),
+        r#"{"shells":{"bash":["codex"]}}"#,
+    )
+    .unwrap();
+    let bash = env.ok(&["shell-init", "bash"]);
+    assert!(
+        bash.contains("codex()") && !bash.contains("claude()"),
+        "{bash}"
+    );
+    // Another shell has no list yet, so it still wraps them all.
+    assert!(env.ok(&["shell-init", "zsh"]).contains("claude()"));
 }
 
 #[test]

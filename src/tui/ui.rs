@@ -228,7 +228,7 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         hits.add(rect, Action::Go(page));
     }
 
-    // The agents, with how many accounts each has and whether it is wrapped.
+    // The agents, with how many accounts each has.
     if inner.height > Page::ALL.len() as u16 + legend_h {
         let mut ly = inner.y + inner.height - legend_h;
         f.render_widget(
@@ -242,7 +242,6 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         for h in Harness::ALL {
             let count = app.reg.of(h).count();
             let installed = app.derived.bins.get(&h).is_some_and(|b| b.is_some());
-            let wrapped = app.hs.get(&h).is_some_and(|s| s.wrapped);
             let (glyph, color) = if installed {
                 (DOT, t.harness(h))
             } else {
@@ -250,8 +249,6 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             };
             let note = if !installed {
                 "–".to_string()
-            } else if !wrapped {
-                format!("{count} off")
             } else {
                 count.to_string()
             };
@@ -302,7 +299,7 @@ fn page(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         Page::Sync => pages::sync::draw(f, content, app, hits),
         Page::Usage => pages::usage::draw(f, content, app, hits),
         Page::Accounts => pages::accounts::draw(f, content, app, hits),
-        Page::Defaults => pages::defaults::draw(f, content, app, hits),
+        Page::Root => pages::root::draw(f, content, app, hits),
         Page::Sessions => pages::sessions::draw(f, content, app, hits),
         Page::Resets => pages::resets::draw(f, content, app, hits),
         Page::Analytics => pages::analytics::draw(f, content, app, hits),
@@ -365,7 +362,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             });
             chips.push(Chip {
                 key: "d",
-                label: "start here",
+                label: "set default",
                 action: Action::SetDefault(k.clone()),
             });
             if app.page == Page::Accounts {
@@ -391,7 +388,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
                 });
             }
         }
-    } else if app.page == Page::Defaults {
+    } else if app.page == Page::Root {
         if let Some(k) = &key {
             chips.push(Chip {
                 key: "⏎",
@@ -401,7 +398,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             chips.push(Chip {
                 key: "c",
                 label: "make account",
-                action: Action::NewFromDefault(k.clone()),
+                action: Action::NewFromRoot(k.clone()),
             });
             chips.push(Chip {
                 key: "o",
@@ -410,7 +407,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             });
             chips.push(Chip {
                 key: "d",
-                label: "start here",
+                label: "set default",
                 action: Action::SetDefault(k.clone()),
             });
         }
@@ -439,9 +436,9 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             action: Action::SettingsTab((app.settings_tab + 1) % pages::settings::TABS.len()),
         });
         chips.push(Chip {
-            key: "←→",
+            key: "⏎ ←→",
             label: "change",
-            action: Action::SettingChange(1),
+            action: Action::SettingChange(0),
         });
     } else if app.page == Page::Health {
         chips.push(Chip {
@@ -522,8 +519,23 @@ fn modal(f: &mut Frame, screen: Rect, app: &App, hits: &mut Hits) {
                 .max(width(hint) + 6)
                 .max(width(title) + 8)
                 .max(44) as u16;
-            let h = items.len() as u16 + if hint.is_empty() { 4 } else { 6 };
-            let rect = dialog(f, screen, w, h);
+            // The groups get their titles and a blank line between them. On
+            // a screen too short for that the blank lines go first, then the
+            // titles, so every item is still on screen.
+            let titled = items
+                .iter()
+                .filter(|i| i.heading.is_some_and(|h| !h.is_empty()))
+                .count();
+            let gaps = items.iter().skip(1).filter(|i| i.heading.is_some()).count();
+            let chrome = if hint.is_empty() { 4 } else { 6 };
+            let room = screen.height.saturating_sub(2) as usize;
+            let titles = items.len() + titled + chrome <= room;
+            let spaced = titles && items.len() + titled + gaps + chrome <= room;
+            let h = items.len()
+                + if titles { titled } else { 0 }
+                + if spaced { gaps } else { 0 }
+                + chrome;
+            let rect = dialog(f, screen, w, h as u16);
             hits.add(
                 rect,
                 Action::ModalPick(*sel.min(&items.len().saturating_sub(1))),
@@ -544,6 +556,21 @@ fn modal(f: &mut Frame, screen: Rect, app: &App, hits: &mut Hits) {
                 y += 1;
             }
             for (i, item) in items.iter().enumerate() {
+                if let Some(heading) = item.heading {
+                    if spaced && i > 0 {
+                        y += 1;
+                    }
+                    if titles && !heading.is_empty() && y < inner.y + inner.height {
+                        f.render_widget(
+                            Paragraph::new(Span::styled(
+                                format!("  {heading}"),
+                                Style::default().fg(t.faint()).add_modifier(Modifier::BOLD),
+                            )),
+                            Rect::new(inner.x, y, inner.width, 1),
+                        );
+                        y += 1;
+                    }
+                }
                 if y >= inner.y + inner.height {
                     break;
                 }
@@ -600,6 +627,126 @@ fn modal(f: &mut Frame, screen: Rect, app: &App, hits: &mut Hits) {
                     Chip {
                         key: "⏎",
                         label: "choose",
+                        action: Action::ModalOk,
+                    },
+                    Chip {
+                        key: "esc",
+                        label: "cancel",
+                        action: Action::ModalCancel,
+                    },
+                ],
+                hits,
+                t,
+            );
+        }
+        Modal::Ticks {
+            title,
+            hint,
+            items,
+            sel,
+            ..
+        } => {
+            let label_w = items.iter().map(|i| width(&i.label)).max().unwrap_or(8) + 2;
+            let detail_w = items
+                .iter()
+                .map(|i| width(&i.detail) + 12)
+                .max()
+                .unwrap_or(0);
+            let w = (label_w + detail_w + 10)
+                .max(width(hint) + 6)
+                .max(width(title) + 8)
+                .max(48) as u16;
+            let rect = dialog(f, screen, w, items.len() as u16 + 6);
+            let inner = card(f, rect, title, t, Some(t.accent()));
+            // A click on the dialog that misses every box must not close it:
+            // the ticks made so far would be lost.
+            hits.add(rect, Action::Ignore);
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    widgets::truncate(hint, inner.width as usize),
+                    t.s_faint(),
+                )),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+            for (i, item) in items.iter().enumerate() {
+                let y = inner.y + 2 + i as u16;
+                if y >= inner.y + inner.height {
+                    break;
+                }
+                let row = Rect::new(inner.x, y, inner.width, 1);
+                let selected = i == *sel;
+                let bg = if selected { t.raised() } else { t.panel() };
+                pages::paint_row(f, row, Style::default().bg(bg));
+                // Green is what is saved, yellow what this dialog changed.
+                let changed = item.on != item.was;
+                let color = if !item.enabled {
+                    t.faint()
+                } else if changed {
+                    t.warn()
+                } else if item.on {
+                    t.ok()
+                } else {
+                    t.dim()
+                };
+                let note = match (changed, item.on) {
+                    _ if !item.enabled => "",
+                    (true, true) => " · not saved",
+                    (true, false) => " · unticked, not saved",
+                    _ => "",
+                };
+                let room = (inner.width as usize).saturating_sub(label_w + 6);
+                let spans = vec![
+                    Span::styled(
+                        if selected {
+                            format!("{ARROW} ")
+                        } else {
+                            "  ".to_string()
+                        },
+                        Style::default().fg(t.accent()).bg(bg),
+                    ),
+                    Span::styled(
+                        if item.on { "[x] " } else { "[ ] " },
+                        Style::default().fg(color).bg(bg),
+                    ),
+                    Span::styled(
+                        fit(&item.label, label_w),
+                        Style::default()
+                            .fg(if item.enabled && (item.on || changed) {
+                                color
+                            } else if item.enabled {
+                                t.text()
+                            } else {
+                                t.faint()
+                            })
+                            .bg(bg)
+                            .add_modifier(if selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
+                    Span::styled(
+                        widgets::truncate(&format!("{}{note}", item.detail), room),
+                        Style::default()
+                            .fg(if changed { t.warn() } else { t.faint() })
+                            .bg(bg),
+                    ),
+                ];
+                f.render_widget(Paragraph::new(Line::from(spans)), row);
+                hits.add(row, Action::Tick(i));
+            }
+            widgets::chips(
+                f,
+                Rect::new(inner.x, rect.y + rect.height - 2, inner.width, 1),
+                &[
+                    Chip {
+                        key: "space",
+                        label: "tick",
+                        action: Action::Tick(*sel),
+                    },
+                    Chip {
+                        key: "⏎",
+                        label: "save",
                         action: Action::ModalOk,
                     },
                     Chip {
