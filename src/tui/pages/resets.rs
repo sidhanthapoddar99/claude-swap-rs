@@ -4,12 +4,13 @@
 //! 2. Weekly resets: when each account's weekly limit goes back to zero.
 //! 3. Renewals: when each plan renews or ends.
 //!
-//! The three tables share their columns: the account, what resets, how long
-//! until then, the date, and how full the account's week is.
+//! The three tables share their columns: the account, how many it holds,
+//! what resets, how long until then, the date, and how full the account's
+//! week is. Only a spare reset has a count.
 //!
 //! This page only shows. cswap has no way to spend a reset, on purpose.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -73,9 +74,16 @@ fn heights(wants: [u16; PARTS], avail: u16, first: usize) -> [u16; PARTS] {
     out
 }
 
+/// The widest the usage bar gets. It is a glance at the week beside the
+/// dates, which are what this page is for.
+const BAR_MAX: usize = 12;
+
 /// Column widths, shared by the three tables so they line up.
 struct Cols {
     acc: usize,
+    /// How many spare resets, right-aligned, and the space after it.
+    count: usize,
+    gap: usize,
     what: usize,
     in_: usize,
     date: usize,
@@ -87,10 +95,10 @@ struct Cols {
 
 impl Cols {
     fn new(w: usize, clock_24h: bool) -> Cols {
-        let wide = w >= 72;
-        let acc = if wide { (w / 4).clamp(14, 22) } else { 12 };
-        let what = if wide { 12 } else { 8 };
-        let in_ = if wide { 9 } else { 8 };
+        let wide = w >= 92;
+        let (count, gap) = if wide { (5, 2) } else { (2, 1) };
+        let what = if wide { 12 } else { 7 };
+        let in_ = if wide { 9 } else { 7 };
         // `Fri 13 Nov · 13:05`, or `Fri 13 Nov · 12:05 pm`. A narrow screen
         // has 16 cells for it, and `date_text` shortens what does not fit.
         let date = match (wide, clock_24h) {
@@ -98,16 +106,24 @@ impl Cols {
             (true, false) => 21,
             (false, _) => 16,
         };
-        let fixed = 1 + acc + 1 + what + 1 + in_ + 1 + date + 1;
-        let last = w.saturating_sub(fixed);
-        // The percent takes four cells; a bar joins it when there is room.
+        // The name and the last column share what the others leave. The
+        // percent always keeps its four cells.
+        let others = 1 + 1 + count + gap + what + 1 + in_ + 1 + date + 1;
+        let room = w.saturating_sub(others);
+        let acc = (w / 4)
+            .clamp(if wide { 14 } else { 11 }, 22)
+            .min(room.saturating_sub(4));
+        let last = room - acc;
+        // A bar joins the percent when there is room for one.
         let bar = if last >= 6 + 1 + 4 {
-            (last - 5).min(24)
+            (last - 5).min(BAR_MAX)
         } else {
             0
         };
         Cols {
             acc,
+            count,
+            gap,
             what,
             in_,
             date,
@@ -120,31 +136,15 @@ impl Cols {
 /// The date for a row, made to fit its column. It is always a date: when
 /// the column is narrow the separator dot goes first, then the weekday.
 fn date_text(app: &App, row: &Row, now: DateTime<Utc>, c: &Cols) -> String {
-    shorten(row.date(now, app.settings.clock_24h), c.date)
-}
-
-fn shorten(text: String, w: usize) -> String {
-    if widgets::width(&text) <= w {
-        return text;
-    }
-    let text = text.replace(" · ", " ");
-    if widgets::width(&text) <= w {
-        return text;
-    }
-    // `Fri 13 Nov 12:05 pm` -> `13 Nov 12:05 pm`
-    match text.split_once(' ') {
-        Some((_, rest)) => rest.to_string(),
-        None => text,
-    }
+    super::fit_date(row.date(now, app.settings.clock_24h), c.date)
 }
 
 /// How pressing a deadline is: a spare reset about to expire stands out.
 fn urgency(app: &App, row: &Row, now: DateTime<Utc>) -> Color {
     let t = &app.theme;
-    match (row.kind, row.at) {
-        (Kind::Spare, Some(at)) if at - now <= Duration::hours(24) => t.bad(),
-        (Kind::Spare, Some(at)) if at - now <= Duration::days(3) => t.warn(),
-        (Kind::PlanEnds, _) => t.warn(),
+    match row.kind {
+        Kind::Spare => super::expiry_color(t, row.at, now),
+        Kind::PlanEnds => t.warn(),
         _ => t.text(),
     }
 }
@@ -202,7 +202,7 @@ fn last_cell(app: &App, row: &Row, c: &Cols) -> Vec<Span<'static>> {
     }
 }
 
-/// One row: account, what resets, countdown, date, usage.
+/// One row: account, count, what resets, countdown, date, usage.
 fn line(app: &App, row: &Row, now: DateTime<Utc>, c: &Cols) -> Vec<Span<'static>> {
     let t = &app.theme;
     let what_color = match row.kind {
@@ -219,8 +219,13 @@ fn line(app: &App, row: &Row, now: DateTime<Utc>, c: &Cols) -> Vec<Span<'static>
     } else {
         row.what.as_str()
     };
+    let count = row.count.map(|n| n.to_string()).unwrap_or_default();
     let mut spans = account_cell(app, &row.key, c.acc);
     spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        format!("{count:>w$}{}", " ".repeat(c.gap), w = c.count),
+        t.s_text(),
+    ));
     spans.push(Span::styled(
         fit(what, c.what),
         Style::default().fg(what_color),
@@ -237,9 +242,20 @@ fn line(app: &App, row: &Row, now: DateTime<Utc>, c: &Cols) -> Vec<Span<'static>
     spans
 }
 
+/// The header over the counts: a word, or a sign when the column is narrow.
+fn count_head(section: &Section, c: &Cols) -> &'static str {
+    match (section.count, c.count >= 5) {
+        (false, _) => "",
+        (true, true) => "COUNT",
+        (true, false) => "#",
+    }
+}
+
 struct Section<'a> {
     title: &'a str,
-    /// The header of every column after the account.
+    /// Do the rows have a count? The column keeps its place either way.
+    count: bool,
+    /// The header of every column after the count.
     heads: [&'a str; 4],
     /// Shown when the list is empty.
     empty: &'a str,
@@ -291,6 +307,11 @@ fn table(
             Paragraph::new(Line::from(vec![
                 Span::raw(" "),
                 head(t, "ACCOUNT", c.acc + 1),
+                head(
+                    t,
+                    &format!("{:>w$}", count_head(section, &c), w = c.count),
+                    c.count + c.gap,
+                ),
                 head(t, section.heads[0], c.what + 1),
                 head(t, section.heads[1], c.in_ + 1),
                 head(t, section.heads[2], c.date + 1),
@@ -363,6 +384,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let list = [
         Section {
             title: "Spare resets",
+            count: true,
             heads: ["RESET", "EXPIRES", "DATE", "USED"],
             empty: "No account holds a spare reset right now.",
             note: (spare > 0).then(|| (format!("{spare} to spend"), t.info())),
@@ -373,12 +395,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             } else {
                 "Weekly resets"
             },
+            count: false,
             heads: ["RESET", "IN", "DATE", "USED"],
             empty: "Nothing yet: reset times appear after the first usage fetch (press r).",
             note: None,
         },
         Section {
             title: "Renewals",
+            count: false,
             heads: ["PLAN", "IN", "DATE", ""],
             empty: "No renewal date is known. Note one on the Accounts page with b.",
             note: None,
@@ -445,23 +469,27 @@ mod tests {
         for clock_24h in [true, false] {
             for w in 53..200 {
                 let c = Cols::new(w, clock_24h);
-                let used = 1 + c.acc + 1 + c.what + 1 + c.in_ + 1 + c.date + 1 + c.last;
+                let used =
+                    1 + c.acc + 1 + c.count + c.gap + c.what + 1 + c.in_ + 1 + c.date + 1 + c.last;
                 assert!(used <= w, "{w}: {used}");
-                // The percent always has its four cells.
+                // The percent always has its four cells, and the name eleven.
                 assert!(c.last >= 4, "{w}: {}", c.last);
+                assert!(c.acc >= 11, "{w}: {}", c.acc);
                 assert!(c.bar == 0 || c.bar + 5 <= c.last, "{w}");
+                assert!(c.bar <= BAR_MAX, "{w}");
             }
             assert_eq!(Cols::new(53, clock_24h).bar, 0);
-            assert!(Cols::new(101, clock_24h).bar >= 12);
+            assert_eq!(Cols::new(101, clock_24h).bar, BAR_MAX);
         }
     }
 
     #[test]
     fn a_date_that_does_not_fit_loses_its_dot_then_its_weekday() {
+        use crate::tui::pages::fit_date;
         let long = || "Fri 13 Nov · 12:05 pm".to_string();
-        assert_eq!(shorten(long(), 21), "Fri 13 Nov · 12:05 pm");
-        assert_eq!(shorten(long(), 19), "Fri 13 Nov 12:05 pm");
-        assert_eq!(shorten(long(), 16), "13 Nov 12:05 pm");
-        assert_eq!(shorten("Fri 13 Nov".to_string(), 16), "Fri 13 Nov");
+        assert_eq!(fit_date(long(), 21), "Fri 13 Nov · 12:05 pm");
+        assert_eq!(fit_date(long(), 19), "Fri 13 Nov 12:05 pm");
+        assert_eq!(fit_date(long(), 16), "13 Nov 12:05 pm");
+        assert_eq!(fit_date("Fri 13 Nov".to_string(), 16), "Fri 13 Nov");
     }
 }

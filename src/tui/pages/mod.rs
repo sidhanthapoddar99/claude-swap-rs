@@ -84,6 +84,36 @@ pub fn paint_row(f: &mut Frame, rect: Rect, style: Style) {
     f.render_widget(ratatui::widgets::Block::default().style(style), rect);
 }
 
+/// A date made to fit a column of `w` cells. It stays a date: the separator
+/// dot goes first, then the weekday.
+pub fn fit_date(text: String, w: usize) -> String {
+    if widgets::width(&text) <= w {
+        return text;
+    }
+    let text = text.replace(" · ", " ");
+    if widgets::width(&text) <= w {
+        return text;
+    }
+    // `Fri 13 Nov 12:05 pm` -> `13 Nov 12:05 pm`
+    match text.split_once(' ') {
+        Some((_, rest)) => rest.to_string(),
+        None => text,
+    }
+}
+
+/// How pressing a spare reset's expiry is: one about to run out stands out.
+pub fn expiry_color(
+    t: &Theme,
+    at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> ratatui::style::Color {
+    match at {
+        Some(at) if at - now <= chrono::Duration::hours(24) => t.bad(),
+        Some(at) if at - now <= chrono::Duration::days(3) => t.warn(),
+        _ => t.text(),
+    }
+}
+
 /// The width of the "resets in" cell: `1d 23h`, `23h 59m`, `reset`.
 pub const IN_W: usize = 9;
 

@@ -208,13 +208,8 @@ impl Sandbox {
                 source: Source::Manual,
             };
             let mut snap = week(12.0, 38.0, 9);
-            snap.windows.push(window(
-                WindowKind::WeeklyScoped,
-                "Opus week",
-                71.0,
-                9,
-                604_800,
-            ));
+            snap.windows
+                .push(window(WindowKind::WeeklyScoped, "Opus", 71.0, 9, 604_800));
             snap.credits = Some(Credits {
                 enabled: true,
                 used: Some(12.4),

@@ -465,7 +465,8 @@ pub fn resets() -> Result<()> {
     // One table shape for all three parts, so the columns line up. A
     // 12-hour clock needs three more cells for the date.
     let date_w = if c.settings.clock_24h { 18 } else { 21 };
-    let table = |title: &str, heads: [&str; 4], rows: &[view::Event], empty: &str| {
+    // Only a spare reset has a count; the column keeps its place in all three.
+    let table = |title: &str, count: bool, heads: [&str; 4], rows: &[view::Event], empty: &str| {
         println!("{}", p.bold(title));
         if rows.is_empty() {
             println!("  {}", p.dim(empty));
@@ -474,8 +475,9 @@ pub fn resets() -> Result<()> {
         println!(
             "  {}",
             p.dim(&format!(
-                "{} {} {} {} {}",
+                "{} {:>5}  {} {} {} {}",
                 fit("ACCOUNT", 28),
+                if count { "COUNT" } else { "" },
                 fit(heads[0], 12),
                 fit(heads[1], 10),
                 fit(heads[2], date_w),
@@ -505,8 +507,9 @@ pub fn resets() -> Result<()> {
                 (_, None) => p.dim("no usage yet"),
             };
             println!(
-                "  {} {} {} {} {}",
+                "  {} {:>5}  {} {} {} {}",
                 fit(&name(&e.key), 28),
+                e.count.map(|n| n.to_string()).unwrap_or_default(),
                 if e.kind == Kind::Spare {
                     p.info(&what)
                 } else {
@@ -522,6 +525,7 @@ pub fn resets() -> Result<()> {
     let limits = view::limit_resets(&c.reg, &c.logged_in, c.now);
     table(
         "Spare resets",
+        true,
         ["RESET", "EXPIRES", "DATE", "USED"],
         &view::grants(&c.reg, c.now),
         "none",
@@ -533,6 +537,7 @@ pub fn resets() -> Result<()> {
         } else {
             "Weekly resets"
         },
+        false,
         ["RESET", "IN", "DATE", "USED"],
         &limits,
         "nothing yet: run `cswap refresh`",
@@ -540,6 +545,7 @@ pub fn resets() -> Result<()> {
     println!();
     table(
         "Renewals",
+        false,
         ["PLAN", "IN", "DATE", ""],
         &view::renewals(&c.reg),
         "no renewal date is known",

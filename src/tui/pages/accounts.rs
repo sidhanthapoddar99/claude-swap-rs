@@ -1,31 +1,37 @@
 //! Accounts: the list on the left, everything about the selected one on the
 //! right. Adding, signing in, naming and removing all start here.
+//!
+//! The right side has three parts. First the facts, a line each. Then the
+//! spare resets and the credits the account holds. Last, the wordy part: what
+//! each fact means and which key changes it.
 
 use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Borders, Paragraph};
 use ratatui::Frame;
 
 use super::{
-    dot, launch_hint, main_window, name_cell, no_data, paint_row, plan_text, row_style,
-    scroll_start, status, status_span, window_cells,
+    dot, expiry_color, fit_date, head, launch_hint, main_window, name_cell, no_data, paint_row,
+    plan_text, row_style, scroll_start, status, status_span, window_cells,
 };
 use crate::harness::Harness;
 use crate::model::{self, Source};
 use crate::paths;
 use crate::store::{self, Account};
 use crate::tui::app::{Action, App, Focus};
-use crate::tui::theme::DOT;
-use crate::tui::widgets::{card, fit, kv, kv_wrapped, truncate, Hits};
+use crate::tui::theme::{DOT, STAR};
+use crate::tui::widgets::{
+    self, card, card_note, card_with, clip, fit, kv, kv_wrapped, truncate, Hits,
+};
+use crate::view;
 
 const LABEL_W: usize = 11;
 
 enum Item {
     Header(Harness),
     Account(usize),
-    Add,
 }
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
@@ -47,6 +53,9 @@ fn list(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let focused = app.focus == Focus::Main;
     let inner = card(f, area, "", t, focused.then(|| t.accent()));
     let w = inner.width as usize;
+    if inner.height == 0 {
+        return;
+    }
 
     let mut items = Vec::new();
     let mut last = None;
@@ -57,14 +66,26 @@ fn list(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         }
         items.push(Item::Account(i));
     }
-    items.push(Item::Add);
+
+    // The last line of the card is the add button, with a blank line above
+    // it when there is room. The accounts scroll in what is left.
+    let add = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" + ", t.s_accent()),
+            Span::styled("Add account", t.s_accent()),
+            Span::styled("  a", t.s_faint()),
+        ])),
+        add,
+    );
+    hits.add(add, Action::AddAccount);
 
     let sel = app.row();
     let sel_line = items
         .iter()
         .position(|it| matches!(it, Item::Account(i) if *i == sel))
         .unwrap_or(0);
-    let h = inner.height as usize;
+    let h = (inner.height as usize).saturating_sub(if inner.height >= 4 { 2 } else { 1 });
     // Keep the group header of the first visible account on screen.
     let start = scroll_start(sel_line, items.len(), h);
     for (line, item) in items.iter().enumerate().skip(start).take(h) {
@@ -109,17 +130,6 @@ fn list(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
                 f.render_widget(Paragraph::new(Line::from(spans)), rect);
                 hits.add(rect, Action::Row(*i));
             }
-            Item::Add => {
-                f.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled("   + ", t.s_accent()),
-                        Span::styled("Add account", t.s_accent()),
-                        Span::styled("  a", t.s_faint()),
-                    ])),
-                    rect,
-                );
-                hits.add(rect, Action::AddAccount);
-            }
         }
     }
 }
@@ -132,17 +142,18 @@ fn days(n: i64) -> String {
     }
 }
 
-/// How long the login lasts before the vendor wants a fresh sign-in.
-fn login_line(app: &App, acc: &Account, now: DateTime<Utc>) -> Vec<Span<'static>> {
+// ------------------------------------------------------------------ the facts
+
+/// Is the login signed in, and until when. One short line.
+fn sign_in_fact(app: &App, acc: &Account, now: DateTime<Utc>) -> Vec<Span<'static>> {
     let t = &app.theme;
     let key = acc.key();
     if !app.derived.logged_in.contains(&key) {
         return vec![Span::styled("not signed in", t.s_faint())];
     }
-    let local = app.derived.local.get(&key);
-    match local.and_then(|l| l.login_expires) {
+    match app.derived.local.get(&key).and_then(|l| l.login_expires) {
         Some(at) if at <= now => vec![Span::styled(
-            format!("expired {}: sign in again (l)", model::ago(at, now)),
+            format!("expired {}", model::ago(at, now)),
             t.s(t.bad()),
         )],
         Some(at) => {
@@ -156,120 +167,73 @@ fn login_line(app: &App, acc: &Account, now: DateTime<Utc>) -> Vec<Span<'static>
             };
             vec![
                 Span::styled(
-                    format!("good for {}", model::span(left)),
+                    format!("good for {}", model::until(at, now)),
                     Style::default().fg(color),
                 ),
-                Span::styled(
-                    format!(
-                        " · until {}, then sign in again",
-                        at.with_timezone(&chrono::Local).format("%a %-d %b")
-                    ),
-                    t.s_dim(),
-                ),
+                Span::styled(format!(" · until {}", model::day(at)), t.s_dim()),
             ]
         }
-        None => vec![Span::styled(
-            acc.harness.spec().login_life.to_string(),
-            t.s_dim(),
-        )],
+        None => vec![Span::styled("signed in", t.s_text())],
     }
 }
 
-/// The short-lived token under the login. The agent renews it; cswap never
-/// does.
-fn token_line(app: &App, acc: &Account, now: DateTime<Utc>) -> Option<Vec<Span<'static>>> {
+/// The short-lived token under the login: how long it is still good for.
+fn token_fact(app: &App, acc: &Account, now: DateTime<Utc>) -> Option<Vec<Span<'static>>> {
     let t = &app.theme;
     let at = app.derived.local.get(&acc.key())?.token_expires?;
-    let bin = acc.harness.spec().bins[0];
-    Some(if at > now {
-        vec![
-            Span::styled(format!("fresh for {}", model::span(at - now)), t.s_text()),
-            Span::styled(format!(" · `{bin}` renews it by itself"), t.s_dim()),
-        ]
+    Some(vec![if at > now {
+        Span::styled(format!("fresh for {}", model::until(at, now)), t.s_text())
     } else {
-        vec![
-            Span::styled(format!("ran out {}", model::ago(at, now)), t.s(t.warn())),
-            Span::styled(
-                format!(" · `{bin}` renews it the next time it runs here"),
-                t.s_dim(),
-            ),
-        ]
-    })
+        Span::styled(format!("ran out {}", model::ago(at, now)), t.s(t.warn()))
+    }])
 }
 
-fn renewal_line(app: &App, acc: &Account) -> Vec<Span<'static>> {
+/// The renewal date and how many days it is off.
+fn renewal_fact(app: &App, acc: &Account) -> Vec<Span<'static>> {
     let t = &app.theme;
     let b = &acc.meta.billing;
     let today = store::today();
     let Some(date) = b.next(today) else {
-        return vec![Span::styled(
-            "not set · press b to add the date",
-            t.s_faint(),
-        )];
+        return vec![Span::styled("not set", t.s_faint())];
     };
     let left = (date - today).num_days();
-    let when = date.format("%a %-d %b %Y").to_string();
-    let by = match b.source {
-        Source::Api => "from the vendor",
-        Source::Manual => "set by hand",
-    };
-    if b.cancelled {
-        let (text, color) = if left < 0 {
-            (format!("ended {when}"), t.bad())
-        } else {
-            (format!("ends {when} ({})", days(left)), t.warn())
-        };
-        return vec![
-            Span::styled(text, Style::default().fg(color)),
-            Span::styled(" · cancelled".to_string(), t.s_dim()),
-        ];
+    let day = view::day_of(date);
+    match (b.cancelled, left < 0) {
+        (true, true) => vec![Span::styled(format!("ended {day}"), t.s(t.bad()))],
+        (true, false) => vec![
+            Span::styled(format!("ends {day}"), t.s(t.warn())),
+            Span::styled(format!(" · {}", days(left)), t.s_dim()),
+        ],
+        _ => vec![
+            Span::styled(day, t.s_text()),
+            Span::styled(format!(" · {}", days(left)), t.s_dim()),
+        ],
     }
-    let cycle = b.cycle.map(|c| c.label()).unwrap_or("one date");
-    vec![
-        Span::styled(format!("{cycle} · next {when}"), t.s_text()),
-        Span::styled(format!(" ({}) · {by}", days(left)), t.s_dim()),
-    ]
 }
 
-fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
+/// The facts about an account, one line each.
+fn info(
+    app: &App,
+    acc: &Account,
+    now: DateTime<Utc>,
+    w: usize,
+    spaced: bool,
+) -> Vec<Line<'static>> {
     let t = &app.theme;
-    let now = Utc::now();
     let key = acc.key();
-    let inner = card(f, area, "", t, None);
-    let w = inner.width as usize;
     let room = w.saturating_sub(LABEL_W);
     let signed_in = app.derived.logged_in.contains(&key);
-    let state = status(app, acc);
     let plain = |s: String| vec![Span::styled(truncate(&s, room), t.s_text())];
     let dim = |s: String| vec![Span::styled(truncate(&s, room), t.s_dim())];
-
+    let faint = |s: &str| vec![Span::styled(truncate(s, room), t.s_faint())];
     let mut lines: Vec<Line> = Vec::new();
+    let gap = |lines: &mut Vec<Line<'static>>| {
+        if spaced {
+            lines.push(Line::default());
+        }
+    };
 
     // Who it is.
-    let state_span = status_span(t, state);
-    let name = acc.title();
-    let name_w = w.saturating_sub(crate::tui::widgets::width(&state_span.content) + 3);
-    lines.push(Line::from(vec![
-        dot(app, acc),
-        Span::styled(
-            fit(&name, name_w),
-            Style::default().fg(t.text()).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        state_span,
-    ]));
-    let bin = acc.harness.spec().bins[0];
-    let mut sub = format!("{key} · {}", acc.harness.name());
-    if app.is_default(acc) {
-        sub.push_str(&format!(" · a bare `{bin}` starts here"));
-    }
-    lines.push(Line::from(Span::styled(
-        format!("  {}", truncate(&sub, w.saturating_sub(2))),
-        t.s_faint(),
-    )));
-    lines.push(Line::default());
-
-    // The login.
     let id = &acc.meta.identity;
     let mut who = id.email.clone().unwrap_or_default();
     if let Some(org) = id.org.as_ref().filter(|o| !o.is_empty()) {
@@ -279,23 +243,8 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
         who.push_str(org);
     }
     if who.is_empty() {
-        who = if signed_in {
-            "signed in (the login names no one)"
-        } else {
-            "–"
-        }
-        .to_string();
+        who = if signed_in { "signed in" } else { "–" }.to_string();
     }
-    lines.push(kv(
-        t,
-        "Aliases",
-        LABEL_W,
-        if acc.meta.aliases.is_empty() {
-            vec![Span::styled("none · press E to add some", t.s_faint())]
-        } else {
-            plain(acc.meta.aliases.join(", "))
-        },
-    ));
     lines.push(kv(t, "Login", LABEL_W, plain(who)));
     let plan = plan_text(app, acc);
     lines.push(kv(
@@ -303,46 +252,59 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
         "Plan",
         LABEL_W,
         if plan.is_empty() {
-            vec![Span::styled("unknown · press p to name it", t.s_faint())]
-        } else if acc.meta.plan_source == Source::Manual && acc.meta.plan.is_some() {
-            vec![
-                Span::styled(plan, t.s_text()),
-                Span::styled(" · set by hand", t.s_dim()),
-            ]
+            faint("unknown")
         } else {
             plain(plan)
         },
     ));
-    lines.extend(kv_wrapped(
+    lines.push(kv(
+        t,
+        "Aliases",
+        LABEL_W,
+        if acc.meta.aliases.is_empty() {
+            faint("none")
+        } else {
+            plain(acc.meta.aliases.join(", "))
+        },
+    ));
+    gap(&mut lines);
+
+    // What runs out when.
+    lines.push(kv(
         t,
         "Renewal",
         LABEL_W,
-        renewal_line(app, acc),
-        room,
+        clip(renewal_fact(app, acc), room),
     ));
-    lines.extend(kv_wrapped(
+    lines.push(kv(
         t,
         "Sign-in",
         LABEL_W,
-        login_line(app, acc, now),
-        room,
+        clip(sign_in_fact(app, acc, now), room),
     ));
     if signed_in {
-        if let Some(spans) = token_line(app, acc, now) {
-            lines.extend(kv_wrapped(t, "Token", LABEL_W, spans, room));
+        if let Some(spans) = token_fact(app, acc, now) {
+            lines.push(kv(t, "Token", LABEL_W, clip(spans, room)));
         }
     }
-    lines.push(Line::default());
-
     // Usage, in one line; the Usage page has the rest.
     match acc.snapshot().and_then(main_window).filter(|_| signed_in) {
         Some(win) => {
-            let bar_w = room.saturating_sub(super::window_w(0)).clamp(6, 28);
+            // The bar gives way on a screen too narrow for it.
+            let bar_w = room.saturating_sub(super::window_w(0)).min(24);
+            let cells = if bar_w >= 6 {
+                window_cells(app, win, bar_w, now)
+            } else {
+                vec![
+                    widgets::pct_span(t, win.used_now(now)),
+                    Span::styled(format!("  {}", super::resets_in(win, now)), t.s_dim()),
+                ]
+            };
             lines.push(kv(
                 t,
                 &format!("This {}", win.period()),
                 LABEL_W,
-                window_cells(app, win, bar_w, now),
+                clip(cells, room),
             ));
         }
         None => {
@@ -358,53 +320,17 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
             ));
         }
     }
-    let grants = acc.grants(now);
-    if !grants.is_empty() {
-        let n: u32 = grants.iter().map(|g| g.count).sum();
-        let mut text = format!("{n} spare");
-        if let Some(at) = grants.iter().filter_map(|g| g.expires_at).min() {
-            text.push_str(&format!(
-                " · the first expires in {}",
-                model::until(at, now)
-            ));
-        }
-        lines.push(kv(
-            t,
-            "Resets",
-            LABEL_W,
-            vec![Span::styled(truncate(&text, room), t.s(t.info()))],
-        ));
-    }
-    if let Some(pick) = app
-        .derived
-        .picks
-        .get(&acc.harness)
-        .and_then(|p| p.iter().find(|p| p.key == key))
-    {
-        let best = app.best(acc.harness).is_some_and(|b| b.key == key);
-        let text = pick.reasons.join(" · ");
-        let mut spans = Vec::new();
-        if best {
-            spans.push(Span::styled("best pick · ", t.s(t.accent())));
-        }
-        spans.push(Span::styled(
-            text,
-            if pick.usable {
-                t.s_dim()
-            } else {
-                t.s(t.warn())
-            },
-        ));
-        lines.extend(kv_wrapped(t, "Advice", LABEL_W, spans, room));
-    }
-    lines.push(Line::default());
+    gap(&mut lines);
 
     // How to use it and where it lives.
     lines.push(kv(
         t,
         "Launch",
         LABEL_W,
-        vec![Span::styled(launch_hint(app, acc), t.s(t.accent()))],
+        vec![Span::styled(
+            truncate(&launch_hint(app, acc), room),
+            t.s(t.accent()),
+        )],
     ));
     lines.push(kv(t, "Folder", LABEL_W, dim(paths::tilde(&acc.dir()))));
     {
@@ -435,6 +361,295 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
         None => "never".to_string(),
     };
     lines.push(kv(t, "Last used", LABEL_W, dim(used)));
+    lines
+}
 
-    f.render_widget(Paragraph::new(lines), inner);
+// ----------------------------------------------------------------- the resets
+
+/// Every spare reset the account holds, a line each, and its credits. The
+/// header of the table comes apart from it: a card with too little room
+/// leaves the header out and keeps the resets.
+fn resets(
+    app: &App,
+    acc: &Account,
+    now: DateTime<Utc>,
+    w: usize,
+) -> (Option<Line<'static>>, Vec<Line<'static>>) {
+    let t = &app.theme;
+    let mut top = None;
+    let mut lines: Vec<Line> = Vec::new();
+    let rows = view::grants_of(acc, now);
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            truncate("No spare reset held right now.", w),
+            t.s_faint(),
+        )));
+    } else {
+        // count, what resets, how long it is still good for, and the date.
+        let wide = w >= 40;
+        let (count, gap) = if wide { (5, 2) } else { (2, 1) };
+        let what = if wide { 10 } else { 8 };
+        let left = if wide { 9 } else { 7 };
+        let date = w.saturating_sub(count + gap + what + 1 + left + 1);
+        let date = if date >= 10 { date } else { 0 };
+        let mut header = vec![
+            head(
+                t,
+                &format!("{:>count$}", if wide { "COUNT" } else { "#" }),
+                count + gap,
+            ),
+            head(t, "RESET", what + 1),
+            head(t, "EXPIRES", left + 1),
+        ];
+        if date > 0 {
+            header.push(head(t, "DATE", date));
+        }
+        top = Some(Line::from(header));
+        for row in &rows {
+            let n = row.count.unwrap_or(1);
+            let (when, on) = match row.at {
+                Some(_) => (
+                    row.countdown(now),
+                    fit_date(row.date(now, app.settings.clock_24h), date),
+                ),
+                None => ("–".to_string(), "does not expire".to_string()),
+            };
+            let mut spans = vec![
+                Span::styled(format!("{n:>count$}{}", " ".repeat(gap)), t.s_text()),
+                Span::styled(fit(&row.what, what + 1), t.s(t.info())),
+                Span::styled(
+                    fit(&when, left + 1),
+                    Style::default().fg(expiry_color(t, row.at, now)),
+                ),
+            ];
+            if date > 0 {
+                spans.push(Span::styled(fit(&on, date), t.s_dim()));
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+    // Pay-as-you-go credit, when the vendor reports any.
+    if let Some(text) = acc
+        .snapshot()
+        .and_then(|s| s.credits.as_ref())
+        .and_then(view::credits_text)
+    {
+        lines.push(kv(
+            t,
+            "Credits",
+            LABEL_W,
+            vec![Span::styled(
+                truncate(&text, w.saturating_sub(LABEL_W)),
+                t.s_text(),
+            )],
+        ));
+    }
+    (top, lines)
+}
+
+// ------------------------------------------------------------- the wordy part
+
+/// What the facts mean and which key changes each. Everything long goes
+/// here, so the facts above stay a line each.
+fn details(app: &App, acc: &Account, now: DateTime<Utc>, w: usize) -> Vec<Line<'static>> {
+    let t = &app.theme;
+    let key = acc.key();
+    let h = acc.harness;
+    let bin = h.spec().bins[0];
+    let room = w.saturating_sub(LABEL_W);
+    let signed_in = app.derived.logged_in.contains(&key);
+    let local = app.derived.local.get(&key);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut say = |label: &str, spans: Vec<Span<'static>>| {
+        lines.extend(kv_wrapped(t, label, LABEL_W, spans, room));
+    };
+    let dim = |s: String| vec![Span::styled(s, t.s_dim())];
+
+    // Where it stands among the agent's accounts.
+    if let Some(pick) = app
+        .derived
+        .picks
+        .get(&h)
+        .and_then(|p| p.iter().find(|p| p.key == key))
+    {
+        let mut spans = Vec::new();
+        if app.best(h).is_some_and(|b| b.key == key) {
+            spans.push(Span::styled("best pick · ", t.s(t.accent())));
+        }
+        spans.push(Span::styled(
+            pick.reasons.join(" · "),
+            if pick.usable {
+                t.s_dim()
+            } else {
+                t.s(t.warn())
+            },
+        ));
+        say("Advice", spans);
+    }
+    if app.is_default(acc) {
+        say(
+            "Start",
+            vec![
+                Span::styled(format!("{STAR} "), t.s_accent()),
+                Span::styled(
+                    format!("A bare `{bin}` starts on this account. d changes that."),
+                    t.s_dim(),
+                ),
+            ],
+        );
+    }
+
+    // The login and the token under it.
+    let expired = local
+        .and_then(|l| l.login_expires)
+        .is_some_and(|at| at <= now);
+    say(
+        "Sign-in",
+        if !signed_in {
+            dim(format!(
+                "Press l to sign in. {}'s own sign-in runs in this terminal.",
+                h.name()
+            ))
+        } else if expired {
+            vec![Span::styled(
+                "The login has run out. Press l to sign in again.".to_string(),
+                t.s(t.bad()),
+            )]
+        } else {
+            dim(h.spec().login_life.to_string())
+        },
+    );
+    if signed_in
+        && local
+            .and_then(|l| l.token_expires)
+            .is_some_and(|at| at <= now)
+    {
+        say(
+            "Token",
+            dim(format!(
+                "`{bin}` renews it the next time it runs on this account. cswap never does."
+            )),
+        );
+    }
+
+    // The plan and its renewal.
+    let b = &acc.meta.billing;
+    say(
+        "Renewal",
+        match b.next(store::today()) {
+            None => dim("No date is set. Press b to add one.".to_string()),
+            Some(_) if b.cancelled => dim(
+                "Cancelled: the plan ends on that date and does not renew. b changes it."
+                    .to_string(),
+            ),
+            Some(_) => dim(format!(
+                "{} · {} · b changes it",
+                b.cycle.map(|c| c.label()).unwrap_or("one date"),
+                match b.source {
+                    Source::Api => "from the vendor",
+                    Source::Manual => "set by hand",
+                }
+            )),
+        },
+    );
+    if plan_text(app, acc).is_empty() {
+        say(
+            "Plan",
+            dim("The vendor does not report it. Press p to name it.".to_string()),
+        );
+    } else if acc.meta.plan_source == Source::Manual && acc.meta.plan.is_some() {
+        say("Plan", dim("Set by hand. p changes it.".to_string()));
+    }
+    if acc.meta.aliases.is_empty() {
+        say("Aliases", dim("None yet. Press E to add some.".to_string()));
+    }
+    lines
+}
+
+// ------------------------------------------------------------------ the cards
+
+fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
+    let t = &app.theme;
+    let now = Utc::now();
+    if area.width < 8 || area.height < 3 {
+        return;
+    }
+    // Every card has a border and a cell of padding on each side.
+    let w = area.width as usize - 4;
+    let (reset_head, mut reset_lines) = resets(app, acc, now, w);
+    let reset_n = reset_lines.len() + usize::from(reset_head.is_some());
+    let detail_lines = details(app, acc, now, w);
+    // The facts are set apart in groups when all three cards still fit.
+    let tight = info(app, acc, now, w, false);
+    let spaced = tight.len() + 2 + 2 + reset_n + 2 + detail_lines.len() + 2 <= area.height as usize;
+    let info_lines = if spaced {
+        info(app, acc, now, w, true)
+    } else {
+        tight
+    };
+
+    // Top to bottom: the facts get what they need, then the resets, and the
+    // wordy part what is left. The last card shown reaches the bottom.
+    let avail = area.height;
+    let info_h = (info_lines.len() as u16 + 2).min(avail);
+    let mut left = avail - info_h;
+    let resets_h = if left >= 3 {
+        (reset_n as u16 + 2).min(left)
+    } else {
+        0
+    };
+    // The table's header is the first thing to go when the card is cut.
+    if let Some(header) = reset_head.filter(|_| resets_h as usize >= reset_n + 2) {
+        reset_lines.insert(0, header);
+    }
+    left -= resets_h;
+    let details_h = if left >= 3 { left } else { 0 };
+    left -= details_h;
+    let (info_h, resets_h) = match (resets_h, details_h) {
+        (0, _) => (info_h + left, 0),
+        (r, 0) => (info_h, r + left),
+        (r, _) => (info_h, r),
+    };
+
+    // Who it is, on the border of the first card.
+    let mut title = vec![
+        dot(app, acc),
+        Span::styled(
+            acc.title(),
+            Style::default().fg(t.text()).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if app.is_default(acc) {
+        title.push(Span::styled(format!(" {STAR}"), t.s_accent()));
+    }
+    let state = status_span(t, status(app, acc));
+    let sub = format!("  {} · {}", acc.key(), acc.harness.name());
+    let used = widgets::line_width(&Line::from(title.clone())) + widgets::width(&state.content);
+    if used + widgets::width(&sub) + 12 <= area.width as usize {
+        title.push(Span::styled(sub, t.s_faint()));
+    }
+    let rect = Rect::new(area.x, area.y, area.width, info_h);
+    let inner = card_with(f, rect, Line::from(title), t, t.border(), Borders::ALL);
+    card_note(f, rect, Line::from(state), t);
+    f.render_widget(Paragraph::new(info_lines), inner);
+
+    if resets_h > 0 {
+        let rect = Rect::new(area.x, area.y + info_h, area.width, resets_h);
+        let inner = card(f, rect, "Resets", t, None);
+        let n: u32 = acc.grants(now).iter().map(|g| g.count).sum();
+        if n > 0 {
+            card_note(
+                f,
+                rect,
+                Line::from(Span::styled(format!("{n} to spend"), t.s(t.info()))),
+                t,
+            );
+        }
+        f.render_widget(Paragraph::new(reset_lines), inner);
+    }
+    if details_h > 0 {
+        let rect = Rect::new(area.x, area.y + info_h + resets_h, area.width, details_h);
+        let inner = card(f, rect, "Details", t, None);
+        f.render_widget(Paragraph::new(detail_lines), inner);
+    }
 }

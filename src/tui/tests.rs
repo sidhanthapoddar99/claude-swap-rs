@@ -69,10 +69,15 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
         (
             Page::Usage,
             &[
+                "Claude Code",
+                "Codex",
                 "LIMIT",
-                "RESETS IN",
+                "USED",
+                "DATE",
+                "Max 20x",
                 "week",
-                "Opus week",
+                "Opus",
+                "5h",
                 "extra",
                 "$12.40 of $50.00",
             ],
@@ -86,6 +91,8 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
                 "Renewal",
                 "Sign-in",
                 "Launch",
+                "Resets",
+                "Details",
             ],
         ),
         (
@@ -106,6 +113,7 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
                 "Spare resets",
                 "Weekly resets",
                 "Renewals",
+                "COUNT",
                 "RESET",
                 "EXPIRES",
                 "DATE",
@@ -137,9 +145,14 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
                 text.contains(page.title()),
                 "{page:?} at {w}x{h} has no title"
             );
-            // Two words that are never shown: the agent's own login is its
-            // "default", and the short windows are kept out of sight.
-            for word in ["native", "Native", "5h window", "  5h ", "5-hour"] {
+            // The agent's own login is its "default", never "native". The
+            // short windows are listed on the Usage page and nowhere else.
+            let short = if page == Page::Usage {
+                "5-hour"
+            } else {
+                "  5h "
+            };
+            for word in ["native", "Native", "5h window", "5-hour", short] {
                 assert!(
                     !text.contains(word),
                     "{page:?} at {w}x{h} says '{word}'\n{text}"
@@ -245,13 +258,41 @@ fn the_account_selected_on_the_accounts_page_is_spelled_out() {
     for word in [
         "dev@corp.example",
         "Max 20x",
-        "monthly",
         "claude --cswap=work",
-        "1 spare",
         "accounts/claude-1",
+        // The resets it holds and its credits, in a part of their own.
+        "1 to spend",
+        "COUNT",
+        "weekly",
+        "$12.40 of $50.00 spent",
+        // The wordy part comes last.
+        "Details",
+        "monthly · set by hand",
+        "Access token lasts",
     ] {
         assert!(text.contains(word), "missing '{word}'\n{text}");
     }
+    // The facts stay a line each: the renewal is a date and a count of days.
+    let renewal = text
+        .lines()
+        .find(|l| l.contains("Renewal") && l.contains("in 12 days"))
+        .unwrap_or_else(|| panic!("no renewal line\n{text}"));
+    assert!(
+        !renewal.contains("monthly") && !renewal.contains("press"),
+        "{renewal}"
+    );
+    // The three parts, in order, with the add button on the last line of the list.
+    let at = |word: &str| {
+        text.find(word)
+            .unwrap_or_else(|| panic!("no '{word}'\n{text}"))
+    };
+    assert!(at("Login") < at("╭ Resets") && at("╭ Resets") < at("╭ Details"));
+    let rows: Vec<&str> = text.lines().collect();
+    let add = rows
+        .iter()
+        .position(|l| l.contains("+ Add account"))
+        .unwrap();
+    assert!(rows[add + 1].contains('╰'), "{text}");
 }
 
 #[test]
@@ -526,16 +567,20 @@ fn keys_move_between_the_menu_and_the_page() {
     assert_eq!((app.page, app.focus), (Page::Overview, Focus::Nav));
     key(&mut app, KeyCode::Down);
     assert_eq!(app.page, Page::Usage);
-    key(&mut app, KeyCode::Char('3'));
+    key(&mut app, KeyCode::Char('4'));
     assert_eq!((app.page, app.focus), (Page::Accounts, Focus::Main));
     key(&mut app, KeyCode::Down);
     assert_eq!(app.row(), 1);
     key(&mut app, KeyCode::Esc);
     assert_eq!(app.focus, Focus::Nav);
-    // Ten pages: 1 to 9, then 0 for the last.
-    key(&mut app, KeyCode::Char('4'));
-    assert_eq!(app.page, Page::Defaults);
+    // Ten pages in the order of the menu: 1 to 9, then 0 for the last.
+    let keys: String = Page::ALL.iter().map(|p| p.hotkey()).collect();
+    assert_eq!(keys, "1234567890");
+    key(&mut app, KeyCode::Char('3'));
+    assert_eq!(app.page, Page::Resets);
     key(&mut app, KeyCode::Char('5'));
+    assert_eq!(app.page, Page::Defaults);
+    key(&mut app, KeyCode::Char('7'));
     assert_eq!(app.page, Page::Sessions);
     key(&mut app, KeyCode::Char('0'));
     assert_eq!(app.page, Page::Settings);
@@ -699,12 +744,42 @@ fn the_resets_page_has_three_parts_and_one_weekly_figure_per_account() {
 }
 
 #[test]
+fn the_usage_page_boxes_accounts_by_agent_and_lists_every_limit() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Usage));
+    for (w, h) in [(ui::MIN_W, ui::MIN_H), (132, 40)] {
+        let text = screen(&mut app, w, h);
+        let at = |word: &str| {
+            text.find(word)
+                .unwrap_or_else(|| panic!("no '{word}' at {w}x{h}\n{text}"))
+        };
+        // One box per agent, each holding its own accounts.
+        assert!(at("╭ Claude Code") < at("● work") && at("● side") < at("╭ Codex"));
+        assert!(at("╭ Codex") < at("● team"));
+        // The plan sits under the name, beside the second limit.
+        let rows: Vec<&str> = text.lines().collect();
+        let work = rows.iter().position(|l| l.contains("● work")).unwrap();
+        assert!(rows[work].contains("week") && rows[work].contains("38%"));
+        assert!(rows[work + 1].contains("Max 20x") && rows[work + 1].contains("Opus"));
+        // The short window is listed on this page, after the weekly limits.
+        assert!(rows[work + 2].contains(" 5h ") && rows[work + 2].contains("12%"));
+    }
+    // A wide screen has the date each limit resets as well.
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("DATE") && text.contains(" · "), "{text}");
+    assert!(!screen(&mut app, ui::MIN_W, ui::MIN_H).contains("DATE"));
+}
+
+#[test]
 fn the_dot_tells_the_agent_so_its_name_is_written_only_without_colour() {
     let sb = Sandbox::new();
     sb.demo();
     let (mut app, _rx) = app();
-    let pages = [Page::Overview, Page::Usage, Page::Resets, Page::Analytics];
-    for page in pages {
+    // The Usage page boxes its accounts by agent, so it never needs the tag.
+    let pages = [Page::Overview, Page::Resets, Page::Analytics];
+    for page in pages.into_iter().chain([Page::Usage]) {
         app.dispatch(Action::Go(page));
         let text = screen(&mut app, 132, 40);
         for tag in ["work claude", "side claude", "team codex"] {

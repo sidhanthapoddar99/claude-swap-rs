@@ -84,24 +84,42 @@ pub fn spark(values: &[f64]) -> String {
 
 /// A rounded panel with a title. Returns the area inside it.
 pub fn card(f: &mut Frame, area: Rect, title: &str, t: &Theme, accent: Option<Color>) -> Rect {
+    let line = if title.is_empty() {
+        Line::default()
+    } else {
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(accent.unwrap_or_else(|| t.dim()))
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
     let border = accent.unwrap_or_else(|| t.border());
+    card_with(f, area, line, t, border, Borders::ALL)
+}
+
+/// A panel whose title is styled by the caller and whose sides are chosen: in
+/// a column of panels that scrolls, the one cut by the edge is drawn without
+/// its top or its bottom. Returns the area inside it.
+pub fn card_with(
+    f: &mut Frame,
+    area: Rect,
+    title: Line<'static>,
+    t: &Theme,
+    border: Color,
+    sides: Borders,
+) -> Rect {
     let mut block = Block::default()
-        .borders(Borders::ALL)
+        .borders(sides)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border).bg(t.panel()))
         .style(Style::default().bg(t.panel()).fg(t.text()))
         .padding(Padding::horizontal(1));
-    if !title.is_empty() {
-        block = block.title(Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                title.to_string(),
-                Style::default()
-                    .fg(accent.unwrap_or_else(|| t.dim()))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-        ]));
+    if !title.spans.is_empty() && sides.contains(Borders::TOP) {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(title.spans);
+        spans.push(Span::raw(" "));
+        block = block.title(Line::from(spans));
     }
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -131,6 +149,25 @@ pub fn kv<'a>(t: &Theme, label: &str, label_w: usize, value: Vec<Span<'a>>) -> L
     let mut spans = vec![Span::styled(fit(label, label_w), t.s_dim())];
     spans.extend(value);
     Line::from(spans)
+}
+
+/// Cut styled text to `w` cells, with an ellipsis where it was cut.
+pub fn clip(spans: Vec<Span<'static>>, w: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut left = w;
+    for span in spans {
+        let sw = width(&span.content);
+        if sw <= left {
+            left -= sw;
+            out.push(span);
+        } else {
+            if left > 0 {
+                out.push(Span::styled(truncate(&span.content, left), span.style));
+            }
+            break;
+        }
+    }
+    out
 }
 
 /// Break styled text into lines of at most `w` cells, at spaces, keeping each

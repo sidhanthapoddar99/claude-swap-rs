@@ -17,8 +17,10 @@ use crate::model;
 use crate::refresh;
 
 const NAV_W: u16 = 25;
-/// The pages from here down are about cswap itself, not about accounts.
-const NAV_SPLIT: usize = 6;
+/// A gap is left in the menu before each of these pages. First come the
+/// pages about accounts, then the ones about what runs and how it is set up,
+/// then the app itself.
+const NAV_SPLITS: [usize; 2] = [5, 8];
 pub const MIN_W: u16 = 84;
 pub const MIN_H: u16 = 22;
 
@@ -159,11 +161,12 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let attention = health::attention(&app.derived.checks);
     let w = inner.width as usize;
     let legend_h = Harness::ALL.len() as u16 + 2;
-    let roomy = inner.height > Page::ALL.len() as u16 + legend_h + 1;
+    let roomy = inner.height > (Page::ALL.len() + NAV_SPLITS.len()) as u16 + legend_h;
 
     for (i, page) in Page::ALL.into_iter().enumerate() {
-        // A gap sets the pages about the app itself apart from the rest.
-        let y = inner.y + i as u16 + u16::from(i >= NAV_SPLIT && roomy);
+        // The gaps set the groups of pages apart, when there is room.
+        let gaps = NAV_SPLITS.iter().filter(|s| roomy && i >= **s).count();
+        let y = inner.y + (i + gaps) as u16;
         if y >= inner.y + inner.height {
             break;
         }

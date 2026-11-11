@@ -31,25 +31,26 @@ use crate::{manage, refresh, store};
 pub enum Page {
     Overview,
     Usage,
+    Resets,
     Accounts,
     Defaults,
-    Sessions,
-    Resets,
     Sync,
+    Sessions,
     Analytics,
     Health,
     Settings,
 }
 
 impl Page {
+    /// In the order of the menu, which is also the order of the number keys.
     pub const ALL: [Page; 10] = [
         Page::Overview,
         Page::Usage,
+        Page::Resets,
         Page::Accounts,
         Page::Defaults,
-        Page::Sessions,
-        Page::Resets,
         Page::Sync,
+        Page::Sessions,
         Page::Analytics,
         Page::Health,
         Page::Settings,
@@ -73,7 +74,7 @@ impl Page {
     pub fn blurb(self) -> &'static str {
         match self {
             Page::Overview => "what to use next, and every account at a glance",
-            Page::Usage => "how much of each weekly limit is used",
+            Page::Usage => "how much of each limit is used, and when it resets",
             Page::Accounts => "add, sign in, name and remove accounts",
             Page::Defaults => "each agent's own login, used when no account is asked for",
             Page::Sessions => "the agents running right now",

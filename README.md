@@ -10,20 +10,20 @@ One place for the accounts of your coding agents: **Claude Code**, **Codex**, **
 `cswap` is a single Rust binary for Linux, macOS and Windows. Starting an agent through it adds a few milliseconds and no network call. The agent then runs as itself: cswap replaces its own process with the agent's, so signals, exit codes and the terminal are the agent's own.
 
 ```
-  ◆ cswap  v0.7.0                                             updated 3m ago  ·  next in 10m     Wed 11 Nov  21:39
+  ◆ cswap  v0.8.0                                             updated 3m ago  ·  next in 10m     Wed 11 Nov  21:39
 
 ╭───────────────────────╮
 │ ▌ Overview          1 │  Overview   what to use next, and every account at a glance
 │   Usage             2 │ ╭ Accounts ──────────╮╭ Next reset ─────────╮╭ Spare resets ──────╮╭ Attention ─────────╮
-│   Accounts          3 │ │ 2 signed in        ││ in 8h 59m           ││ 1 held             ││ 2 to look at       │
-│   Defaults          4 │ │ of 3 · 1 agent     ││ work · 38% used     ││ work · 2d left     ││ team (codex-1) is… │
-│   Sessions          5 │ ╰────────────────────╯╰─────────────────────╯╰────────────────────╯╰────────────────────╯
-│   Resets         1  6 │ ╭ Use next ─────────────────────────────────────────────────────────────────────────────╮
-│                       │ │  ● Claude Code  ★ work  62% of the week left, resets in 8h 59m    claude --cswap=work │
-│   Sync              7 │ │  ● Codex        nothing usable right now · not logged in                              │
-│   Analytics         8 │ ╰───────────────────────────────────────────────────────────────────────────────────────╯
-│   Health         2  9 │ ╭ Accounts ─────────────────────────────────────────────────────────────────────────────╮
-│   Settings          0 │ │    ACCOUNT               PLAN         USED                     RESETS IN STATE        │
+│   Resets         1  3 │ │ 2 signed in        ││ in 8h 59m           ││ 1 held             ││ 2 to look at       │
+│   Accounts          4 │ │ of 3 · 1 agent     ││ work · 38% used     ││ work · 2d left     ││ team (codex-1) is… │
+│   Defaults          5 │ ╰────────────────────╯╰─────────────────────╯╰────────────────────╯╰────────────────────╯
+│   Sync              6 │ ╭ Use next ─────────────────────────────────────────────────────────────────────────────╮
+│   Sessions          7 │ │  ● Claude Code  ★ work  62% of the week left, resets in 8h 59m    claude --cswap=work │
+│   Analytics         8 │ │  ● Codex        nothing usable right now · not logged in                              │
+│   Health         2  9 │ ╰───────────────────────────────────────────────────────────────────────────────────────╯
+│   Settings          0 │ ╭ Accounts ─────────────────────────────────────────────────────────────────────────────╮
+│                       │ │    ACCOUNT               PLAN         USED                     RESETS IN STATE        │
 │                       │ │ ▌● work                  Max 20x      ━━━━━━━━━━━━━━━━━╋  38%  8h 59m    ● ready      │
 │  AGENTS               │ │  ● side                  Pro          ━━━━━━━━━━╋━━━━━━━ 100%  2d        ● limit hit  │
 │  ● Claude Code     2  │ │  ● team                               not signed in · press l            ○ signed out │
@@ -179,24 +179,26 @@ An account answers to its name (`work`), its aliases, its key (`claude-2`), its 
 
 Run `cswap` with no arguments. Keys: `1`–`9` and `0` or the arrow keys to move, `Enter` to act, `?` for every key. `Esc` steps back: out of a dialog, out of the page, then out of cswap. The mouse works too.
 
+The pages are numbered in the order of the menu, so `1` is Overview and `0` is Settings.
+
 | Page | What it shows |
 | --- | --- |
 | **Overview** | What to use next for each agent, and every account on one line. |
-| **Usage** | Every limit of every account in one grid: a bar with a pace marker, the percent used, and how long until it resets. Nothing else. |
-| **Accounts** | Add, sign in, rename, set aliases, remove. Plan, renewal date, how long the login is valid, where it lives. |
+| **Usage** | Every limit of every account, in one box per agent: the plan under the name, then a line per limit with a bar and its pace marker, the percent used, how long until it resets and the date. The short windows of a few hours are listed here too. |
+| **Resets** | Three parts: the spare resets you hold with how many and when they expire, when each account's weekly limit resets, and when each plan renews. Every row gives the account, the reset, how long until then, the date, and how much of the account's week is used. |
+| **Accounts** | Add, sign in, rename, set aliases, remove. For the selected account: its facts a line each, then the spare resets and credits it holds, then the details that explain them. |
 | **Defaults** | Each agent's own login and its usage, which account holds the same login, and `c` to make an account from it. |
-| **Sessions** | The agents running right now: which account each is on, since when, and in which folder. |
-| **Resets** | Three parts: the spare resets you hold and when they expire, when each account's weekly limit resets, and when each plan renews. Every row gives the account, the reset, how long until then, the date, and how much of the account's week is used. |
 | **Sync** | Per account: what is linked, what is private, what is shadowed, and when it was last synced. |
+| **Sessions** | The agents running right now: which account each is on, since when, and in which folder. |
 | **Analytics** | Burn rate per account over the last week and where it lands at the reset. More is planned. |
 | **Health** | Anything that needs attention: signed-out accounts, two accounts on one login, shadowed files, a missing shell integration. |
 | **Settings** | The theme and the general settings, one tab per agent, and the shell line to copy. |
 
-Every bar, percent and countdown sits in the same column on every page. A countdown is as short as it can be: `3d` when it is more than two days off, `1d 6h` within two days, `4h 25m` within one. The exact date is on the Resets page, always as a date such as `Sat 14 Nov`, with the time of day when it is within two days.
+Every bar, percent and countdown sits in the same column on every page. A countdown is as short as it can be: `3d` when it is more than two days off, `1d 6h` within two days, `4h 25m` within one. The exact date is on the Usage and Resets pages, always as a date such as `Sat 14 Nov`, with the time of day when it is within two days.
 
-The colour of the dot in front of an account's name tells its agent, so the agent is not written again beside the name. The `grey` theme has no colours, so there the agent's command follows the name.
+The colour of the dot in front of an account's name tells its agent, so the agent is not written again beside the name. The `grey` theme has no colours, so there the agent's command follows the name, except on the Usage page, where each agent has its own box.
 
-Only the weekly and monthly limits are shown. The agents also have short windows of a few hours; cswap reads them to know when an account is rate limited right now, and shows them nowhere.
+The weekly and monthly limits are what every page works with. The agents also have short windows of a few hours; cswap reads them to know when an account is rate limited right now, and lists them on the Usage page only.
 
 Usage is fetched when the dashboard opens and then every 10 minutes while it stays open (change it in Settings). Nothing is fetched in the background when the dashboard is closed, and starting an agent never fetches.
 
