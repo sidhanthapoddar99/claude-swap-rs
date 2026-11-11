@@ -836,11 +836,11 @@ impl App {
                 self.dispatch(Action::SettingChange(-1))
             }
             KeyCode::Right if on_settings => self.dispatch(Action::SettingChange(1)),
-            KeyCode::Char('[') if on_settings => {
+            KeyCode::Char('[') | KeyCode::Char('T') if on_settings => {
                 let n = pages::settings::TABS.len();
                 self.dispatch(Action::SettingsTab((self.settings_tab + n - 1) % n));
             }
-            KeyCode::Char(']') if on_settings => {
+            KeyCode::Char(']') | KeyCode::Char('t') if on_settings => {
                 let n = pages::settings::TABS.len();
                 self.dispatch(Action::SettingsTab((self.settings_tab + 1) % n));
             }

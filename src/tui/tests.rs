@@ -680,6 +680,17 @@ fn settings_change_on_disk() {
     key(&mut app, KeyCode::Char(']'));
     let text = screen(&mut app, 132, 60);
     show("settings/harness", &text);
+    // The keys that change tab are written beside the tabs: t and T, and
+    // the brackets do the same.
+    assert!(text.contains("t next tab · T previous"), "{text}");
+    key(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.settings_tab, 2);
+    key(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.settings_tab, 0);
+    key(&mut app, KeyCode::Char('T'));
+    assert_eq!(app.settings_tab, 2);
+    key(&mut app, KeyCode::Char('['));
+    assert_eq!(app.settings_tab, 1);
     for word in [
         "ALL AGENTS",
         "Auto-pick skips above",

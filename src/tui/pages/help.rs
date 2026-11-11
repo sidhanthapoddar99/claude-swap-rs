@@ -92,7 +92,7 @@ fn keys() -> Vec<Section> {
         section(
             "Keys · Settings page",
             &[
-                ("[ ]", "previous / next tab"),
+                ("t  T", "next / previous tab; [ and ] do the same"),
                 (
                     "← → Enter",
                     "change the selected value, or do what the row says",

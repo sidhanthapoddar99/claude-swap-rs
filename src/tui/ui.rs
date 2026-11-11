@@ -20,7 +20,7 @@ const NAV_W: u16 = 25;
 /// A gap is left in the menu before each of these pages. First come the
 /// pages about accounts, then the ones about what runs and how it is set up,
 /// then the app itself.
-const NAV_SPLITS: [usize; 3] = [5, 8, 10];
+const NAV_SPLITS: [usize; 2] = [5, 8];
 pub const MIN_W: u16 = 84;
 pub const MIN_H: u16 = 22;
 
@@ -438,8 +438,8 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         }
     } else if app.page == Page::Settings {
         chips.push(Chip {
-            key: "[ ]",
-            label: "tab",
+            key: "t",
+            label: "next tab",
             action: Action::SettingsTab((app.settings_tab + 1) % pages::settings::TABS.len()),
         });
         chips.push(Chip {

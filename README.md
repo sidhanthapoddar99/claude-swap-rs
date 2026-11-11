@@ -10,7 +10,7 @@ One place for the accounts of your coding agents: **Claude Code**, **Codex**, **
 `cswap` is a single Rust binary for Linux, macOS and Windows. Starting an agent through it adds a few milliseconds and no network call. The agent then runs as itself: cswap replaces its own process with the agent's, so signals, exit codes and the terminal are the agent's own.
 
 ```
-  ◆ cswap  v1.0.0                                             updated 3m ago  ·  next in 10m     Thu 12 Nov  01:41
+  ◆ cswap  v1.0.0                                             updated 3m ago  ·  next in 10m     Thu 12 Nov  01:58
 
 ╭───────────────────────╮
 │ ▌ Overview          1 │  Overview   what to use next, and every account at a glance
@@ -202,7 +202,7 @@ The pages are numbered in the order of the menu, so `1` is Overview and `0` is S
 | **Sessions** | The agents running right now: which account each is on, since when, and in which folder. |
 | **Analytics** | Burn rate per account over the last week and where it lands at the reset. More is planned. |
 | **Health** | Anything that needs attention: signed-out accounts, two accounts on one login, shadowed files, a missing shell integration. |
-| **Settings** | Three tabs. General: the theme, refresh and updates, with a row that checks for an update now. Harness: every agent's options in one list. Shell: each shell with the agents it wraps, and a list of boxes to wrap or unwrap them. |
+| **Settings** | Three tabs; `t` and `T` move between them. General: the theme, refresh and updates, with a row that checks for an update now. Harness: every agent's options in one list. Shell: each shell with the agents it wraps, and a list of boxes to wrap or unwrap them. |
 | **Help** | How to start an agent on an account with every flag, what cswap's words mean, and every key. |
 
 Every bar, percent and countdown sits in the same column on every page. A countdown is as short as it can be: `3d` when it is more than two days off, `1d 6h` within two days, `4h 25m` within one. The exact date is on the Usage and Resets pages, always as a date such as `Sat 14 Nov`, with the time of day when it is within two days.

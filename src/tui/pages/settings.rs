@@ -654,6 +654,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         hits.add(rect, Action::SettingsTab(i));
         x += w + 1;
     }
+    // How to change tab from the keyboard, said where the tabs are.
+    let hint = "t next tab · T previous";
+    if x + 2 + width(hint) as u16 <= area.x + area.width {
+        f.render_widget(
+            Paragraph::new(Span::styled(hint, t.s_faint())),
+            Rect::new(x + 2, area.y, width(hint) as u16, 1),
+        );
+    }
 
     let body = Rect::new(area.x, area.y + 2, area.width, area.height - 2);
     let focused = app.focus == Focus::Main && app.page == Page::Settings;
