@@ -124,7 +124,8 @@ pub enum Action {
     ModalOk,
     ModalCancel,
     Help,
-    Quit,
+    /// One step back: from the page to the menu, from the menu out.
+    Back,
 }
 
 /// What to do with the text an input modal collected.
@@ -608,7 +609,7 @@ impl App {
         }
         let on_settings = self.page == Page::Settings;
         match key.code {
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Esc => self.dispatch(Action::Back),
             KeyCode::Char('?') => self.dispatch(Action::Help),
             KeyCode::Char(c @ '1'..='8') => {
                 let page = Page::ALL[c as usize - '1' as usize];
@@ -625,7 +626,6 @@ impl App {
                 KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => self.focus = Focus::Main,
                 _ => {}
             },
-            KeyCode::Esc => self.focus = Focus::Nav,
             KeyCode::Left | KeyCode::Char('h') if on_settings => {
                 self.dispatch(Action::SettingChange(-1))
             }
@@ -708,11 +708,11 @@ impl App {
             Modal::Confirm { danger, .. } => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.dispatch(Action::ModalOk),
                 KeyCode::Enter if !*danger => self.dispatch(Action::ModalOk),
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => self.modal = None,
+                KeyCode::Esc | KeyCode::Char('n') => self.modal = None,
                 _ => {}
             },
             Modal::Choice { items, sel, .. } => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.modal = None,
+                KeyCode::Esc => self.modal = None,
                 KeyCode::Up | KeyCode::Char('k') => *sel = sel.saturating_sub(1),
                 KeyCode::Down | KeyCode::Char('j') => {
                     *sel = (*sel + 1).min(items.len().saturating_sub(1))
@@ -905,7 +905,12 @@ impl App {
 
     pub fn dispatch(&mut self, action: Action) {
         match action {
-            Action::Quit => self.quit = true,
+            // Escape steps back one level: out of the page to the menu, and
+            // from the menu out of cswap.
+            Action::Back => match self.focus {
+                Focus::Main => self.focus = Focus::Nav,
+                Focus::Nav => self.quit = true,
+            },
             Action::Go(page) => {
                 self.go(page);
                 self.focus = Focus::Main;

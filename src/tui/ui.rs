@@ -433,9 +433,13 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             action: Action::Help,
         },
         Chip {
-            key: "q",
-            label: "quit",
-            action: Action::Quit,
+            key: "esc",
+            label: if app.focus == Focus::Nav {
+                "quit"
+            } else {
+                "menu"
+            },
+            action: Action::Back,
         },
     ];
     let fixed_w: u16 = fixed

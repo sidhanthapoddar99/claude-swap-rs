@@ -31,7 +31,7 @@ One place for the accounts of your coding agents: **Claude Code**, **Codex**, **
 │  ● Codex           2  │ │  ● native codex ★     Plus       ━━━━━╋━━━━━━━━━━━━━━━━━  22%  4d 23h    ● ready      │
 │  ● Grok Build      1  │ │  ● native grok ★      SuperGrok  ━━━━━━━━━━╋━━━━━━━━━━━━  47%  16d 15h   ● ready      │
 ╰───────────────────────╯ ╰─────────────────────────────────────────────────────────────────────────────────────╯
-   ⏎  actions   o  open   d  default   a  add account   r  refresh                             ?  keys   q  quit
+   ⏎  actions   o  open   d  default   a  add account   r  refresh                             ? keys   esc  quit
 ```
 
 ## Install
@@ -164,7 +164,7 @@ An account is named by its alias (`work`), its key (`claude-2`), its number with
 
 ## The dashboard
 
-Run `cswap` with no arguments. Keys: `1`–`8` or the arrow keys to move, `Enter` to act, `?` for every key, `q` to quit. The mouse works too.
+Run `cswap` with no arguments. Keys: `1`–`8` or the arrow keys to move, `Enter` to act, `?` for every key. `Esc` steps back: out of a dialog, out of the page, then out of cswap. The mouse works too.
 
 | Page | What it shows |
 | --- | --- |

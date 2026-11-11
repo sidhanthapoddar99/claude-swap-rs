@@ -292,10 +292,10 @@ mod tests {
     #[test]
     fn the_topmost_hit_wins() {
         let mut hits = Hits::default();
-        hits.add(Rect::new(0, 0, 10, 10), Action::Quit);
+        hits.add(Rect::new(0, 0, 10, 10), Action::Back);
         hits.add(Rect::new(2, 2, 3, 1), Action::RefreshAll);
         assert!(matches!(hits.at(3, 2), Some(Action::RefreshAll)));
-        assert!(matches!(hits.at(0, 0), Some(Action::Quit)));
+        assert!(matches!(hits.at(0, 0), Some(Action::Back)));
         assert!(hits.at(20, 20).is_none());
     }
 

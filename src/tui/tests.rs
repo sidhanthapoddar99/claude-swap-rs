@@ -233,7 +233,13 @@ fn keys_move_between_the_menu_and_the_page() {
     assert!(matches!(app.modal, Some(Modal::Info { .. })));
     key(&mut app, KeyCode::Enter);
     assert!(app.modal.is_none());
+    // Escape steps back, and from the menu it quits. `q` is not a key.
     key(&mut app, KeyCode::Char('q'));
+    assert!(!app.quit);
+    key(&mut app, KeyCode::Char('4'));
+    key(&mut app, KeyCode::Esc);
+    assert_eq!((app.focus, app.quit), (Focus::Nav, false));
+    key(&mut app, KeyCode::Esc);
     assert!(app.quit);
 }
 
