@@ -102,7 +102,16 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
         (Page::Sessions, &["Nothing is running"]),
         (
             Page::Resets,
-            &["Coming up", "Spare resets", "Weekly", "Renewals", "TYPE"],
+            &[
+                "Spare resets",
+                "Weekly resets",
+                "Renewals",
+                "RESET",
+                "EXPIRES",
+                "DATE",
+                "USED",
+                "PLAN",
+            ],
         ),
         (Page::Sync, &["work", "linked", "private", "settings.json"]),
         (Page::Analytics, &["Burn rate", "PER DAY", "AT RESET"]),
@@ -654,6 +663,62 @@ fn the_theme_is_switched_in_settings_and_every_theme_draws_every_page() {
     crate::store::Settings::update(|s| s.theme = "plaid".into()).unwrap();
     app.reload();
     assert_eq!(app.theme.scheme(), Scheme::Violet);
+}
+
+#[test]
+fn the_resets_page_has_three_parts_and_one_weekly_figure_per_account() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Resets));
+    for (w, h) in [(ui::MIN_W, ui::MIN_H), (132, 40)] {
+        let text = screen(&mut app, w, h);
+        // No combined list, no type column, and a weekly reset is called
+        // that, whatever model limits reset with it.
+        for word in ["Coming up", "TYPE", "week +", "Opus", "Fable"] {
+            assert!(!text.contains(word), "{w}x{h} says '{word}'\n{text}");
+        }
+        // A date is a date.
+        let lower = text.to_lowercase();
+        for word in ["tomorrow", "tmrw", "today"] {
+            assert!(!lower.contains(word), "{w}x{h} says '{word}'\n{text}");
+        }
+        for word in [
+            "Spare resets",
+            "Weekly resets",
+            "Renewals",
+            "weekly",
+            "USED",
+        ] {
+            assert!(text.contains(word), "{w}x{h} lacks '{word}'\n{text}");
+        }
+        // The week's own figure for `work`, on its spare reset and on its
+        // weekly reset; the model limits beside it are not shown.
+        assert_eq!(text.matches(" 38%").count(), 2, "{text}");
+    }
+}
+
+#[test]
+fn the_dot_tells_the_agent_so_its_name_is_written_only_without_colour() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    let pages = [Page::Overview, Page::Usage, Page::Resets, Page::Analytics];
+    for page in pages {
+        app.dispatch(Action::Go(page));
+        let text = screen(&mut app, 132, 40);
+        for tag in ["work claude", "side claude", "team codex"] {
+            assert!(!text.contains(tag), "{page:?} says '{tag}'\n{text}");
+        }
+    }
+    // Greyscale has no colour to tell the agents apart, so there it is said.
+    crate::store::Settings::update(|s| s.theme = "grey".into()).unwrap();
+    app.reload();
+    for page in pages {
+        app.dispatch(Action::Go(page));
+        let text = screen(&mut app, 132, 40);
+        assert!(text.contains("work claude"), "{page:?}\n{text}");
+    }
 }
 
 /// `cargo test readme_picture -- --ignored --nocapture` prints the Overview

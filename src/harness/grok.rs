@@ -22,7 +22,6 @@ use crate::store::Identity;
 pub const SPEC: Spec = Spec {
     id: "grok",
     name: "Grok Build",
-    vendor: "xAI",
     bins: &["grok"],
     home_env: Some("GROK_HOME"),
     home_flag: None,

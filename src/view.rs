@@ -5,7 +5,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use std::collections::{HashMap, HashSet};
 
 use crate::harness::Local;
-use crate::model::{self, Snapshot, Source, Window, WindowKind};
+use crate::model::{self, Snapshot, Window, WindowKind};
 use crate::store::{self, Account, HarnessSettings, Registry};
 
 /// Which accounts are signed in, and what each login says about itself. Read
@@ -150,7 +150,7 @@ pub fn pace_text(w: &Window, now: DateTime<Utc>, clock_24h: bool) -> Option<(Str
         return Some((
             format!(
                 "at this pace it runs out {}, {} before the reset",
-                model::landing(runs_out, now, clock_24h),
+                model::landing(runs_out, clock_24h),
                 model::span(reset - runs_out)
             ),
             true,
@@ -209,7 +209,7 @@ pub fn credits_text(c: &crate::model::Credits) -> Option<String> {
 pub enum Kind {
     /// A spare reset that can still be spent. Its time is when it expires.
     Spare,
-    /// One or more limits of an account going back to zero at the same moment.
+    /// An account's weekly (or monthly) limit going back to zero.
     Limit,
     Renewal,
     PlanEnds,
@@ -224,13 +224,15 @@ pub struct Event {
     pub at: Option<DateTime<Utc>>,
     /// True when only the day is known.
     pub date_only: bool,
-    /// The type column: `weekly`, `monthly`, `spare`, `renews`, `ends`.
-    pub tag: &'static str,
-    /// What resets: `week + Fable`, `all limits`. For a renewal, the plan.
+    /// What resets: `weekly`, `monthly`, `2 × Fable`. For a renewal, the plan.
     pub what: String,
+    /// For a renewal: its cycle, or that the plan ends. Empty otherwise.
     pub note: String,
-    /// For a limit: how full the fullest of its windows is.
+    /// How full the account's weekly limit is. One number for the account,
+    /// never split by model.
     pub used: Option<f64>,
+    /// How much of that week has passed, for the pace marker on the bar.
+    pub pace: Option<f64>,
 }
 
 impl Event {
@@ -239,15 +241,13 @@ impl Event {
     pub fn date(&self, now: DateTime<Utc>, clock_24h: bool) -> String {
         match self.at {
             None => "never".to_string(),
-            Some(at) if self.date_only || at - now > Duration::days(2) => at
-                .with_timezone(&chrono::Local)
-                .format("%a %-d %b")
-                .to_string(),
-            Some(at) => model::landing(at, now, clock_24h),
+            Some(at) if self.date_only || at - now > Duration::days(2) => model::day(at),
+            Some(at) => model::landing(at, clock_24h),
         }
     }
 
-    /// `2d 3h`, or whole days when only the day is known.
+    /// How long until then, in the form used for every countdown: `3d`,
+    /// `1d 6h`, `4h 25m`. Whole days when only the day is known.
     pub fn countdown(&self, now: DateTime<Utc>) -> String {
         match self.at {
             None => "–".to_string(),
@@ -260,7 +260,7 @@ impl Event {
                     d => format!("{d} days"),
                 }
             }
-            Some(at) => model::span(at - now),
+            Some(at) => model::until(at, now),
         }
     }
 }
@@ -274,47 +274,79 @@ fn noon(date: chrono::NaiveDate) -> DateTime<Utc> {
         .unwrap_or_else(|| naive.and_utc())
 }
 
+/// What a spare reset is called. A vendor lists every limit one clears, such
+/// as `5h + week + Fable`. What matters is the widest of them: a reset that
+/// clears the week is a weekly reset, whatever else goes with it. One that
+/// clears a single model's limit keeps that model's name.
+pub fn reset_name(scope: &str) -> String {
+    let parts: Vec<&str> = scope
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let has = |words: &[&str]| {
+        parts
+            .iter()
+            .any(|p| words.contains(&p.to_lowercase().as_str()))
+    };
+    if has(&["month", "monthly"]) {
+        return "monthly".to_string();
+    }
+    if has(&["week", "weekly", "all limits", "limits", "all"]) {
+        return "weekly".to_string();
+    }
+    // The short windows are never named.
+    let rest: Vec<&str> = parts
+        .into_iter()
+        .filter(|p| !matches!(p.to_lowercase().as_str(), "5h" | "session" | "5-hour"))
+        .collect();
+    if rest.is_empty() {
+        "rate limit".to_string()
+    } else {
+        rest.join(" + ")
+    }
+}
+
+/// How full an account's weekly limit is, and how much of the week has passed.
+fn week_of(acc: &Account, now: DateTime<Utc>) -> (Option<f64>, Option<f64>) {
+    match acc.snapshot().and_then(main_window) {
+        Some(w) => (Some(w.used_now(now)), w.elapsed_pct(now)),
+        None => (None, None),
+    }
+}
+
 /// Every spare reset, soonest to expire first; the ones that never expire
-/// come last. Resets of one account that are alike in every way are one line
-/// with a count.
+/// come last. Resets of one account with the same name and the same expiry
+/// are one line with a count.
 pub fn grants(reg: &Registry, now: DateTime<Utc>) -> Vec<Event> {
     let mut out = Vec::new();
     for acc in reg.profiles() {
-        let mut merged: Vec<crate::model::Grant> = Vec::new();
+        let mut merged: Vec<(String, Option<DateTime<Utc>>, u32)> = Vec::new();
         for g in acc.grants(now) {
-            match merged.iter_mut().find(|m| {
-                m.scope == g.scope
-                    && m.expires_at == g.expires_at
-                    && m.source == g.source
-                    && m.usable_now == g.usable_now
-            }) {
-                Some(m) => m.count += g.count,
-                None => merged.push(g),
+            let name = reset_name(&g.scope);
+            match merged
+                .iter_mut()
+                .find(|(n, at, _)| *n == name && *at == g.expires_at)
+            {
+                Some(m) => m.2 += g.count,
+                None => merged.push((name, g.expires_at, g.count)),
             }
         }
-        for g in merged {
-            let mut note = match g.source {
-                Source::Api => format!("from {}", acc.harness.spec().vendor),
-                Source::Manual => "noted by hand".to_string(),
-            };
-            match g.usable_now {
-                Some(true) => note.push_str(" · spendable now"),
-                Some(false) => note.push_str(" · not spendable yet"),
-                None => {}
-            }
+        let (used, pace) = week_of(acc, now);
+        for (name, at, count) in merged {
             out.push(Event {
                 kind: Kind::Spare,
                 key: acc.key(),
-                at: g.expires_at,
+                at,
                 date_only: false,
-                tag: "spare",
-                what: if g.count == 1 {
-                    g.scope.clone()
+                what: if count == 1 {
+                    name
                 } else {
-                    format!("{} × {}", g.count, g.scope)
+                    format!("{count} × {name}")
                 },
-                note,
-                used: None,
+                note: String::new(),
+                used,
+                pace,
             });
         }
     }
@@ -330,75 +362,38 @@ pub fn grant_count(reg: &Registry, now: DateTime<Utc>) -> u32 {
         .sum()
 }
 
-/// A limit worth a line: the weekly and monthly ones. The short windows come
-/// round too often.
-fn long_window(w: &Window) -> bool {
-    match w.kind {
-        WindowKind::Weekly | WindowKind::WeeklyScoped | WindowKind::Monthly => true,
-        WindowKind::Other => w.window_secs.is_some_and(|s| s > 36 * 3600),
-        WindowKind::Session | WindowKind::Daily => false,
-    }
-}
-
-/// When each signed-in account's limits go back to zero, soonest first.
-/// Limits of one account that reset at the same moment are one line: Claude's
-/// week and its per-model week reset together, so they read `week + Fable`.
+/// When each signed-in account's weekly limit goes back to zero, soonest
+/// first. One line per account: the limit the account is judged by, and
+/// none of the per-model limits beside it.
 pub fn limit_resets(reg: &Registry, logged_in: &HashSet<String>, now: DateTime<Utc>) -> Vec<Event> {
     let mut out = Vec::new();
     for acc in reg.profiles() {
         let key = acc.key();
-        let Some(snap) = acc.snapshot().filter(|_| logged_in.contains(&key)) else {
+        let Some(w) = acc
+            .snapshot()
+            .filter(|_| logged_in.contains(&key))
+            .and_then(main_window)
+        else {
             continue;
         };
-        // Grouped by the minute, in the order the windows are listed.
-        let mut groups: Vec<(DateTime<Utc>, Vec<&Window>)> = Vec::new();
-        for w in snap.windows.iter().filter(|w| long_window(w)) {
-            let Some(at) = w.resets_at.filter(|t| *t > now) else {
-                continue;
-            };
-            match groups
-                .iter_mut()
-                .find(|(t, _)| (*t - at).num_seconds().abs() < 60)
-            {
-                Some((_, ws)) => ws.push(w),
-                None => groups.push((at, vec![w])),
-            }
-        }
-        for (at, ws) in groups {
-            let labels: Vec<&str> = ws.iter().map(|w| w.label.as_str()).collect();
-            let note = if ws.len() == 1 {
-                format!("{:.0}% used", ws[0].used_now(now))
-            } else {
-                ws.iter()
-                    .map(|w| format!("{} {:.0}%", w.label, w.used_now(now)))
-                    .collect::<Vec<_>>()
-                    .join(" · ")
-            };
-            out.push(Event {
-                kind: Kind::Limit,
-                key: key.clone(),
-                at: Some(at),
-                date_only: false,
-                tag: if ws.iter().all(|w| w.kind == WindowKind::Monthly) {
-                    "monthly"
-                } else {
-                    "weekly"
-                },
-                what: labels.join(" + "),
-                note,
-                used: ws.iter().map(|w| w.used_now(now)).reduce(f64::max),
-            });
-        }
+        let Some(at) = w.resets_at.filter(|t| *t > now) else {
+            continue;
+        };
+        out.push(Event {
+            kind: Kind::Limit,
+            key,
+            at: Some(at),
+            date_only: false,
+            what: match w.kind {
+                WindowKind::Weekly => "weekly".to_string(),
+                WindowKind::Monthly => "monthly".to_string(),
+                _ => w.label.clone(),
+            },
+            note: String::new(),
+            used: Some(w.used_now(now)),
+            pace: w.elapsed_pct(now),
+        });
     }
-    out.sort_by_key(|r| r.at);
-    out
-}
-
-/// The combined view: every limit reset and every spare reset that expires,
-/// soonest first. Nothing else is in it.
-pub fn coming_up(reg: &Registry, logged_in: &HashSet<String>, now: DateTime<Utc>) -> Vec<Event> {
-    let mut out = limit_resets(reg, logged_in, now);
-    out.extend(grants(reg, now).into_iter().filter(|g| g.at.is_some()));
     out.sort_by_key(|r| r.at);
     out
 }
@@ -412,11 +407,6 @@ pub fn renewals(reg: &Registry) -> Vec<Event> {
         let Some(date) = billing.next(today).filter(|d| *d >= today) else {
             continue;
         };
-        // The cycle is named only when it is known.
-        let cycle = billing
-            .cycle
-            .map(|c| format!("{} · ", c.label()))
-            .unwrap_or_default();
         out.push(Event {
             kind: if billing.cancelled {
                 Kind::PlanEnds
@@ -426,14 +416,18 @@ pub fn renewals(reg: &Registry) -> Vec<Event> {
             key: acc.key(),
             at: Some(noon(date)),
             date_only: true,
-            tag: if billing.cancelled { "ends" } else { "renews" },
             what: acc.meta.plan.clone().unwrap_or_default(),
-            note: match (billing.cancelled, billing.source) {
-                (true, _) => "cancelled: use it up before then".to_string(),
-                (false, Source::Api) => format!("{cycle}from the vendor"),
-                (false, Source::Manual) => format!("{cycle}set by hand"),
+            // The cycle is named only when it is known.
+            note: if billing.cancelled {
+                "ends · cancelled".to_string()
+            } else {
+                billing
+                    .cycle
+                    .map(|c| c.label().to_string())
+                    .unwrap_or_default()
             },
             used: None,
+            pace: None,
         });
     }
     out.sort_by_key(|r| r.at);
@@ -444,7 +438,7 @@ pub fn renewals(reg: &Registry) -> Vec<Event> {
 mod tests {
     use super::*;
     use crate::harness::Harness;
-    use crate::model::Grant;
+    use crate::model::{Grant, Source};
     use crate::store::{AccountMeta, Billing, Cycle};
     use crate::testutil::Sandbox;
 
@@ -479,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn limits_that_reset_together_are_one_line_and_the_short_window_is_left_out() {
+    fn an_account_has_one_weekly_line_with_the_weeks_own_usage() {
         let sb = Sandbox::new();
         let mut a = account(1);
         let mut b = account(2);
@@ -510,24 +504,21 @@ mod tests {
         };
         let (logged_in, _) = facts(&mut reg);
         let events = limit_resets(&reg, &logged_in, now);
-        let lines: Vec<(&str, &str, &str)> = events
+        // One line per account, soonest first. A model's limit that resets
+        // with the week is not named, and neither is the short window.
+        let lines: Vec<(&str, &str)> = events
             .iter()
-            .map(|e| (e.key.as_str(), e.tag, e.what.as_str()))
+            .map(|e| (e.key.as_str(), e.what.as_str()))
             .collect();
-        assert_eq!(
-            lines,
-            [
-                ("claude-2", "weekly", "week"),
-                ("claude-1", "weekly", "week + Fable"),
-            ]
-        );
-        assert_eq!(events[1].note, "week 40% · Fable 70%");
-        assert_eq!(events[1].used.map(f64::round), Some(70.0));
-        assert_eq!(events[0].note, "10% used");
+        assert_eq!(lines, [("claude-2", "weekly"), ("claude-1", "weekly")]);
+        // The usage is the week's own figure, never a model's.
+        assert_eq!(events[1].used.map(f64::round), Some(40.0));
+        assert_eq!(events[0].used.map(f64::round), Some(10.0));
+        assert!(events.iter().all(|e| e.note.is_empty() && e.pace.is_some()));
     }
 
     #[test]
-    fn coming_up_holds_resets_only_and_renewals_stand_apart() {
+    fn spare_resets_weekly_resets_and_renewals_are_three_lists() {
         let sb = Sandbox::new();
         let mut a = account(1);
         sb.login(&a);
@@ -552,17 +543,79 @@ mod tests {
         let mut reg = Registry { accounts: vec![a] };
         let (logged_in, _) = facts(&mut reg);
 
-        // The spare reset that expires and the weekly reset, by time. The
-        // spare reset that never expires has no date, so it is not in here.
-        let coming = coming_up(&reg, &logged_in, now);
-        let tags: Vec<&str> = coming.iter().map(|e| e.tag).collect();
-        assert_eq!(tags, ["spare", "weekly"]);
+        // Two spare resets: the one that expires first, the one that never
+        // does last. Each carries the account's weekly usage.
+        let spare = grants(&reg, now);
+        assert_eq!(spare.len(), 2);
+        assert!(spare[0].at.is_some() && spare[1].at.is_none());
+        assert!(spare
+            .iter()
+            .all(|e| e.kind == Kind::Spare && e.what == "weekly"));
+        assert!(spare.iter().all(|e| e.used.map(f64::round) == Some(40.0)));
+
+        let weekly = limit_resets(&reg, &logged_in, now);
+        assert_eq!(weekly.len(), 1);
+        assert_eq!(
+            (weekly[0].kind, weekly[0].what.as_str()),
+            (Kind::Limit, "weekly")
+        );
 
         let renew = renewals(&reg);
         assert_eq!(renew.len(), 1);
-        assert_eq!((renew[0].tag, renew[0].what.as_str()), ("renews", "Max"));
-        assert_eq!(renew[0].note, "monthly · set by hand");
+        assert_eq!(
+            (renew[0].kind, renew[0].what.as_str()),
+            (Kind::Renewal, "Max")
+        );
+        assert_eq!(renew[0].note, "monthly");
+        assert_eq!(renew[0].used, None);
         assert_eq!(renew[0].countdown(now), "1 day");
+    }
+
+    #[test]
+    fn a_spare_reset_is_named_after_the_widest_limit_it_clears() {
+        // Whatever else goes with it, a reset that clears the week is weekly.
+        for scope in [
+            "week",
+            "weekly",
+            "5h + week + Fable",
+            "week + Fable",
+            "all limits",
+        ] {
+            assert_eq!(reset_name(scope), "weekly", "{scope}");
+        }
+        assert_eq!(reset_name("month + 5h"), "monthly");
+        // One model's reset keeps the model's name; a short window has none.
+        assert_eq!(reset_name("Fable"), "Fable");
+        assert_eq!(reset_name("5h + Fable"), "Fable");
+        assert_eq!(reset_name("5h"), "rate limit");
+        assert_eq!(reset_name(""), "rate limit");
+    }
+
+    #[test]
+    fn a_date_is_always_a_date_and_never_a_word() {
+        let now = Utc::now();
+        for hours in [0, 1, 20, 30, 47, 49, 200] {
+            let at = now + Duration::hours(hours);
+            for text in [
+                model::day(at),
+                model::landing(at, true),
+                model::landing(at, false),
+            ] {
+                let lower = text.to_lowercase();
+                assert!(
+                    !lower.contains("today")
+                        && !lower.contains("tomorrow")
+                        && !lower.contains("tmrw"),
+                    "{text}"
+                );
+                // A weekday, a day of the month and a month, in that order.
+                let parts: Vec<&str> = text.split(' ').collect();
+                assert!(
+                    parts.len() >= 3 && parts[1].parse::<u32>().is_ok(),
+                    "{text}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -573,10 +626,10 @@ mod tests {
             key: "claude-1".into(),
             at: Some(now + Duration::hours(hours)),
             date_only: false,
-            tag: "weekly",
-            what: "week".into(),
+            what: "weekly".into(),
             note: String::new(),
             used: None,
+            pace: None,
         };
         assert!(at(20).date(now, true).contains(':'));
         assert!(at(47).date(now, true).contains(':'));

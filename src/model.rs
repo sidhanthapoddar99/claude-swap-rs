@@ -256,28 +256,54 @@ pub fn until(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-/// `Sat 14 Nov · 09:30` in local time; `today · 09:30` and `tomorrow · 09:30`
-/// for the two nearest days.
-pub fn landing(t: DateTime<Utc>, now: DateTime<Utc>, clock_24h: bool) -> String {
+/// `Sat 14 Nov` in local time: the day, always as a date. The year is added
+/// when the day is in another year and more than half a year off, where the
+/// month alone could be read as one that has passed.
+pub fn day(t: DateTime<Utc>) -> String {
+    day_from(t, Utc::now())
+}
+
+fn day_from(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    use chrono::Datelike;
     let local = t.with_timezone(&chrono::Local);
-    let today = now.with_timezone(&chrono::Local).date_naive();
+    let far = (t - now).num_days().abs() > 182
+        && local.year() != now.with_timezone(&chrono::Local).year();
+    local
+        .format(if far { "%a %-d %b %Y" } else { "%a %-d %b" })
+        .to_string()
+}
+
+/// `Sat 14 Nov · 09:30` in local time. Always the date itself, never a word
+/// such as "tomorrow": a date reads the same whenever it is looked at.
+pub fn landing(t: DateTime<Utc>, clock_24h: bool) -> String {
+    let local = t.with_timezone(&chrono::Local);
     let clock = if clock_24h {
         local.format("%H:%M").to_string()
     } else {
         local.format("%-I:%M %p").to_string().to_lowercase()
     };
-    let days = (local.date_naive() - today).num_days();
-    let day = match days {
-        0 => "today".to_string(),
-        1 => "tomorrow".to_string(),
-        _ => local.format("%a %-d %b").to_string(),
-    };
-    format!("{day} · {clock}")
+    format!("{} · {clock}", day(t))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_day_names_its_year_only_when_it_is_far_off_in_another_year() {
+        use chrono::TimeZone;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 11, 11, 12, 0, 0)
+            .unwrap()
+            .with_timezone(&Utc);
+        let in_days = |d: i64| day_from(now + Duration::days(d), now);
+        assert_eq!(in_days(0), "Wed 11 Nov");
+        assert_eq!(in_days(3), "Sat 14 Nov");
+        // Next March is next year, and plainly ahead.
+        assert_eq!(in_days(118), "Tue 9 Mar");
+        // Next October could be read as last month.
+        assert_eq!(in_days(348), "Mon 25 Oct 2027");
+    }
 
     fn win(pct: f64, reset_in_h: i64, secs: i64) -> Window {
         Window {

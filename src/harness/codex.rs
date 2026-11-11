@@ -25,7 +25,6 @@ use crate::store::{Billing, Cycle, Identity};
 pub const SPEC: Spec = Spec {
     id: "codex",
     name: "Codex",
-    vendor: "OpenAI",
     bins: &["codex"],
     home_env: Some("CODEX_HOME"),
     home_flag: None,

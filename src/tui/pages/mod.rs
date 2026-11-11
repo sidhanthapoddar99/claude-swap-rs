@@ -140,15 +140,16 @@ pub fn no_data(app: &App, acc: &Account) -> (String, ratatui::style::Color) {
 }
 
 /// The account's name for a list, with a star when a bare launch of its agent
-/// starts on it. `tag` adds the agent's command after the name, for lists
-/// that mix agents.
+/// starts on it. `tag` is for lists that mix agents: the dot in front of the
+/// name tells them apart by colour, so the agent's command is written after
+/// the name only in a theme that has no colour.
 pub fn name_cell(app: &App, acc: &Account, w: usize, bold: bool, tag: bool) -> Vec<Span<'static>> {
     let t = &app.theme;
     let bin = acc.harness.spec().bins[0];
     let title = acc.title();
     // When the column is narrow the star goes first, then the tag.
     let tag_w = widgets::width(bin) + 1;
-    let tag = tag && w >= widgets::width(&title) + tag_w;
+    let tag = tag && !t.agents_by_colour() && w >= widgets::width(&title) + tag_w;
     let tag_used = if tag { tag_w } else { 0 };
     let star = app.is_default(acc) && w >= widgets::width(&title) + tag_used + 2;
     let star_w = if star { 2 } else { 0 };

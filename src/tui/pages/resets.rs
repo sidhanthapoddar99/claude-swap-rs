@@ -1,10 +1,11 @@
-//! Resets, in four parts:
+//! Resets, in three parts:
 //!
-//! 1. Coming up: every limit reset and every spare reset that expires, in one
-//!    list by time.
-//! 2. Spare resets: what each account still holds.
-//! 3. Weekly resets: when each account's limits go back to zero.
-//! 4. Renewals: when each plan renews or ends.
+//! 1. Spare resets: what each account still holds, and when each expires.
+//! 2. Weekly resets: when each account's weekly limit goes back to zero.
+//! 3. Renewals: when each plan renews or ends.
+//!
+//! The three tables share their columns: the account, what resets, how long
+//! until then, the date, and how full the account's week is.
 //!
 //! This page only shows. cswap has no way to spend a reset, on purpose.
 
@@ -17,16 +18,24 @@ use ratatui::Frame;
 
 use super::{dot, head, paint_row, row_style, scroll_start};
 use crate::tui::app::{Action, App, Focus};
-use crate::tui::widgets::{card, card_note, fit, Hits};
+use crate::tui::widgets::{self, card, card_note, fit, Hits};
 use crate::view;
 
 pub use crate::view::{Event as Row, Kind};
 
-/// The four lists, in the order they are drawn.
-pub fn sections(app: &App) -> [Vec<Row>; 4] {
+const PARTS: usize = 3;
+
+/// Said under the spare resets, in two shades.
+const VIEW_ONLY: (&str, &str) = (
+    "  cswap only shows resets. ",
+    "Spending one happens in the agent or on the vendor's site, never here.",
+);
+const VIEW_ONLY_SHORT: &str = "  View only. Spend a reset in the agent, never here.";
+
+/// The three lists, in the order they are drawn.
+pub fn sections(app: &App) -> [Vec<Row>; PARTS] {
     let now = Utc::now();
     [
-        view::coming_up(&app.reg, &app.derived.logged_in, now),
         view::grants(&app.reg, now),
         view::limit_resets(&app.reg, &app.derived.logged_in, now),
         view::renewals(&app.reg),
@@ -41,7 +50,7 @@ pub fn rows(app: &App) -> Vec<Row> {
 /// How tall each card is. Each gets what it needs when there is room. When
 /// there is not, every card keeps a row and the rest is shared out, the card
 /// with the selection first.
-fn heights(wants: [u16; 4], avail: u16, first: usize) -> [u16; 4] {
+fn heights(wants: [u16; PARTS], avail: u16, first: usize) -> [u16; PARTS] {
     if wants.iter().sum::<u16>() <= avail {
         return wants;
     }
@@ -49,8 +58,8 @@ fn heights(wants: [u16; 4], avail: u16, first: usize) -> [u16; 4] {
     let mut left = avail.saturating_sub(out.iter().sum());
     while left > 0 {
         let mut gave = false;
-        for step in 0..4 {
-            let i = (first + step) % 4;
+        for step in 0..PARTS {
+            let i = (first + step) % PARTS;
             if left > 0 && out[i] < wants[i] {
                 out[i] += 1;
                 left -= 1;
@@ -64,50 +73,68 @@ fn heights(wants: [u16; 4], avail: u16, first: usize) -> [u16; 4] {
     out
 }
 
-/// Column widths, shared by the four tables so they line up.
+/// Column widths, shared by the three tables so they line up.
 struct Cols {
     acc: usize,
-    tag: usize,
     what: usize,
     in_: usize,
     date: usize,
+    /// The bar in front of the percent. None on a narrow screen.
+    bar: usize,
+    /// Whatever is left of the line: the last column.
+    last: usize,
 }
 
 impl Cols {
-    fn new(w: usize) -> Cols {
+    fn new(w: usize, clock_24h: bool) -> Cols {
         let wide = w >= 72;
-        let acc = (w / 4).clamp(13, 22);
-        let tag = 7;
+        let acc = if wide { (w / 4).clamp(14, 22) } else { 12 };
+        let what = if wide { 12 } else { 8 };
         let in_ = if wide { 9 } else { 8 };
-        // Wide enough for `tomorrow · 01:29`; a narrow screen gets a short form.
-        let date = if wide { 17 } else { 11 };
-        let fixed = 1 + acc + 1 + tag + 1 + in_ + 1 + date + 1;
-        // The rest of the line goes to the note.
-        let what = w.saturating_sub(fixed).clamp(6, 18);
+        // `Fri 13 Nov · 13:05`, or `Fri 13 Nov · 12:05 pm`. A narrow screen
+        // has 16 cells for it, and `date_text` shortens what does not fit.
+        let date = match (wide, clock_24h) {
+            (true, true) => 18,
+            (true, false) => 21,
+            (false, _) => 16,
+        };
+        let fixed = 1 + acc + 1 + what + 1 + in_ + 1 + date + 1;
+        let last = w.saturating_sub(fixed);
+        // The percent takes four cells; a bar joins it when there is room.
+        let bar = if last >= 6 + 1 + 4 {
+            (last - 5).min(24)
+        } else {
+            0
+        };
         Cols {
             acc,
-            tag,
             what,
             in_,
             date,
+            bar,
+            last,
         }
-    }
-
-    /// What is left for a note after the five columns.
-    fn rest(&self, w: usize) -> usize {
-        w.saturating_sub(
-            1 + self.acc + 1 + self.tag + 1 + self.what + 1 + self.in_ + 1 + self.date + 1,
-        )
     }
 }
 
-/// The date for a row. On a narrow screen the separator dot is dropped.
+/// The date for a row, made to fit its column. It is always a date: when
+/// the column is narrow the separator dot goes first, then the weekday.
 fn date_text(app: &App, row: &Row, now: DateTime<Utc>, c: &Cols) -> String {
-    let text = row.date(now, app.settings.clock_24h);
-    if c.date < 16 {
-        text.replace("tomorrow", "tmrw").replace(" · ", " ")
-    } else {
-        text
+    shorten(row.date(now, app.settings.clock_24h), c.date)
+}
+
+fn shorten(text: String, w: usize) -> String {
+    if widgets::width(&text) <= w {
+        return text;
+    }
+    let text = text.replace(" · ", " ");
+    if widgets::width(&text) <= w {
+        return text;
+    }
+    // `Fri 13 Nov 12:05 pm` -> `13 Nov 12:05 pm`
+    match text.split_once(' ') {
+        Some((_, rest)) => rest.to_string(),
+        None => text,
     }
 }
 
@@ -133,15 +160,51 @@ fn account_cell(app: &App, key: &str, w: usize) -> Vec<Span<'static>> {
     }
 }
 
-/// One row: account, type, what, countdown, date, then a note in what is left.
-fn line(app: &App, row: &Row, now: DateTime<Utc>, c: &Cols, w: usize) -> Vec<Span<'static>> {
+/// The last column: how full the account's week is. For a renewal, where
+/// usage says nothing, its cycle.
+fn last_cell(app: &App, row: &Row, c: &Cols) -> Vec<Span<'static>> {
     let t = &app.theme;
-    let tag_color = match row.kind {
-        Kind::Spare => t.info(),
-        Kind::Renewal => t.accent(),
-        Kind::PlanEnds => t.warn(),
-        Kind::Limit => t.dim(),
-    };
+    if c.last == 0 {
+        return Vec::new();
+    }
+    match (row.kind, row.used) {
+        (Kind::Renewal | Kind::PlanEnds, _) => {
+            // A narrow screen has room for one short word: that a plan ends
+            // is said, and the cycle is left to the Accounts page.
+            let fits = widgets::width(&row.note) <= c.last;
+            let note = match row.kind {
+                _ if fits => row.note.as_str(),
+                Kind::PlanEnds => "ends",
+                _ => "",
+            };
+            vec![Span::styled(
+                fit(note, c.last),
+                if row.kind == Kind::PlanEnds {
+                    t.s(t.warn())
+                } else {
+                    t.s_faint()
+                },
+            )]
+        }
+        (_, Some(used)) => {
+            let mut spans = Vec::new();
+            if c.bar > 0 {
+                spans.extend(widgets::bar(t, used, c.bar, row.pace));
+                spans.push(Span::raw(" "));
+            }
+            spans.push(widgets::pct_span(t, used));
+            spans
+        }
+        (_, None) => vec![Span::styled(
+            fit(if c.bar > 0 { "no usage yet" } else { "–" }, c.last),
+            t.s_faint(),
+        )],
+    }
+}
+
+/// One row: account, what resets, countdown, date, usage.
+fn line(app: &App, row: &Row, now: DateTime<Utc>, c: &Cols) -> Vec<Span<'static>> {
+    let t = &app.theme;
     let what_color = match row.kind {
         Kind::Spare => t.info(),
         _ => t.text(),
@@ -150,15 +213,16 @@ fn line(app: &App, row: &Row, now: DateTime<Utc>, c: &Cols, w: usize) -> Vec<Spa
         Some(_) => (row.countdown(now), date_text(app, row, now, c)),
         None => ("–".to_string(), "does not expire".to_string()),
     };
+    // A renewal whose plan nobody has named still gets a cell.
+    let what = if row.what.is_empty() {
+        "–"
+    } else {
+        row.what.as_str()
+    };
     let mut spans = account_cell(app, &row.key, c.acc);
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
-        fit(row.tag, c.tag),
-        Style::default().fg(tag_color),
-    ));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(
-        fit(&row.what, c.what),
+        fit(what, c.what),
         Style::default().fg(what_color),
     ));
     spans.push(Span::raw(" "));
@@ -168,22 +232,15 @@ fn line(app: &App, row: &Row, now: DateTime<Utc>, c: &Cols, w: usize) -> Vec<Spa
     ));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(fit(&date, c.date), t.s_dim()));
-    let rest = c.rest(w);
-    if rest >= 6 {
-        spans.push(Span::raw(" "));
-        let style = match (row.kind, row.used) {
-            (Kind::Limit, Some(used)) => Style::default().fg(t.severity(used)),
-            _ => t.s_faint(),
-        };
-        spans.push(Span::styled(fit(&row.note, rest - 1), style));
-    }
+    spans.push(Span::raw(" "));
+    spans.extend(last_cell(app, row, c));
     spans
 }
 
 struct Section<'a> {
     title: &'a str,
-    /// The header of the third, fourth and fifth columns.
-    heads: [&'a str; 3],
+    /// The header of every column after the account.
+    heads: [&'a str; 4],
     /// Shown when the list is empty.
     empty: &'a str,
     /// Shown on the card's border, at the right.
@@ -226,7 +283,7 @@ fn table(
         );
         return;
     }
-    let c = Cols::new(w);
+    let c = Cols::new(w, app.settings.clock_24h);
     // The header gives way when the card has room for one line only.
     let header = inner.height >= 2;
     if header {
@@ -234,10 +291,10 @@ fn table(
             Paragraph::new(Line::from(vec![
                 Span::raw(" "),
                 head(t, "ACCOUNT", c.acc + 1),
-                head(t, "TYPE", c.tag + 1),
                 head(t, section.heads[0], c.what + 1),
                 head(t, section.heads[1], c.in_ + 1),
                 head(t, section.heads[2], c.date + 1),
+                head(t, section.heads[3], c.last),
             ])),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
@@ -256,22 +313,19 @@ fn table(
             paint_row(f, rect, bg);
         }
         let mut spans = vec![mark];
-        spans.extend(line(app, row, now, &c, w));
+        spans.extend(line(app, row, now, &c));
         f.render_widget(Paragraph::new(Line::from(spans)), rect);
         hits.add(rect, Action::Row(offset + j));
     }
     // Say so when rows are out of view.
-    if rows.len() > list_h && area.width > 16 {
-        let text = format!(" {} of {} ", (start + list_h).min(rows.len()), rows.len());
-        let tw = text.chars().count() as u16;
-        f.render_widget(
-            Paragraph::new(Span::styled(text, t.s_faint().bg(t.panel()))),
-            Rect::new(
-                area.x + area.width - tw - 2,
-                area.y + area.height - 1,
-                tw,
-                1,
-            ),
+    if rows.len() > list_h {
+        super::range_note(
+            f,
+            area,
+            app,
+            start + 1,
+            (start + list_h).min(rows.len()),
+            rows.len(),
         );
     }
 }
@@ -288,15 +342,15 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let sel = (app.focus == Focus::Main && total > 0).then(|| app.row().min(total - 1));
 
     // Which card holds the selection: it gets spare lines first.
-    let mut offsets = [0; 4];
-    for i in 1..4 {
+    let mut offsets = [0; PARTS];
+    for i in 1..PARTS {
         offsets[i] = offsets[i - 1] + parts[i - 1].len();
     }
     let first = sel
-        .map(|s| (0..4).rev().find(|i| s >= offsets[*i]).unwrap_or(0))
+        .map(|s| (0..PARTS).rev().find(|i| s >= offsets[*i]).unwrap_or(0))
         .unwrap_or(0);
 
-    let wants = [0, 1, 2, 3].map(|i: usize| match parts[i].len() {
+    let wants = [0, 1, 2].map(|i: usize| match parts[i].len() {
         0 => 3,
         n => n as u16 + 3,
     });
@@ -305,20 +359,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let hs = heights(wants, area.height.saturating_sub(noted as u16), first);
 
     let spare = view::grant_count(&app.reg, now);
-    let monthly = parts[2].iter().any(|r| r.tag == "monthly");
+    let monthly = parts[1].iter().any(|r| r.what == "monthly");
     let list = [
         Section {
-            title: "Coming up",
-            heads: ["RESET", "IN", "DATE"],
-            empty: "Nothing yet: reset times appear after the first usage fetch (press r).",
-            note: Some((
-                "weekly: when it resets · spare: when it expires".to_string(),
-                t.faint(),
-            )),
-        },
-        Section {
             title: "Spare resets",
-            heads: ["RESET", "EXPIRES", "DATE"],
+            heads: ["RESET", "EXPIRES", "DATE", "USED"],
             empty: "No account holds a spare reset right now.",
             note: (spare > 0).then(|| (format!("{spare} to spend"), t.info())),
         },
@@ -328,20 +373,20 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             } else {
                 "Weekly resets"
             },
-            heads: ["LIMIT", "IN", "DATE"],
+            heads: ["RESET", "IN", "DATE", "USED"],
             empty: "Nothing yet: reset times appear after the first usage fetch (press r).",
             note: None,
         },
         Section {
             title: "Renewals",
-            heads: ["PLAN", "IN", "DATE"],
+            heads: ["PLAN", "IN", "DATE", ""],
             empty: "No renewal date is known. Note one on the Accounts page with b.",
             note: None,
         },
     ];
 
     let mut y = area.y;
-    for i in 0..4 {
+    for i in 0..PARTS {
         let room = (area.y + area.height).saturating_sub(y);
         let h = hs[i].min(room);
         if h < 3 {
@@ -359,17 +404,18 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         );
         y += h;
         // The view-only line sits right under the spare resets it is about.
-        if i == 1 && noted && y < area.y + area.height {
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled("  cswap only shows resets. ", t.s_dim()),
-                    Span::styled(
-                        "Spending one happens in the agent or on the vendor's site, never here.",
-                        t.s_faint(),
-                    ),
-                ])),
-                Rect::new(area.x, y, area.width, 1),
-            );
+        if i == 0 && noted && y < area.y + area.height {
+            let (lead, rest) = VIEW_ONLY;
+            // A narrow screen gets the short form, never a cut sentence.
+            let line = if widgets::width(lead) + widgets::width(rest) <= area.width as usize {
+                Line::from(vec![
+                    Span::styled(lead, t.s_dim()),
+                    Span::styled(rest, t.s_faint()),
+                ])
+            } else {
+                Line::from(Span::styled(VIEW_ONLY_SHORT, t.s_dim()))
+            };
+            f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
             y += 1;
         }
     }
@@ -382,15 +428,40 @@ mod tests {
     #[test]
     fn cards_get_what_they_need_or_share_what_there_is() {
         // Room for all: nothing changes.
-        assert_eq!(heights([5, 4, 6, 3], 30, 0), [5, 4, 6, 3]);
+        assert_eq!(heights([5, 4, 6], 30, 0), [5, 4, 6]);
         // Too little: every card keeps a row, and the total fits.
-        let h = heights([11, 7, 7, 4], 20, 0);
-        assert_eq!(h.iter().sum::<u16>(), 20);
+        let h = heights([11, 7, 7], 16, 0);
+        assert_eq!(h.iter().sum::<u16>(), 16);
         assert!(h.iter().all(|x| *x >= 4), "{h:?}");
         // The card with the selection is served first.
-        let h = heights([11, 7, 7, 4], 17, 2);
-        assert_eq!(h, [4, 4, 5, 4]);
+        let h = heights([11, 7, 7], 13, 2);
+        assert_eq!(h, [4, 4, 5]);
         // An empty card never grows past its one line.
-        assert_eq!(heights([20, 3, 20, 3], 16, 0), [5, 3, 5, 3]);
+        assert_eq!(heights([20, 3, 20], 13, 0), [5, 3, 5]);
+    }
+
+    #[test]
+    fn the_columns_fit_and_a_bar_joins_the_percent_when_there_is_room() {
+        for clock_24h in [true, false] {
+            for w in 53..200 {
+                let c = Cols::new(w, clock_24h);
+                let used = 1 + c.acc + 1 + c.what + 1 + c.in_ + 1 + c.date + 1 + c.last;
+                assert!(used <= w, "{w}: {used}");
+                // The percent always has its four cells.
+                assert!(c.last >= 4, "{w}: {}", c.last);
+                assert!(c.bar == 0 || c.bar + 5 <= c.last, "{w}");
+            }
+            assert_eq!(Cols::new(53, clock_24h).bar, 0);
+            assert!(Cols::new(101, clock_24h).bar >= 12);
+        }
+    }
+
+    #[test]
+    fn a_date_that_does_not_fit_loses_its_dot_then_its_weekday() {
+        let long = || "Fri 13 Nov · 12:05 pm".to_string();
+        assert_eq!(shorten(long(), 21), "Fri 13 Nov · 12:05 pm");
+        assert_eq!(shorten(long(), 19), "Fri 13 Nov 12:05 pm");
+        assert_eq!(shorten(long(), 16), "13 Nov 12:05 pm");
+        assert_eq!(shorten("Fri 13 Nov".to_string(), 16), "Fri 13 Nov");
     }
 }

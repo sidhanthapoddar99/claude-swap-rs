@@ -127,7 +127,7 @@ fn list(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
 fn days(n: i64) -> String {
     match n {
         0 => "today".to_string(),
-        1 => "tomorrow".to_string(),
+        1 => "in 1 day".to_string(),
         n => format!("in {n} days"),
     }
 }

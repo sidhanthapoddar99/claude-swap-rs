@@ -101,10 +101,7 @@ fn judge(acc: &Account, settings: &Settings, now: DateTime<Utc>) -> (Pick, Optio
             format!("{} limit reached", w.label)
         };
         let mut text = match back {
-            Some(t) => format!(
-                "{what}, back {}",
-                model::landing(t, now, settings.clock_24h)
-            ),
+            Some(t) => format!("{what}, back {}", model::landing(t, settings.clock_24h)),
             None => what,
         };
         if !grants.is_empty() {

@@ -24,9 +24,9 @@ One place for the accounts of your coding agents: **Claude Code**, **Codex**, **
 │   Analytics         8 │ ╰───────────────────────────────────────────────────────────────────────────────────────╯
 │   Health         2  9 │ ╭ Accounts ─────────────────────────────────────────────────────────────────────────────╮
 │   Settings          0 │ │    ACCOUNT               PLAN         USED                     RESETS IN STATE        │
-│                       │ │ ▌● work claude           Max 20x      ━━━━━━━━━━━━━━━━━╋  38%  8h 59m    ● ready      │
-│  AGENTS               │ │  ● side claude           Pro          ━━━━━━━━━━╋━━━━━━━ 100%  2d        ● limit hit  │
-│  ● Claude Code     2  │ │  ● team codex                         not signed in · press l            ○ signed out │
+│                       │ │ ▌● work                  Max 20x      ━━━━━━━━━━━━━━━━━╋  38%  8h 59m    ● ready      │
+│  AGENTS               │ │  ● side                  Pro          ━━━━━━━━━━╋━━━━━━━ 100%  2d        ● limit hit  │
+│  ● Claude Code     2  │ │  ● team                               not signed in · press l            ○ signed out │
 │  ● Codex           1  │ │                                                                                       │
 │  ● Antigravity     0  │ │                                                                                       │
 │  ● Grok Build      0  │ │                                                                                       │
@@ -186,13 +186,15 @@ Run `cswap` with no arguments. Keys: `1`–`9` and `0` or the arrow keys to move
 | **Accounts** | Add, sign in, rename, set aliases, remove. Plan, renewal date, how long the login is valid, where it lives. |
 | **Defaults** | Each agent's own login and its usage, which account holds the same login, and `c` to make an account from it. |
 | **Sessions** | The agents running right now: which account each is on, since when, and in which folder. |
-| **Resets** | Four parts: everything coming up in one list by time, the spare resets you hold and when they expire, when each weekly limit resets, and when each plan renews. |
+| **Resets** | Three parts: the spare resets you hold and when they expire, when each account's weekly limit resets, and when each plan renews. Every row gives the account, the reset, how long until then, the date, and how much of the account's week is used. |
 | **Sync** | Per account: what is linked, what is private, what is shadowed, and when it was last synced. |
 | **Analytics** | Burn rate per account over the last week and where it lands at the reset. More is planned. |
 | **Health** | Anything that needs attention: signed-out accounts, two accounts on one login, shadowed files, a missing shell integration. |
 | **Settings** | The theme and the general settings, one tab per agent, and the shell line to copy. |
 
-Every bar, percent and countdown sits in the same column on every page. A countdown is as short as it can be: `3d` when it is more than two days off, `1d 6h` within two days, `4h 25m` within one. The exact date is on the Resets page.
+Every bar, percent and countdown sits in the same column on every page. A countdown is as short as it can be: `3d` when it is more than two days off, `1d 6h` within two days, `4h 25m` within one. The exact date is on the Resets page, always as a date such as `Sat 14 Nov`, with the time of day when it is within two days.
+
+The colour of the dot in front of an account's name tells its agent, so the agent is not written again beside the name. The `grey` theme has no colours, so there the agent's command follows the name.
 
 Only the weekly and monthly limits are shown. The agents also have short windows of a few hours; cswap reads them to know when an account is rate limited right now, and shows them nowhere.
 

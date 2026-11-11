@@ -154,7 +154,7 @@ fn announce(acc: &Account, via: Via, note: Option<&str>, settings: &Settings) {
         if let Some(t) = w.resets_at.filter(|t| *t > now) {
             text.push_str(&format!(
                 ", resets {}",
-                model::landing(t, now, settings.clock_24h)
+                model::landing(t, settings.clock_24h)
             ));
         }
         parts.push(text);

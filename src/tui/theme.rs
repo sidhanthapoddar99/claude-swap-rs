@@ -247,6 +247,12 @@ impl Theme {
         self.scheme
     }
 
+    /// Does the colour of an agent's dot tell the agents apart? Not in
+    /// greyscale, where a list of accounts writes the agent beside the name.
+    pub fn agents_by_colour(&self) -> bool {
+        self.scheme != Scheme::Grey
+    }
+
     fn palette(&self) -> &'static Palette {
         match self.scheme {
             Scheme::Violet | Scheme::Terminal => &VIOLET,

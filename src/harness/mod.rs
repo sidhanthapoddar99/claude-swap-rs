@@ -31,8 +31,6 @@ pub struct Spec {
     /// Used in directory names and on the command line: `claude`.
     pub id: &'static str,
     pub name: &'static str,
-    /// The vendor's name for the limits page, for messages.
-    pub vendor: &'static str,
     /// Binary names, most common first. The first one found on `PATH` runs.
     pub bins: &'static [&'static str],
     /// The env var that moves the whole config dir.

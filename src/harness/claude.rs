@@ -31,7 +31,6 @@ use crate::{fsx, paths};
 pub const SPEC: Spec = Spec {
     id: "claude",
     name: "Claude Code",
-    vendor: "Anthropic",
     bins: &["claude"],
     home_env: Some("CLAUDE_CONFIG_DIR"),
     home_flag: None,

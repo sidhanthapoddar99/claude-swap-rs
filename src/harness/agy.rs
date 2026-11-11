@@ -41,7 +41,6 @@ const TOKEN_FILE: &str = "antigravity-cli/antigravity-oauth-token";
 pub const SPEC: Spec = Spec {
     id: "agy",
     name: "Antigravity",
-    vendor: "Google",
     bins: &["agy"],
     home_env: None,
     home_flag: Some("--gemini_dir="),

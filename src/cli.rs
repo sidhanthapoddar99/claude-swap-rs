@@ -462,8 +462,10 @@ pub fn resets() -> Result<()> {
             .unwrap_or_else(|| key.to_string())
     };
 
-    // One table shape for all four parts, so the columns line up.
-    let table = |title: &str, heads: [&str; 3], rows: &[view::Event], empty: &str| {
+    // One table shape for all three parts, so the columns line up. A
+    // 12-hour clock needs three more cells for the date.
+    let date_w = if c.settings.clock_24h { 18 } else { 21 };
+    let table = |title: &str, heads: [&str; 4], rows: &[view::Event], empty: &str| {
         println!("{}", p.bold(title));
         if rows.is_empty() {
             println!("  {}", p.dim(empty));
@@ -474,10 +476,10 @@ pub fn resets() -> Result<()> {
             p.dim(&format!(
                 "{} {} {} {} {}",
                 fit("ACCOUNT", 28),
-                fit("TYPE", 7),
-                fit(heads[0], 18),
+                fit(heads[0], 12),
                 fit(heads[1], 10),
-                fit(heads[2], 18)
+                fit(heads[2], date_w),
+                heads[3]
             ))
         );
         for e in rows {
@@ -488,58 +490,57 @@ pub fn resets() -> Result<()> {
             let soon = e.kind == Kind::Spare
                 && e.at
                     .is_some_and(|at| at - c.now <= chrono::Duration::days(3));
+            let ends = e.kind == Kind::PlanEnds;
             let when = fit(&when, 10);
-            let what = fit(&e.what, 18);
+            let what = fit(&e.what, 12);
+            // How full the account's week is; for a renewal, its cycle.
+            let last = match (e.kind, e.used) {
+                (Kind::Renewal, _) => p.dim(&e.note),
+                (Kind::PlanEnds, _) => p.warn(&e.note),
+                (_, Some(used)) => format!(
+                    "{} {}",
+                    p.bar(used, 12),
+                    p.severity(used, &format!("{used:>3.0}%"))
+                ),
+                (_, None) => p.dim("no usage yet"),
+            };
             println!(
-                "  {} {} {} {} {}  {}",
+                "  {} {} {} {} {}",
                 fit(&name(&e.key), 28),
-                p.dim(&fit(e.tag, 7)),
                 if e.kind == Kind::Spare {
                     p.info(&what)
                 } else {
                     what
                 },
-                if soon || e.kind == Kind::PlanEnds {
-                    p.warn(&when)
-                } else {
-                    when
-                },
-                fit(&date, 18),
-                p.dim(&e.note)
+                if soon || ends { p.warn(&when) } else { when },
+                fit(&date, date_w),
+                last
             );
         }
     };
 
     let limits = view::limit_resets(&c.reg, &c.logged_in, c.now);
-    let none_yet = "nothing yet: run `cswap refresh`";
-    table(
-        "Coming up",
-        ["RESET", "IN", "DATE"],
-        &view::coming_up(&c.reg, &c.logged_in, c.now),
-        none_yet,
-    );
-    println!();
     table(
         "Spare resets",
-        ["RESET", "EXPIRES", "DATE"],
+        ["RESET", "EXPIRES", "DATE", "USED"],
         &view::grants(&c.reg, c.now),
         "none",
     );
     println!();
     table(
-        if limits.iter().any(|e| e.tag == "monthly") {
+        if limits.iter().any(|e| e.what == "monthly") {
             "Weekly and monthly resets"
         } else {
             "Weekly resets"
         },
-        ["LIMIT", "IN", "DATE"],
+        ["RESET", "IN", "DATE", "USED"],
         &limits,
-        none_yet,
+        "nothing yet: run `cswap refresh`",
     );
     println!();
     table(
         "Renewals",
-        ["PLAN", "IN", "DATE"],
+        ["PLAN", "IN", "DATE", ""],
         &view::renewals(&c.reg),
         "no renewal date is known",
     );
