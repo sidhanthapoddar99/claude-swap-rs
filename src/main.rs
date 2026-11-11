@@ -345,7 +345,7 @@ fn help(p: &Paint) -> String {
                 ),
                 ("update", "install the latest release (--check only looks)"),
                 (
-                    "herdr switch <t> <account>",
+                    "herdr switch <t> <acct>",
                     "move a herdr terminal's agent to another account",
                 ),
             ],
