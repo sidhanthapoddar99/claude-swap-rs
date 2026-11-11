@@ -93,7 +93,41 @@ Invoke-Expression (& cswap shell-init powershell | Out-String)   # $PROFILE
 
 The line is the same whichever agents you wrap: `cswap shell-init <shell>` prints a wrapper for each agent ticked for that shell, and a shell you never chose for wraps every installed agent. cswap cannot write PowerShell's profile, so there it shows you the line to add.
 
-`command claude` always skips cswap.
+`command claude` skips the wrapper. With a PATH shim on for that agent it still reaches cswap; `claude --cswap=root` is the agent's own login either way.
+
+### PATH shims
+
+Optional, and off until you turn it on. Linux and macOS.
+
+Shell integration works where you type. A program that starts `claude` itself never reads your rc file: herdr running `hc run claude "<task>"`, a script, an editor, another agent. It finds the real binary on `PATH` and the agent runs on its root login. A shim closes that gap.
+
+```bash
+cswap shims on            # a shim for every installed agent
+cswap shims on claude     # only for Claude Code
+cswap shims               # where they stand in this environment
+cswap shims off           # remove all of it again
+```
+
+Or in the dashboard: **Settings, Shell tab, PATH shims**.
+
+What turning it on does, and nothing more:
+
+- It makes a link named after each agent in `~/.cswap/shims`, pointing at cswap. Started under an agent's name, cswap runs that agent on the account the [usual order](#starting-agents) gives, and finds the real binary further along `PATH`.
+- It adds two lines, a comment and one `PATH` line, at the end of your login files (`~/.profile`, `~/.zprofile`, `~/.bash_profile`: the ones that exist, and your login shell's own). The line puts `~/.cswap/shims` first on `PATH`.
+- `cswap shell-init` puts the folder first again in every shell that loads it, after whatever your rc file added to `PATH`.
+
+When it takes hold: a new terminal sees it at once if its shell loads cswap; every other program sees it after your next login. herdr keeps the `PATH` it started with. To give it the new one now, run `hc server restart --fresh` in a terminal outside herdr.
+
+While an agent has a shim it runs through cswap in every shell, so its tick in the shell table is locked. The per-shell lists are kept and count again when the shim goes. The line in your rc file stays: it is what keeps the shims first in that shell.
+
+`cswap shims off` removes the links, the folder and the lines, and deletes a login file only if cswap made it and nothing else is in it. If you delete cswap by hand instead, a link to nothing is skipped by every `PATH` search, so the real agent starts as before.
+
+Good to know:
+
+- `cswap shims` and the Health page say, for the environment they run in, whether a bare launch reaches cswap, and name the program that comes first when it does not. With herdr running they also ask herdr which program it would start, so you can see when it still has the old `PATH`.
+- With herdr on the machine and the shims off, the Health page says that agents herdr starts by a bare name skip cswap.
+- A program started by its full path (`/usr/bin/claude`, `~/.local/bin/claude`) skips the shim.
+- If your own `claude` is a script that runs `claude` from `PATH`, it would call the shim back for ever. cswap stops after four turns and says so. Set the real binary in Settings, or `CSWAP_CLAUDE_BIN`.
 
 ## Five-minute tour
 
@@ -189,7 +223,7 @@ Which account a launch uses, first match wins:
 3. in a herdr terminal that an agent started: the account of the nearest agent of the same kind above it, so a sub-agent stays on its parent's account
 4. the agent's default: its `root` login, an account, or `auto`. Set it with `d` in the dashboard or `cswap use <agent> <account>`
 
-cswap sets the variable of step 2 for the agent it starts, so a child process stays on the same account. herdr starts every terminal in the login environment instead, which is why step 3 looks the parent up. Both need the child to be started as `cswap claude …`: a bare `claude` that no shell wraps, as in `hc run claude "<task>"`, never reaches cswap and runs on the root login.
+cswap sets the variable of step 2 for the agent it starts, so a child process stays on the same account. herdr starts every terminal in the login environment instead, which is why step 3 looks the parent up. Both need the launch to reach cswap. `cswap claude …` always does. A bare `claude` that no shell wraps, as in `hc run claude "<task>"`, reaches it only with [PATH shims](#path-shims) on; without them it runs on the root login.
 
 `cswap agent-info` prints a short guide written for the agents themselves: how to see the account they are on, how to start another agent on it or on another one, and what to leave to you. Point an agent at it, or put the line in its instructions.
 
@@ -256,7 +290,7 @@ The suggestion follows one idea: use what you would otherwise lose. An account w
 | **Agents list** | The ⇄ icon beside the sort icon shows each agent's account in place of its time and status. Click it again to go back. |
 | **Sidebar** | **cswap**, between Settings and Add machine, opens this dashboard in a popup over the window. |
 
-A sub-agent started through cswap, from the menu or by the agent itself with `hc run … cswap claude "<task>"`, starts on its parent's account unless you pick another.
+A sub-agent started through cswap, from the menu or by the agent itself with `hc run … cswap claude "<task>"`, starts on its parent's account unless you pick another. Agents mostly type the bare `hc run … claude "<task>"`, which herdr starts without cswap: turn [PATH shims](#path-shims) on and that lands on the parent's account too. The Health page warns while herdr is here and the shims are off.
 
 The picture is a drawing with made-up names. The layout is not part of the binary: it lives in this repository under [`integrations/herdr/`](integrations/herdr), and cswap fetches the files that go with its version.
 
@@ -313,6 +347,8 @@ sync [account]             bring links up to date             (--check, --repair
 doctor                     check for problems
 migrate                    move cswap 0.6 profiles into ~/.cswap
 shell-init <shell>         print shell integration
+shims [on|off]             PATH shims: agents other programs start use cswap too
+uninstall                  undo the shims and the lines in your shell files
 herdr ls|info|switch       agents in herdr terminals: account and switch
 herdr install|status       the cswap layout for herdr
 agent-info                 how a coding agent uses cswap: a guide for the agent
@@ -339,6 +375,7 @@ The plan is read again whenever usage is fetched and whenever the dashboard open
 - It **never renews a token**. Each agent renews its own login when it runs. An account you have not started for a while can show its last known usage until you start it or sign in again.
 - It **never writes** into an agent's own config dir.
 - It writes **one line into a shell's rc file**, and only when you save a selection for that shell in Settings, or say yes to it in the installer. The line is added at the end and nothing else in the file is touched.
+- It writes **one `PATH` line into your login files** only when you turn PATH shims on, and takes it out again when you turn them off.
 - It calls **only the endpoints the vendor's own CLI calls** for usage: `api.anthropic.com`, `chatgpt.com` and `cli-chat-proxy.grok.com`, each with that account's own login. For Antigravity it runs `agy` itself. Claude lists spare resets only to its CLI, so cswap identifies as the CLI for that one read. Turn that off per agent in Settings (`cli_identity`) and the reset details are skipped.
 - It contacts `api.github.com` once a day to look for a new release, unless you turn that off.
 - No telemetry.
@@ -369,7 +406,7 @@ Each old profile becomes a Claude account. Its first alias becomes its name and 
 | --- | --- |
 | Linux | Developed and tested here. |
 | macOS | Built in CI. Claude Code keeps its login in the keychain there, which cswap reads with `/usr/bin/security`. Not yet tested on a real Mac. |
-| Windows | Built in CI. The agent runs as a child process, since Windows cannot replace a process. Linking needs Developer Mode or an elevated shell. Not yet tested on a real PC. |
+| Windows | Built in CI. The agent runs as a child process, since Windows cannot replace a process. Linking needs Developer Mode or an elevated shell. No PATH shims. Not yet tested on a real PC. |
 
 `cswap ps` and the Sessions page read `/proc` on Linux and see every session. On macOS and Windows they list the sessions that were started through cswap.
 
@@ -385,10 +422,17 @@ Each old profile becomes a Claude account. Its first alias becomes its name and 
 | `HERDR_APP_HOME` | herdr's folder, when it is not `~/.config/herdr-app` |
 | `NO_COLOR` | plain text output |
 | `CSWAP_ACCOUNT` | set by cswap for the agent it starts: the account's key |
+| `CSWAP_GUARD` | set by cswap for the agent it starts: how it notices a program that keeps calling it back |
 
 ## Uninstall
 
-Remove the shell integration line from your rc file, delete the binary, and delete `~/.cswap`. The accounts' logins live there, so sign in to anything you still need first. The agents' own directories were never changed.
+```bash
+cswap uninstall
+```
+
+It asks first (`-y` skips the question), then removes the PATH shims with their lines in your login files, and the cswap line in each shell's rc file. A line you changed by hand is not cswap's any more and stays.
+
+It then prints the two things left, and does not do them for you: delete the binary, and delete `~/.cswap`. The accounts' logins live in that folder, so sign in to anything you still need first, with the agent itself. The agents' own directories were never changed.
 
 ## Develop
 

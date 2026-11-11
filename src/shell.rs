@@ -122,6 +122,18 @@ pub fn chosen(settings: &Settings, shell: &str, was_on: impl Fn(Harness) -> bool
     }
 }
 
+/// The agents `shell` gets a wrapper for: its own list, and every agent with
+/// a PATH shim. A shim covers every shell, so the list has no say over those
+/// agents while it is on; the list itself is kept for when the shim goes.
+pub fn wrapped(settings: &Settings, shell: &str, was_on: impl Fn(Harness) -> bool) -> Vec<Harness> {
+    let listed = chosen(settings, shell, was_on);
+    let shimmed = crate::shim::chosen(settings);
+    Harness::ALL
+        .into_iter()
+        .filter(|h| listed.contains(h) || shimmed.contains(h))
+        .collect()
+}
+
 /// One shell, as the Settings page shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
@@ -133,13 +145,16 @@ pub struct Status {
     pub loaded: Option<bool>,
     /// The agents its list holds, whether or not the rc file loads them.
     pub chosen: Vec<Harness>,
+    /// The agents with a PATH shim. They run through cswap in every shell,
+    /// whatever this shell's list holds.
+    pub shimmed: Vec<Harness>,
 }
 
 impl Status {
-    /// Does `h` run through cswap in this shell? Only when the shell's list
-    /// holds it and the rc file loads the wrappers.
+    /// Does `h` run through cswap in this shell? When it has a PATH shim, or
+    /// when the shell's list holds it and the rc file loads the wrappers.
     pub fn wraps(&self, h: Harness) -> bool {
-        self.loaded != Some(false) && self.chosen.contains(&h)
+        self.shimmed.contains(&h) || (self.loaded != Some(false) && self.chosen.contains(&h))
     }
 }
 
@@ -157,6 +172,7 @@ pub fn all(settings: &Settings, hs: &HashMap<Harness, HarnessSettings>) -> Vec<S
             rc: rc_file(name),
             loaded: loaded(name),
             chosen: chosen(settings, name, |h| hs.get(&h).is_none_or(|s| s.wrapped)),
+            shimmed: crate::shim::chosen(settings),
         })
         .collect()
 }
@@ -220,14 +236,65 @@ fn add_line(rc: &Path, shell: &str) -> Result<()> {
         }
         text.push('\n');
     }
-    text.push_str(
-        "# cswap: run the agents through cswap. Choose which in `cswap`, Settings > Shell.\n",
-    );
+    text.push_str(RC_COMMENT);
+    text.push('\n');
     text.push_str(&guarded_line(shell));
     text.push('\n');
     let mut file = fs::OpenOptions::new().create(true).append(true).open(rc)?;
     file.write_all(text.as_bytes())?;
     Ok(())
+}
+
+/// The comment cswap writes above its line in an rc file.
+const RC_COMMENT: &str =
+    "# cswap: run the agents through cswap. Choose which in `cswap`, Settings > Shell.";
+
+/// Take the cswap line out of a shell's rc file again: the line as cswap or
+/// its installer wrote it, and cswap's own comment above it. A line someone
+/// changed by hand is not one of those and stays. True when one was removed.
+pub fn remove_line(shell: &str) -> Result<bool> {
+    let Some(rc) = rc_file(shell) else {
+        return Ok(false);
+    };
+    let Ok(before) = fs::read_to_string(&rc) else {
+        return Ok(false);
+    };
+    let ours = [line(shell), guarded_line(shell)];
+    // The dashboard writes a comment above the line; the install script
+    // writes a marker above it and one below.
+    let above = [RC_COMMENT, "# >>> cswap shell integration >>>"];
+    let below = "# <<< cswap shell integration <<<";
+    let mut kept: Vec<&str> = Vec::new();
+    let mut removed = false;
+    let mut just_removed = false;
+    for l in before.lines() {
+        if ours.iter().any(|o| o == l.trim()) {
+            removed = true;
+            just_removed = true;
+            if kept.last().is_some_and(|k| above.contains(&k.trim())) {
+                kept.pop();
+                if kept.last().is_some_and(|k| k.trim().is_empty()) {
+                    kept.pop();
+                }
+            }
+            continue;
+        }
+        if just_removed && l.trim() == below {
+            just_removed = false;
+            continue;
+        }
+        just_removed = false;
+        kept.push(l);
+    }
+    if removed {
+        let mut text = kept.join("\n");
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        // Written in place: an rc file reached through a link stays a link.
+        fs::write(&rc, text).with_context(|| format!("cannot write {}", rc.display()))?;
+    }
+    Ok(removed)
 }
 
 /// What `cswap shell-init <shell>` prints: a function for each of `agents`.

@@ -236,6 +236,8 @@ pub struct TickItem {
 pub enum Ticks {
     /// The agents a shell wraps.
     Shell(String),
+    /// The agents that have a PATH shim.
+    Shims,
 }
 
 #[derive(Debug, Clone)]
@@ -1711,16 +1713,20 @@ impl App {
             .into_iter()
             .map(|h| {
                 let installed = self.derived.bins.get(&h).is_some_and(|b| b.is_some());
+                let shimmed = shell.shimmed.contains(&h);
                 let on = shell.wraps(h);
                 TickItem {
                     id: h.id().to_string(),
                     label: h.spec().bins[0].to_string(),
-                    detail: if installed {
+                    detail: if shimmed {
+                        "PATH shim is on: every shell runs it through cswap".to_string()
+                    } else if installed {
                         h.name().to_string()
                     } else {
                         format!("{} · not installed", h.name())
                     },
-                    enabled: installed,
+                    // A shim covers every shell: nothing to choose here.
+                    enabled: installed && !shimmed,
                     was: on,
                     on,
                 }
@@ -1742,16 +1748,118 @@ impl App {
         });
     }
 
+    /// The agents that go through cswap whatever starts them.
+    pub fn shims_menu(&mut self) {
+        let chosen = crate::shim::chosen(&self.settings);
+        let items = Harness::ALL
+            .into_iter()
+            .map(|h| {
+                let installed = self.derived.bins.get(&h).is_some_and(|b| b.is_some());
+                let on = chosen.contains(&h);
+                TickItem {
+                    id: h.id().to_string(),
+                    label: h.spec().bins[0].to_string(),
+                    detail: if installed {
+                        h.name().to_string()
+                    } else {
+                        format!("{} · not installed", h.name())
+                    },
+                    enabled: installed || on,
+                    was: on,
+                    on,
+                }
+            })
+            .collect();
+        self.modal = Some(Modal::Ticks {
+            title: "Agents with a PATH shim".to_string(),
+            hint: "saving adds one line to your login files · none ticked removes it again"
+                .to_string(),
+            items,
+            sel: 0,
+            then: Ticks::Shims,
+        });
+    }
+
     fn save_ticks(&mut self, then: Ticks, items: Vec<TickItem>) {
         if items.iter().all(|it| it.on == it.was) {
             self.say(Tone::Info, "Nothing changed.");
             return;
         }
         match then {
-            Ticks::Shell(name) => {
+            Ticks::Shims => {
                 let agents: Vec<Harness> = Harness::ALL
                     .into_iter()
                     .filter(|h| items.iter().any(|it| it.on && it.id == h.id()))
+                    .collect();
+                let saved = crate::shim::set(&agents);
+                self.reload();
+                let saved = match saved {
+                    Ok(saved) => saved,
+                    Err(e) => return self.fail(e),
+                };
+                if agents.is_empty() {
+                    let files: Vec<String> =
+                        saved.removed_from.iter().map(|f| paths::tilde(f)).collect();
+                    let mut body = vec!["The links are removed.".to_string()];
+                    if !files.is_empty() {
+                        body.push(format!("The PATH line is out of {}.", files.join(" and ")));
+                    }
+                    body.push(String::new());
+                    body.push(
+                        "Programs that are running keep the PATH they have. A shim that is gone"
+                            .to_string(),
+                    );
+                    body.push("is skipped, so the real agent starts.".to_string());
+                    self.modal = Some(Modal::Info {
+                        title: "PATH shims are off".to_string(),
+                        body,
+                    });
+                    return;
+                }
+                let bins: Vec<&str> = agents.iter().map(|h| h.spec().bins[0]).collect();
+                let mut body = Vec::new();
+                for file in &saved.added_to {
+                    body.push(format!("Added the PATH line to {}.", paths::tilde(file)));
+                }
+                if !body.is_empty() {
+                    body.push(String::new());
+                }
+                body.extend(
+                    [
+                        "When it takes hold:",
+                        "  · a new terminal: at once, when its shell loads cswap",
+                        "  · every other program: after your next login",
+                        "  · herdr, now: run this in a terminal outside herdr",
+                        "      hc server restart --fresh",
+                        "",
+                        "These agents now run through cswap in every shell, so their",
+                        "per-shell choice above is locked. Your lists are kept.",
+                        "",
+                        "Health says whether a bare launch reaches cswap from where the",
+                        "dashboard runs. Undo: tick none here, or `cswap shims off`.",
+                    ]
+                    .map(str::to_string),
+                );
+                self.modal = Some(Modal::Info {
+                    title: format!("PATH shims are on for {}", bins.join(", ")),
+                    body,
+                });
+            }
+            Ticks::Shell(name) => {
+                // An agent with a PATH shim is locked in the dialog. Its place
+                // on this shell's own list stays as it was, for when the shim
+                // goes.
+                let shimmed = crate::shim::chosen(&self.settings);
+                let listed = self.settings.shells.get(&name).cloned().unwrap_or_default();
+                let agents: Vec<Harness> = Harness::ALL
+                    .into_iter()
+                    .filter(|h| {
+                        if shimmed.contains(h) {
+                            listed.iter().any(|id| id == h.id())
+                        } else {
+                            items.iter().any(|it| it.on && it.id == h.id())
+                        }
+                    })
                     .collect();
                 let saved = crate::shell::set_chosen(&name, &agents);
                 self.reload();

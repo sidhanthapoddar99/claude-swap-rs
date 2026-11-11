@@ -786,6 +786,101 @@ fn an_update_check_can_be_asked_for_and_says_what_it_found() {
     assert!(text.contains("cswap update"), "{text}");
 }
 
+#[cfg(unix)]
+#[test]
+fn path_shims_are_turned_on_and_off_from_the_shell_tab() {
+    let sb = Sandbox::new();
+    sb.demo();
+    sb.fake_agents();
+    let (mut app, _rx) = app();
+    key(&mut app, KeyCode::Char('0'));
+    key(&mut app, KeyCode::Char(']'));
+    key(&mut app, KeyCode::Char(']'));
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("OTHER PROGRAMS"), "{text}");
+    let row = text.lines().find(|l| l.contains("PATH shims   ")).unwrap();
+    assert!(row.contains("off"), "{row}");
+
+    // The row comes after the shells. Enter opens the boxes, none ticked.
+    let at = app.derived.shells.len();
+    app.sel[Page::Settings.index()] = at;
+    key(&mut app, KeyCode::Enter);
+    let text = screen(&mut app, 132, 40);
+    show("settings/shims dialog", &text);
+    assert!(text.contains("Agents with a PATH shim"), "{text}");
+    assert!(text.contains("[ ] claude"), "{text}");
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::Enter);
+
+    // Saved: the link, the line in the login shell's file, and what to do next.
+    let text = screen(&mut app, 132, 40);
+    show("settings/shims on", &text);
+    assert!(text.contains("PATH shims are on for claude"), "{text}");
+    assert!(
+        text.contains("Added the PATH line to ~/.zprofile"),
+        "{text}"
+    );
+    assert!(text.contains("hc server restart --fresh"), "{text}");
+    assert_eq!(crate::store::Settings::load().unwrap().shims, ["claude"]);
+    let link = crate::shim::dir().join("claude");
+    assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+    let zprofile = crate::paths::home().join(".zprofile");
+    assert!(std::fs::read_to_string(&zprofile)
+        .unwrap()
+        .contains(".cswap/shims"));
+    key(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none());
+    let text = screen(&mut app, 132, 40);
+    let row = text.lines().find(|l| l.contains("PATH shims   ")).unwrap();
+    assert!(row.contains("claude"), "{row}");
+
+    // The shim covers every shell, so each shell shows claude as integrated
+    // and its tick there is locked, with the reason beside it.
+    let zsh = app
+        .derived
+        .shells
+        .iter()
+        .position(|s| s.name == "zsh")
+        .unwrap();
+    assert!(app.derived.shells[zsh].wraps(Harness::Claude));
+    assert!(!app.derived.shells[zsh].wraps(Harness::Codex));
+    app.sel[Page::Settings.index()] = zsh;
+    let text = screen(&mut app, 132, 40);
+    show("settings/shell with a shim", &text);
+    assert!(text.contains("tick here is locked"), "{text}");
+    key(&mut app, KeyCode::Enter);
+    let text = screen(&mut app, 132, 40);
+    show("settings/shell dialog with a shim", &text);
+    assert!(text.contains("PATH shim is on"), "{text}");
+    key(&mut app, KeyCode::Char(' ')); // claude: locked, stays ticked
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Char(' ')); // codex
+    key(&mut app, KeyCode::Enter);
+    // Only the choice that was open is stored: claude is not put on the list.
+    assert_eq!(
+        crate::store::Settings::load().unwrap().shells["zsh"],
+        ["codex"]
+    );
+    assert!(app.derived.shells[zsh].wraps(Harness::Claude));
+    app.modal = None;
+
+    // Unticked and saved, it is all gone again.
+    app.sel[Page::Settings.index()] = at;
+    key(&mut app, KeyCode::Enter);
+    assert!(screen(&mut app, 132, 40).contains("[x] claude"));
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::Enter);
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("PATH shims are off"), "{text}");
+    assert!(text.contains("out of ~/.zprofile"), "{text}");
+    assert!(crate::store::Settings::load().unwrap().shims.is_empty());
+    assert!(!crate::shim::dir().exists() && !zprofile.exists());
+    // The shell's own list is what counts again.
+    key(&mut app, KeyCode::Enter);
+    assert!(!app.derived.shells[zsh].wraps(Harness::Claude));
+    assert!(app.derived.shells[zsh].wraps(Harness::Codex));
+}
+
 #[test]
 fn the_shell_tab_lists_shells_and_a_dialog_wraps_agents_in_one() {
     let sb = Sandbox::new();

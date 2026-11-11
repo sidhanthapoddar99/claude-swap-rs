@@ -287,8 +287,26 @@ fn launch(
     if hs.announce && !quiet && std::io::stderr().is_terminal() {
         announce(&acc, via, note, settings);
     }
+    // With a PATH shim, `claude` on PATH is cswap. A wrapper of the user's
+    // that runs `claude` from PATH would then come straight back here, for
+    // ever. Count the returns and stop.
+    let now = crate::shim::now_ms();
+    let depth = crate::shim::guard_depth(now);
+    if depth >= crate::shim::GUARD_LIMIT {
+        bail!(
+            "{} keeps starting cswap again, {} times in a row, so it is not the real {}: \
+             it runs `{}` from PATH, which is cswap's shim. Point cswap at the real binary \
+             (CSWAP_{}_BIN, or Settings > Harness), or turn the shims off: cswap shims off",
+            bin.display(),
+            depth,
+            h.name(),
+            h.spec().bins[0],
+            h.id().to_uppercase()
+        );
+    }
     let mut cmd = Command::new(&bin);
     manage::apply_env(&mut cmd, &acc);
+    cmd.env(crate::shim::GUARD, format!("{}:{now}", depth + 1));
     cmd.args(args);
     sessions::register(&acc.key());
     match platform::become_program(cmd)? {}

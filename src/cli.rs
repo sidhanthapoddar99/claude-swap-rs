@@ -1070,14 +1070,237 @@ pub fn start(default_only: bool, agent: Option<&str>, args: Vec<String>) -> Resu
 
 pub fn shell_init(shell: &str) -> Result<()> {
     let settings = Settings::load()?;
-    // A function for every agent this shell wraps that is installed.
-    let agents: Vec<Harness> = shell::chosen(&settings, shell, |h| {
+    // A function for every agent this shell wraps that is installed: the
+    // ones on its list, and the ones with a PATH shim, which cover every
+    // shell.
+    let agents: Vec<Harness> = shell::wrapped(&settings, shell, |h| {
         HarnessSettings::load(h).map(|s| s.wrapped).unwrap_or(true)
     })
     .into_iter()
     .filter(|h| manage::installed(*h))
     .collect();
     print!("{}", shell::init_text(shell, &agents)?);
+    // With shims on, their folder goes first again after the rc file's own
+    // changes to PATH.
+    print!("{}", crate::shim::init_text(shell, &settings));
+    Ok(())
+}
+
+/// One line per agent: whether a bare launch reaches cswap from here.
+fn shim_lines(p: &Paint, agents: &[Harness]) {
+    use crate::shim::State;
+    for h in agents {
+        let bin = h.spec().bins[0];
+        match crate::shim::state(*h) {
+            State::Active => println!("  {} {bin} runs through cswap from here", p.ok("✓")),
+            State::Broken => println!(
+                "  {} {bin}: its shim is missing or leads to another cswap. Run: cswap shims on",
+                p.warn("▲")
+            ),
+            State::Shadowed(first) => println!(
+                "  {} {bin}: {} comes first on PATH here, so a bare `{bin}` skips cswap",
+                p.warn("▲"),
+                paths::tilde(&first)
+            ),
+            State::OffPath => println!(
+                "  {} {bin}: {} is not on PATH here yet",
+                p.warn("▲"),
+                paths::tilde(&crate::shim::dir())
+            ),
+        }
+    }
+}
+
+/// One line per agent: what herdr itself starts for its bare name. False when
+/// herdr answers and any of them is not cswap. Silent when herdr is not here.
+fn herdr_lines(p: &Paint, agents: &[Harness]) -> bool {
+    let mut ok = true;
+    for (h, first, ours) in crate::shim::seen_by_herdr(agents).unwrap_or_default() {
+        let bin = h.spec().bins[0];
+        if ours {
+            println!("  {} herdr starts a bare {bin} through cswap", p.ok("✓"));
+            continue;
+        }
+        ok = false;
+        match first {
+            Some(first) => println!(
+                "  {} herdr still starts {} for a bare {bin}: it keeps the PATH it started with",
+                p.warn("▲"),
+                paths::tilde(&first)
+            ),
+            None => println!("  {} herdr finds no {bin} at all", p.warn("▲")),
+        }
+    }
+    ok
+}
+
+/// What has to happen before a new PATH is seen, said once.
+fn shim_when(p: &Paint) {
+    println!(
+        "{}",
+        p.dim("A new terminal sees it at once when its shell loads cswap, and every program after your next login.")
+    );
+    println!(
+        "{}",
+        p.dim("herdr keeps the PATH it started with. To give it the new one now, run in a terminal outside herdr:")
+    );
+    println!("{}", p.dim("  hc server restart --fresh"));
+}
+
+/// `cswap shims`: where the PATH shims stand.
+pub fn shims_status() -> Result<bool> {
+    let p = Paint::stdout();
+    let settings = Settings::load()?;
+    if !crate::shim::supported() {
+        println!("PATH shims are for Linux and macOS. On Windows, use the shell integration.");
+        return Ok(true);
+    }
+    let agents = crate::shim::chosen(&settings);
+    if agents.is_empty() {
+        println!("PATH shims are off.");
+        println!(
+            "{}",
+            p.dim("With them on, an agent started by any program (herdr, a script) goes through cswap, not only one typed in a shell.")
+        );
+        println!("{}", p.dim("Turn them on with: cswap shims on"));
+        return Ok(true);
+    }
+    println!(
+        "PATH shims are on: {} in {}",
+        agents
+            .iter()
+            .map(|h| h.spec().bins[0])
+            .collect::<Vec<_>>()
+            .join(", "),
+        paths::tilde(&crate::shim::dir())
+    );
+    shim_lines(&p, &agents);
+    let mut ok = agents
+        .iter()
+        .all(|h| crate::shim::state(*h) == crate::shim::State::Active);
+    ok &= herdr_lines(&p, &agents);
+    if !ok {
+        shim_when(&p);
+    }
+    Ok(ok)
+}
+
+/// `cswap shims on [agents…]`: every installed agent when none is named.
+pub fn shims_on(names: &[String]) -> Result<()> {
+    let p = Paint::stdout();
+    let agents: Vec<Harness> = if names.is_empty() {
+        Harness::ALL
+            .into_iter()
+            .filter(|h| manage::installed(*h))
+            .collect()
+    } else {
+        let mut out = Vec::new();
+        for name in names {
+            let h = harness(name)?;
+            if !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        out
+    };
+    if agents.is_empty() {
+        bail!("no agent is installed, so there is nothing to make a shim for");
+    }
+    let saved = crate::shim::set(&agents)?;
+    println!(
+        "PATH shims are on for {}.",
+        agents
+            .iter()
+            .map(|h| h.spec().bins[0])
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for file in &saved.added_to {
+        println!("Added the PATH line to {}.", paths::tilde(file));
+    }
+    shim_lines(&p, &agents);
+    herdr_lines(&p, &agents);
+    shim_when(&p);
+    println!(
+        "{}",
+        p.dim("These agents now run through cswap in every shell, so their per-shell choice in Settings > Shell is locked. The lists are kept.")
+    );
+    println!("{}", p.dim("Undo all of it with: cswap shims off"));
+    Ok(())
+}
+
+/// `cswap shims off`: the links, the folder and the PATH lines go.
+pub fn shims_off() -> Result<()> {
+    let saved = crate::shim::set(&[])?;
+    println!("PATH shims are off. The links are removed.");
+    for file in &saved.removed_from {
+        println!("Took the PATH line out of {}.", paths::tilde(file));
+    }
+    println!(
+        "{}",
+        Paint::stdout().dim("Programs that are already running keep the PATH they have; a shim that is gone is skipped, so the real agent starts.")
+    );
+    Ok(())
+}
+
+/// `cswap uninstall`: undo what cswap wrote outside its own folder, and say
+/// what is left. The logins and the binary are the user's to delete.
+pub fn uninstall(yes: bool) -> Result<()> {
+    let p = Paint::stdout();
+    if !yes
+        && !confirm("Remove cswap's PATH shims and the cswap lines in your shell and login files?")?
+    {
+        println!("Nothing was changed.");
+        return Ok(());
+    }
+    if crate::shim::supported() {
+        let saved = crate::shim::set(&[])?;
+        println!("PATH shims: removed.");
+        for file in &saved.removed_from {
+            println!("  took the PATH line out of {}", paths::tilde(file));
+        }
+    }
+    for name in shell::KNOWN {
+        if shell::remove_line(name)? {
+            if let Some(rc) = shell::rc_file(name) {
+                println!(
+                    "Shell integration: took the cswap line out of {}",
+                    paths::tilde(&rc)
+                );
+            }
+        }
+    }
+    Settings::update(|s| s.shells.clear())?;
+
+    println!();
+    println!(
+        "{}",
+        p.bold("Left for you, because cswap cannot undo them:")
+    );
+    let exe = std::env::current_exe().ok();
+    if let Some(exe) = &exe {
+        println!("  the binary          rm {}", paths::tilde(exe));
+    }
+    println!(
+        "  accounts and logins rm -rf {}",
+        paths::tilde(&paths::root())
+    );
+    println!(
+        "{}",
+        p.dim("      That folder holds every account's login. Sign in to what you still need first, with the agent itself.")
+    );
+    if matches!(
+        crate::integration::state(),
+        crate::integration::State::Installed { .. }
+    ) {
+        let home = paths::tilde(&crate::integration::herdr_home());
+        println!("  the herdr layout    switch herdr to another layout, then:");
+        println!("                      rm -r {home}/layouts/cswap.* {home}/mods/cswap-*");
+    }
+    println!(
+        "{}",
+        p.dim("Open terminals keep the wrappers until they are closed. The agents' own folders were never changed.")
+    );
     Ok(())
 }
 

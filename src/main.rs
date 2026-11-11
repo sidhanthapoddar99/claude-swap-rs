@@ -28,6 +28,7 @@ mod platform;
 mod refresh;
 mod sessions;
 mod shell;
+mod shim;
 mod store;
 mod suggest;
 mod sync;
@@ -95,6 +96,17 @@ enum HerdrCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ShimsCmd {
+    /// Make shims: for the agents named, or every installed one
+    On {
+        /// claude, codex, agy, grok
+        agents: Vec<String>,
+    },
+    /// Remove the shims and the PATH lines
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -265,6 +277,25 @@ enum Cmd {
         shell: String,
     },
 
+    /// PATH shims: agents started by other programs go through cswap too
+    #[command(
+        after_help = "Examples:\n  cswap shims                where they stand\n  cswap shims on             a shim for every installed agent\n  cswap shims on claude      only for Claude Code\n  cswap shims off            remove them and the PATH lines again\n\nA shim is a link named after an agent, in ~/.cswap/shims, which is put first\non PATH in your login files. A program that starts `claude` itself, such as\nherdr, then reaches cswap. Off by default. Linux and macOS."
+    )]
+    Shims {
+        #[command(subcommand)]
+        what: Option<ShimsCmd>,
+    },
+
+    /// Undo what cswap wrote outside ~/.cswap: shims and shell lines
+    #[command(
+        after_help = "Removes the PATH shims with their lines in your login files, and the cswap\nline in your shells' rc files. It then prints the two commands that delete\nthe binary and ~/.cswap. It does not run them: that folder holds your logins."
+    )]
+    Uninstall {
+        /// Do not ask first
+        #[arg(short, long)]
+        yes: bool,
+    },
+
     /// Install the latest release
     #[command(visible_alias = "upgrade")]
     Update {
@@ -379,6 +410,14 @@ fn help(p: &Paint) -> String {
                 ),
                 ("update", "install the latest release (--check only looks)"),
                 (
+                    "shims [on|off]",
+                    "PATH shims: agents started by other programs use cswap too",
+                ),
+                (
+                    "uninstall",
+                    "undo the shims and the lines in your shell files",
+                ),
+                (
                     "herdr switch <t> <acct>",
                     "move a herdr terminal's agent to another account",
                 ),
@@ -460,6 +499,13 @@ fn run() -> Result<ExitCode> {
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
 
+    // Started through a PATH shim, under an agent's own name: every word
+    // belongs to the agent.
+    if let Some(h) = shim::invoked_as() {
+        wrap::run(h, args)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
     // An agent's name first: the rest belongs to the agent, word for word.
     if let Some(h) = args.first().and_then(|a| Harness::from_id(a)) {
         wrap::run(h, args[1..].to_vec())?;
@@ -538,6 +584,14 @@ fn run() -> Result<ExitCode> {
         Cmd::Migrate => migrate::run()?,
         Cmd::ShellInit { shell } => cli::shell_init(&shell)?,
         Cmd::Update { check } => update::run(check)?,
+        Cmd::Shims { what: None } => ok = cli::shims_status()?,
+        Cmd::Shims {
+            what: Some(ShimsCmd::On { agents }),
+        } => cli::shims_on(&agents)?,
+        Cmd::Shims {
+            what: Some(ShimsCmd::Off),
+        } => cli::shims_off()?,
+        Cmd::Uninstall { yes } => cli::uninstall(yes)?,
     }
     if !quiet {
         if let Ok(settings) = store::Settings::load() {

@@ -100,7 +100,7 @@ fn kept_options(h: Harness, old_args: &[String]) -> Vec<String> {
 
 /// Run `hc` and return what it printed. `CSWAP_HC` names another program,
 /// which is what the tests use.
-fn hc(args: &[&str]) -> Result<String> {
+pub(crate) fn hc(args: &[&str]) -> Result<String> {
     let bin = std::env::var_os("CSWAP_HC").unwrap_or_else(|| "hc".into());
     let out = Command::new(&bin)
         .args(args)

@@ -59,6 +59,8 @@ pub enum Id {
     CliIdentity(Harness),
     /// The agents a shell wraps: an index into the shells found.
     Shell(usize),
+    /// The agents that have a PATH shim.
+    Shims,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +282,27 @@ fn harness(app: &App) -> Vec<Row> {
 
 /// What a shell's row means, and what enter does to it.
 fn shell_help(sh: &shell::Status) -> String {
+    if !sh.shimmed.is_empty() {
+        let bins: Vec<&str> = sh.shimmed.iter().map(|h| h.spec().bins[0]).collect();
+        let (it, has, its) = if bins.len() == 1 {
+            ("it", "has", "its")
+        } else {
+            ("they", "have", "their")
+        };
+        let line = match (&sh.rc, sh.loaded) {
+            (Some(rc), Some(true)) => format!(
+                " {} loads cswap, which keeps the shims first on PATH in {}.",
+                paths::tilde(rc),
+                sh.name
+            ),
+            _ => String::new(),
+        };
+        return format!(
+            "{} {has} a PATH shim, so {it} run{} through cswap in every shell and {its} tick here is locked. Turn the shim off under PATH shims to choose per shell again.{line} Enter chooses the other agents.",
+            bins.join(", "),
+            if bins.len() == 1 { "s" } else { "" },
+        );
+    }
     match (&sh.rc, sh.loaded) {
         (Some(rc), Some(true)) => format!(
             "{} loads cswap. An integrated agent runs through cswap when you type its name in {}, so it starts on the account cswap picks. Enter chooses the agents.",
@@ -324,6 +347,25 @@ fn shells(app: &App) -> Vec<Row> {
         ));
     }
     out[0].group = Some(("Integration".to_string(), None));
+    if crate::shim::supported() {
+        let on: Vec<&str> = crate::shim::chosen(&app.settings)
+            .iter()
+            .map(|h| h.spec().bins[0])
+            .collect();
+        out.push(
+            button(
+                Id::Shims,
+                "PATH shims",
+                if on.is_empty() {
+                    "off".to_string()
+                } else {
+                    on.join(", ")
+                },
+                "Off unless you turn it on. Shell integration only works where you type. A PATH shim sends an agent through cswap whatever starts it: herdr running `hc run claude …`, a script, another agent. It is a link in ~/.cswap/shims and one line in your login files. Enter chooses the agents; none removes it all.",
+            )
+            .under("Other programs", None),
+        );
+    }
     out.push(
         note(
             "Pick an account once",
@@ -443,6 +485,12 @@ pub fn change(app: &mut App, dir: i32) {
         Id::Shell(at) => {
             if dir == 0 {
                 app.shell_menu(at);
+            }
+            return;
+        }
+        Id::Shims => {
+            if dir == 0 {
+                app.shims_menu();
             }
             return;
         }

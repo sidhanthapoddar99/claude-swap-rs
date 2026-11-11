@@ -21,8 +21,9 @@ running on one now.
 
 ## Starting another agent
 
-Start it as `cswap <agent>`, never by its bare name. A bare `claude` skips
-cswap and runs on the root login, whatever account you are on.
+Start it as `cswap <agent>`, never by its bare name. A bare `claude` reaches
+cswap only where the user turned PATH shims on (`cswap shims` says). Anywhere
+else it skips cswap and runs on the root login, whatever account you are on.
 
   cswap claude "<task>"                    the account you are on (see below)
   cswap claude --cswap=work "<task>"       the account named work
@@ -71,7 +72,7 @@ number within the agent (2) and its email. `root` is the agent's own login.
 ## Leave these to the user
 
   add, login, remove, rename, alias, use, migrate, update, sync --repair,
-  herdr install
+  herdr install, shims on, shims off, uninstall
       They change the user's logins, defaults or setup. Ask first.
   Files under ~/.cswap/accounts/*/config_dir hold tokens. Do not read, print
   or copy them.
