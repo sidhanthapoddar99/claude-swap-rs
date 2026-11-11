@@ -70,7 +70,7 @@ impl Page {
             Page::Sync => "what each account shares with the agent's own config dir",
             Page::Usage => "weekly limits, pace and when each one resets",
             Page::Accounts => "sign in, label, set defaults and renewals",
-            Page::Resets => "resets you can still spend, and what resets when",
+            Page::Resets => "what resets when, and the resets you hold · view only",
             Page::Analytics => "how fast each account burns through its week",
             Page::Health => "checks for the problems that are otherwise silent",
             Page::Settings => "refresh, defaults, wrapping and sync rules",

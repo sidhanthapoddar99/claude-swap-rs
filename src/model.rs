@@ -48,6 +48,18 @@ pub struct Window {
 }
 
 impl Window {
+    /// The stretch of time this limit covers, as a word for a sentence:
+    /// `week`. The label cannot stand in for it, because it may name a group
+    /// of models instead (`Gemini`).
+    pub fn period(&self) -> &str {
+        match self.kind {
+            WindowKind::Weekly => "week",
+            WindowKind::Monthly => "month",
+            WindowKind::Daily => "day",
+            _ => &self.label,
+        }
+    }
+
     /// Usage right now. A window whose reset time has passed since the fetch
     /// has started again from zero, whatever the stored number says.
     pub fn used_now(&self, now: DateTime<Utc>) -> f64 {

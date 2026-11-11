@@ -172,7 +172,7 @@ Run `cswap` with no arguments. Keys: `1`–`8` or the arrow keys to move, `Enter
 | **Sync** | Per account: what is linked, what is private, what is shadowed, and when it was last synced. |
 | **Usage** | One card per account: the weekly limit with a pace marker, the day and time it resets, extra usage, spare resets. |
 | **Accounts** | Add, sign in, alias, set default, remove. Plan, renewal date, how long the login is valid, where it lives. |
-| **Resets** | Resets you can still spend and when they expire, then a timeline of what resets, renews or expires next. |
+| **Resets** | Four parts: everything coming up in one list by time, the spare resets you hold and when they expire, when each weekly limit resets, and when each plan renews. |
 | **Analytics** | Burn rate per account over the last week and where it lands at the reset. More is planned. |
 | **Health** | Anything that needs attention: signed-out accounts, shadowed files, a missing shell integration. |
 | **Settings** | General settings, one tab per agent, and the shell line to copy. |
@@ -225,7 +225,7 @@ update                     install the latest release         (--check)
 | Claude Code | session, week, per-model week, extra usage | count and expiry | yes | set by hand |
 | Codex | session, week | count and expiry | yes | yes |
 | Grok Build | monthly credits | not reported | yes | not reported |
-| Antigravity | through `agy /usage` (experimental) | not reported | not reported | not reported |
+| Antigravity | week and 5-hour, per group of models, through `agy /usage` | not reported | not reported | not reported |
 
 Where the vendor does not report a renewal date or a reset, you can note it by hand on the Accounts page.
 

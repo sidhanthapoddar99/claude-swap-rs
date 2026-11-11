@@ -277,31 +277,64 @@ struct Bucket {
     resets_at: Option<DateTime<Utc>>,
 }
 
+/// A group's name as a short label: `Gemini Models` is `Gemini`, and
+/// `Claude and GPT models` is `Claude & GPT`.
+fn tidy(name: &str) -> String {
+    let name = name.trim();
+    let cut = name.len().saturating_sub(7);
+    let name = match name.get(cut..) {
+        Some(tail) if tail.eq_ignore_ascii_case(" models") => &name[..cut],
+        _ => name,
+    };
+    name.replace(" and ", " & ")
+}
+
+/// A quota bucket, if `v` is one. A bucket inside a group is named after the
+/// group (`owner`): its own name only says which window it is, such as
+/// "Weekly Limit Remaining".
+fn bucket(v: &Value, owner: Option<&str>, fallback: Option<&str>) -> Option<Bucket> {
+    let quota = get(v, &["quotaInfo", "quota_info"]).unwrap_or(v);
+    let fraction = get(quota, &["remainingFraction", "remaining_fraction"])
+        .and_then(|f| f.as_f64().or_else(|| f.as_str()?.parse().ok()))?;
+    if get(v, &["disabled"]).and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let label = owner
+        .map(String::from)
+        .or_else(|| text(v, &["displayName", "display_name"]))
+        .or_else(|| text(v, &["modelId", "model_id", "bucketId", "bucket_id", "name"]))
+        .or_else(|| fallback.map(String::from))
+        .unwrap_or_else(|| "quota".to_string());
+    Some(Bucket {
+        label,
+        window: text(v, &["window", "refreshWindowLabel", "refresh_window_label"])
+            .unwrap_or_default(),
+        used_pct: ((1.0 - fraction) * 100.0).clamp(0.0, 100.0),
+        resets_at: get(quota, &["resetTime", "reset_time"]).and_then(time),
+    })
+}
+
 /// Collect every object that looks like a quota bucket, wherever it sits.
 fn walk(v: &Value, group: Option<&str>, out: &mut Vec<Bucket>) {
     match v {
         Value::Array(items) => items.iter().for_each(|i| walk(i, group, out)),
         Value::Object(map) => {
-            let quota = get(v, &["quotaInfo", "quota_info"]).unwrap_or(v);
-            let fraction = get(quota, &["remainingFraction", "remaining_fraction"])
-                .and_then(|f| f.as_f64().or_else(|| f.as_str()?.parse().ok()));
-            let disabled = get(v, &["disabled"]).and_then(Value::as_bool) == Some(true);
-            let name = text(v, &["displayName", "display_name"]);
-            if let (Some(fraction), false) = (fraction, disabled) {
-                let label = name
-                    .clone()
-                    .or_else(|| text(v, &["modelId", "model_id", "bucketId", "bucket_id", "name"]))
-                    .or_else(|| group.map(String::from))
-                    .unwrap_or_else(|| "quota".to_string());
-                out.push(Bucket {
-                    label,
-                    window: text(v, &["window", "refreshWindowLabel", "refresh_window_label"])
-                        .unwrap_or_default(),
-                    used_pct: ((1.0 - fraction) * 100.0).clamp(0.0, 100.0),
-                    resets_at: get(quota, &["resetTime", "reset_time"]).and_then(time),
-                });
+            // What agy 1.5 prints: groups of models, each with its buckets.
+            if let Some(Value::Array(items)) = get(v, &["buckets"]) {
+                let owner = text(v, &["displayName", "display_name", "name"]).map(|n| tidy(&n));
+                for item in items {
+                    match bucket(item, owner.as_deref(), group) {
+                        Some(b) => out.push(b),
+                        None => walk(item, owner.as_deref().or(group), out),
+                    }
+                }
                 return;
             }
+            if let Some(b) = bucket(v, None, group) {
+                out.push(b);
+                return;
+            }
+            let name = text(v, &["displayName", "display_name"]);
             let group = name.as_deref().or(group);
             for (key, child) in map {
                 // A map of models keyed by id: the key is the best name.
@@ -414,40 +447,29 @@ pub(crate) fn parse(stdout: &str, now: DateTime<Utc>) -> Fetch<(Snapshot, Local)
             }
         })
         .collect();
-    // Antigravity meters each model group on its own. The fullest weekly
-    // bucket stands for the account; the others are shown as scoped limits.
-    // The same goes for the short window.
-    for (kind, scoped) in [
-        (WindowKind::Weekly, WindowKind::WeeklyScoped),
-        (WindowKind::Session, WindowKind::Other),
-    ] {
-        let lead = windows
+    // Antigravity meters each group of models on its own. The fullest weekly
+    // bucket stands for the account and the others are shown as scoped
+    // limits, each under its group's name. Of the short windows only the
+    // fullest is kept: it is the one that can stop you.
+    for (kind, short) in [(WindowKind::Weekly, "week"), (WindowKind::Session, "5h")] {
+        let of_kind: Vec<usize> = (0..windows.len())
+            .filter(|i| windows[*i].kind == kind)
+            .collect();
+        let Some(lead) = of_kind
             .iter()
-            .enumerate()
-            .filter(|(_, w)| w.kind == kind)
-            .max_by(|a, b| a.1.used_pct.total_cmp(&b.1.used_pct))
-            .map(|(i, _)| i);
-        let many = windows.iter().filter(|w| w.kind == kind).count() > 1;
-        for (i, w) in windows.iter_mut().enumerate() {
-            if w.kind != kind {
-                continue;
-            }
-            let short = if kind == WindowKind::Weekly {
-                "week"
+            .copied()
+            .max_by(|a, b| windows[*a].used_pct.total_cmp(&windows[*b].used_pct))
+        else {
+            continue;
+        };
+        if of_kind.len() == 1 || kind == WindowKind::Session {
+            windows[lead].label = short.to_string();
+        }
+        for i in of_kind.into_iter().rev().filter(|i| *i != lead) {
+            if kind == WindowKind::Session {
+                windows.remove(i);
             } else {
-                "5h"
-            };
-            if Some(i) == lead {
-                w.label = if many {
-                    format!("{short} · {}", w.label)
-                } else {
-                    short.to_string()
-                };
-            } else {
-                w.kind = scoped;
-                if kind == WindowKind::Session {
-                    w.label = format!("{} 5h", w.label);
-                }
+                windows[i].kind = WindowKind::WeeklyScoped;
             }
         }
     }
@@ -541,12 +563,49 @@ mod tests {
         ]});
         let (snap, _) = parse(&doc.to_string(), now).unwrap();
         let lead = snap.weekly().unwrap();
-        assert_eq!(lead.label, "week · Pro");
+        assert_eq!(lead.label, "Pro");
         assert_eq!(lead.used_pct.round(), 80.0);
         assert!(snap
             .windows
             .iter()
             .any(|w| w.kind == WindowKind::WeeklyScoped && w.label == "Flash"));
+    }
+
+    #[test]
+    fn groups_of_models_as_agy_prints_them() {
+        let now = Utc::now();
+        let t = |hours: i64| (now + Duration::hours(hours)).to_rfc3339();
+        // The shape of `agy -p /usage --output-format json`, agy 1.5.
+        let doc = json!({"status": "SUCCESS", "command": {"name": "usage", "data": {"groups": [
+            {"name": "Gemini Models", "buckets": [
+                {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "window": "weekly",
+                 "remaining_fraction": 0.98, "reset_time": t(80)},
+                {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "5h",
+                 "remaining_fraction": 1, "reset_time": t(4)}
+            ]},
+            {"name": "Claude and GPT models", "buckets": [
+                {"id": "3p-weekly", "name": "Weekly Limit Remaining", "window": "weekly",
+                 "remaining_fraction": 1, "reset_time": t(160)},
+                {"id": "3p-5h", "name": "Five Hour Limit Remaining", "window": "5h",
+                 "remaining_fraction": 0.5, "reset_time": t(4)}
+            ]}
+        ]}}});
+        let (snap, _) = parse(&doc.to_string(), now).unwrap();
+        let seen: Vec<(WindowKind, &str, f64)> = snap
+            .windows
+            .iter()
+            .map(|w| (w.kind, w.label.as_str(), w.used_pct.round()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (WindowKind::Session, "5h", 50.0),
+                (WindowKind::Weekly, "Gemini", 2.0),
+                (WindowKind::WeeklyScoped, "Claude & GPT", 0.0),
+            ]
+        );
+        assert_eq!(tidy("Gemini Models"), "Gemini");
+        assert_eq!(tidy("models"), "models");
     }
 
     #[test]

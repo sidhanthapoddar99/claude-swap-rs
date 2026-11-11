@@ -117,7 +117,7 @@ fn judge(acc: &Account, settings: &Settings, now: DateTime<Utc>) -> (Pick, Optio
         if used >= settings.auto_skip_above_pct {
             return blocked(
                 acc,
-                format!("{} at {used:.0}%, nothing left to plan with", w.label),
+                format!("{} at {used:.0}%, nothing left to plan with", w.period()),
                 w.resets_at,
             );
         }
@@ -136,11 +136,11 @@ fn judge(acc: &Account, settings: &Settings, now: DateTime<Utc>) -> (Pick, Optio
             Some(t) if t > now => {
                 format!(
                     "{left:.0}% of the {} left, resets in {}",
-                    w.label,
+                    w.period(),
                     model::span(t - now)
                 )
             }
-            _ => format!("fresh {}, {left:.0}% left", w.label),
+            _ => format!("fresh {}, {left:.0}% left", w.period()),
         };
         if burn >= 2.0 && left >= 15.0 {
             reasons.push(format!("{headline}: use it or lose it"));

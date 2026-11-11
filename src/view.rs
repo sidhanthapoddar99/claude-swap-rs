@@ -131,7 +131,7 @@ pub fn pace_text(w: &Window, now: DateTime<Utc>, clock_24h: bool) -> Option<(Str
     let used = w.used_now(now);
     let (reset, secs) = (w.resets_at?, w.window_secs?);
     if elapsed < 5.0 {
-        return Some((format!("the {} has only just started", w.label), false));
+        return Some((format!("the {} has only just started", w.period()), false));
     }
     if used >= 99.5 {
         return None;
@@ -154,7 +154,7 @@ pub fn pace_text(w: &Window, now: DateTime<Utc>, clock_24h: bool) -> Option<(Str
     Some((
         format!(
             "{used:.0}% used with {elapsed:.0}% of the {} gone: on pace for {projected:.0}% by the reset",
-            w.label
+            w.period()
         ),
         false,
     ))
@@ -181,17 +181,16 @@ pub fn credits_text(c: &crate::model::Credits) -> Option<String> {
     })
 }
 
-// ------------------------------------------------------------------ timeline
+// -------------------------------------------------------------------- resets
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// A spare reset that can still be spent.
-    Grant,
-    /// A usage window going back to zero on its own.
-    Window,
+    /// A spare reset that can still be spent. Its time is when it expires.
+    Spare,
+    /// One or more limits of an account going back to zero at the same moment.
+    Limit,
     Renewal,
     PlanEnds,
-    LoginExpires,
 }
 
 /// One line of the resets view.
@@ -199,20 +198,26 @@ pub enum Kind {
 pub struct Event {
     pub kind: Kind,
     pub key: String,
-    /// When it happens; for a grant, when it expires.
+    /// When it happens; for a spare reset, when it expires.
     pub at: Option<DateTime<Utc>>,
     /// True when only the day is known.
     pub date_only: bool,
+    /// The type column: `weekly`, `monthly`, `spare`, `renews`, `ends`.
+    pub tag: &'static str,
+    /// What resets: `week + Fable`, `all limits`. For a renewal, the plan.
     pub what: String,
     pub note: String,
+    /// For a limit: how full the fullest of its windows is.
+    pub used: Option<f64>,
 }
 
 impl Event {
-    /// `Sat 14 Nov · 09:30`, or just the day when the time is not known.
-    pub fn when(&self, now: DateTime<Utc>, clock_24h: bool) -> String {
+    /// The exact date. The time of day is given only within two days, where
+    /// it matters; further out the day is enough.
+    pub fn date(&self, now: DateTime<Utc>, clock_24h: bool) -> String {
         match self.at {
             None => "never".to_string(),
-            Some(at) if self.date_only => at
+            Some(at) if self.date_only || at - now > Duration::days(2) => at
                 .with_timezone(&chrono::Local)
                 .format("%a %-d %b")
                 .to_string(),
@@ -248,32 +253,46 @@ fn noon(date: chrono::NaiveDate) -> DateTime<Utc> {
 }
 
 /// Every spare reset, soonest to expire first; the ones that never expire
-/// come last.
+/// come last. Resets of one account that are alike in every way are one line
+/// with a count.
 pub fn grants(reg: &Registry, now: DateTime<Utc>) -> Vec<Event> {
     let mut out = Vec::new();
     for acc in &reg.accounts {
+        let mut merged: Vec<crate::model::Grant> = Vec::new();
         for g in acc.grants(now) {
+            match merged.iter_mut().find(|m| {
+                m.scope == g.scope
+                    && m.expires_at == g.expires_at
+                    && m.source == g.source
+                    && m.usable_now == g.usable_now
+            }) {
+                Some(m) => m.count += g.count,
+                None => merged.push(g),
+            }
+        }
+        for g in merged {
             let mut note = match g.source {
-                Source::Api => format!("reported by {}", acc.harness.spec().vendor),
+                Source::Api => format!("from {}", acc.harness.spec().vendor),
                 Source::Manual => "noted by hand".to_string(),
             };
             match g.usable_now {
-                Some(true) => note.push_str(" · can be spent now"),
+                Some(true) => note.push_str(" · spendable now"),
                 Some(false) => note.push_str(" · not spendable yet"),
                 None => {}
             }
-            let times = if g.count == 1 {
-                String::new()
-            } else {
-                format!("{} × ", g.count)
-            };
             out.push(Event {
-                kind: Kind::Grant,
+                kind: Kind::Spare,
                 key: acc.key(),
                 at: g.expires_at,
                 date_only: false,
-                what: format!("{times}{} reset", g.scope),
+                tag: "spare",
+                what: if g.count == 1 {
+                    g.scope.clone()
+                } else {
+                    format!("{} × {}", g.count, g.scope)
+                },
                 note,
+                used: None,
             });
         }
     }
@@ -290,82 +309,111 @@ pub fn grant_count(reg: &Registry, now: DateTime<Utc>) -> u32 {
         .sum()
 }
 
-/// What resets, renews or runs out on its own, soonest first.
-pub fn upcoming(
-    reg: &Registry,
-    logged_in: &HashSet<String>,
-    local: &HashMap<String, Local>,
-    now: DateTime<Utc>,
-) -> Vec<Event> {
-    let today = store::today();
+/// A limit worth a line: the weekly and monthly ones. The short windows come
+/// round too often.
+fn long_window(w: &Window) -> bool {
+    match w.kind {
+        WindowKind::Weekly | WindowKind::WeeklyScoped | WindowKind::Monthly => true,
+        WindowKind::Other => w.window_secs.is_some_and(|s| s > 36 * 3600),
+        WindowKind::Session | WindowKind::Daily => false,
+    }
+}
+
+/// When each signed-in account's limits go back to zero, soonest first.
+/// Limits of one account that reset at the same moment are one line: Claude's
+/// week and its per-model week reset together, so they read `week + Fable`.
+pub fn limit_resets(reg: &Registry, logged_in: &HashSet<String>, now: DateTime<Utc>) -> Vec<Event> {
     let mut out = Vec::new();
     for acc in &reg.accounts {
         let key = acc.key();
-        if !logged_in.contains(&key) {
+        let Some(snap) = acc.snapshot().filter(|_| logged_in.contains(&key)) else {
             continue;
-        }
-        if let Some(snap) = acc.snapshot() {
-            for w in &snap.windows {
-                // The short window comes round too often to be worth a line.
-                if w.kind == WindowKind::Session {
-                    continue;
-                }
-                let Some(at) = w.resets_at.filter(|t| *t > now) else {
-                    continue;
-                };
-                out.push(Event {
-                    kind: Kind::Window,
-                    key: key.clone(),
-                    at: Some(at),
-                    date_only: false,
-                    what: format!("{} limit resets", w.label),
-                    note: format!("{:.0}% used now", w.used_now(now)),
-                });
+        };
+        // Grouped by the minute, in the order the windows are listed.
+        let mut groups: Vec<(DateTime<Utc>, Vec<&Window>)> = Vec::new();
+        for w in snap.windows.iter().filter(|w| long_window(w)) {
+            let Some(at) = w.resets_at.filter(|t| *t > now) else {
+                continue;
+            };
+            match groups
+                .iter_mut()
+                .find(|(t, _)| (*t - at).num_seconds().abs() < 60)
+            {
+                Some((_, ws)) => ws.push(w),
+                None => groups.push((at, vec![w])),
             }
         }
-        let billing = &acc.meta.billing;
-        if let Some(date) = billing.next(today).filter(|d| *d >= today) {
-            // The cycle is named only when it is known.
-            let cycle = billing
-                .cycle
-                .map(|c| format!("{} · ", c.label()))
-                .unwrap_or_default();
+        for (at, ws) in groups {
+            let labels: Vec<&str> = ws.iter().map(|w| w.label.as_str()).collect();
+            let note = if ws.len() == 1 {
+                format!("{:.0}% used", ws[0].used_now(now))
+            } else {
+                ws.iter()
+                    .map(|w| format!("{} {:.0}%", w.label, w.used_now(now)))
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            };
             out.push(Event {
-                kind: if billing.cancelled {
-                    Kind::PlanEnds
-                } else {
-                    Kind::Renewal
-                },
-                key: key.clone(),
-                at: Some(noon(date)),
-                date_only: true,
-                what: if billing.cancelled {
-                    "plan ends"
-                } else {
-                    "plan renews"
-                }
-                .to_string(),
-                note: match (billing.cancelled, billing.source) {
-                    (true, _) => "cancelled: use it up before then".to_string(),
-                    (false, Source::Api) => format!("{cycle}from the vendor"),
-                    (false, Source::Manual) => format!("{cycle}set by hand"),
-                },
-            });
-        }
-        if let Some(at) = local
-            .get(&key)
-            .and_then(|l| l.login_expires)
-            .filter(|t| *t > now && *t - now < Duration::days(60))
-        {
-            out.push(Event {
-                kind: Kind::LoginExpires,
+                kind: Kind::Limit,
                 key: key.clone(),
                 at: Some(at),
                 date_only: false,
-                what: "sign-in expires".to_string(),
-                note: "sign in again before then".to_string(),
+                tag: if ws.iter().all(|w| w.kind == WindowKind::Monthly) {
+                    "monthly"
+                } else {
+                    "weekly"
+                },
+                what: labels.join(" + "),
+                note,
+                used: ws.iter().map(|w| w.used_now(now)).reduce(f64::max),
             });
         }
+    }
+    out.sort_by_key(|r| r.at);
+    out
+}
+
+/// The combined view: every limit reset and every spare reset that expires,
+/// soonest first. Nothing else is in it.
+pub fn coming_up(reg: &Registry, logged_in: &HashSet<String>, now: DateTime<Utc>) -> Vec<Event> {
+    let mut out = limit_resets(reg, logged_in, now);
+    out.extend(grants(reg, now).into_iter().filter(|g| g.at.is_some()));
+    out.sort_by_key(|r| r.at);
+    out
+}
+
+/// When each plan renews or ends, soonest first.
+pub fn renewals(reg: &Registry) -> Vec<Event> {
+    let today = store::today();
+    let mut out = Vec::new();
+    for acc in &reg.accounts {
+        let billing = &acc.meta.billing;
+        let Some(date) = billing.next(today).filter(|d| *d >= today) else {
+            continue;
+        };
+        // The cycle is named only when it is known.
+        let cycle = billing
+            .cycle
+            .map(|c| format!("{} · ", c.label()))
+            .unwrap_or_default();
+        out.push(Event {
+            kind: if billing.cancelled {
+                Kind::PlanEnds
+            } else {
+                Kind::Renewal
+            },
+            key: acc.key(),
+            at: Some(noon(date)),
+            date_only: true,
+            tag: if billing.cancelled { "ends" } else { "renews" },
+            what: acc.meta.plan.clone().unwrap_or_default(),
+            note: match (billing.cancelled, billing.source) {
+                (true, _) => "cancelled: use it up before then".to_string(),
+                (false, Source::Api) => format!("{cycle}from the vendor"),
+                (false, Source::Manual) => format!("{cycle}set by hand"),
+            },
+            used: None,
+        });
     }
     out.sort_by_key(|r| r.at);
     out
@@ -410,60 +458,138 @@ mod tests {
     }
 
     #[test]
-    fn the_timeline_is_sorted_and_leaves_out_the_short_window() {
+    fn limits_that_reset_together_are_one_line_and_the_short_window_is_left_out() {
         let sb = Sandbox::new();
         let mut a = account(1);
         let mut b = account(2);
         sb.login(&a);
         sb.login(&b);
-        a.meta.refresh.data = Some(week(40.0, 50));
+        let now = Utc::now();
+        let mut snap = week(40.0, 50);
+        let at = snap.windows[1].resets_at;
+        snap.windows.push(Window {
+            kind: WindowKind::WeeklyScoped,
+            label: "Fable".into(),
+            used_pct: 70.0,
+            resets_at: at,
+            window_secs: Some(604800),
+        });
+        // A second group's short window, as Antigravity reports: never a line.
+        snap.windows.push(Window {
+            kind: WindowKind::Other,
+            label: "other 5h".into(),
+            used_pct: 0.0,
+            resets_at: Some(now + Duration::hours(3)),
+            window_secs: Some(18000),
+        });
+        a.meta.refresh.data = Some(snap);
         b.meta.refresh.data = Some(week(10.0, 5));
-        b.meta.billing = Billing {
+        let mut reg = Registry {
+            accounts: vec![a, b],
+        };
+        let (logged_in, _) = facts(&mut reg);
+        let events = limit_resets(&reg, &logged_in, now);
+        let lines: Vec<(&str, &str, &str)> = events
+            .iter()
+            .map(|e| (e.key.as_str(), e.tag, e.what.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ("claude-2", "weekly", "week"),
+                ("claude-1", "weekly", "week + Fable"),
+            ]
+        );
+        assert_eq!(events[1].note, "week 40% · Fable 70%");
+        assert_eq!(events[1].used.map(f64::round), Some(70.0));
+        assert_eq!(events[0].note, "10% used");
+    }
+
+    #[test]
+    fn coming_up_holds_resets_only_and_renewals_stand_apart() {
+        let sb = Sandbox::new();
+        let mut a = account(1);
+        sb.login(&a);
+        let now = Utc::now();
+        a.meta.refresh.data = Some(week(40.0, 50));
+        a.meta.plan = Some("Max".into());
+        a.meta.billing = Billing {
             cycle: Some(Cycle::Monthly),
             renews_on: Some(store::today() + Duration::days(1)),
             cancelled: false,
             source: Source::Manual,
         };
-        let mut reg = Registry {
-            accounts: vec![a, b],
-        };
-        let (logged_in, local) = facts(&mut reg);
-        let events = upcoming(&reg, &logged_in, &local, Utc::now());
-        let whats: Vec<(&str, &str)> = events
-            .iter()
-            .map(|e| (e.key.as_str(), e.what.as_str()))
-            .collect();
-        assert_eq!(
-            whats,
-            [
-                ("claude-2", "week limit resets"),
-                ("claude-2", "plan renews"),
-                ("claude-1", "week limit resets"),
-            ]
-        );
-        assert!(events[1].date_only);
-        assert_eq!(events[1].countdown(Utc::now()), "1 day");
-    }
-
-    #[test]
-    fn grants_sort_by_expiry_with_the_everlasting_last() {
-        let _sb = Sandbox::new();
-        let mut a = account(1);
         let grant = |days: Option<i64>| Grant {
-            scope: "weekly".into(),
-            count: 2,
-            expires_at: days.map(|d| Utc::now() + Duration::days(d)),
+            scope: "week".into(),
+            count: 1,
+            expires_at: days.map(|d| now + Duration::days(d)),
             note: String::new(),
             source: Source::Manual,
             usable_now: None,
         };
-        a.meta.grants = vec![grant(None), grant(Some(9)), grant(Some(2))];
+        a.meta.grants = vec![grant(Some(1)), grant(None)];
+        let mut reg = Registry { accounts: vec![a] };
+        let (logged_in, _) = facts(&mut reg);
+
+        // The spare reset that expires and the weekly reset, by time. The
+        // spare reset that never expires has no date, so it is not in here.
+        let coming = coming_up(&reg, &logged_in, now);
+        let tags: Vec<&str> = coming.iter().map(|e| e.tag).collect();
+        assert_eq!(tags, ["spare", "weekly"]);
+
+        let renew = renewals(&reg);
+        assert_eq!(renew.len(), 1);
+        assert_eq!((renew[0].tag, renew[0].what.as_str()), ("renews", "Max"));
+        assert_eq!(renew[0].note, "monthly · set by hand");
+        assert_eq!(renew[0].countdown(now), "1 day");
+    }
+
+    #[test]
+    fn the_time_of_day_is_given_only_within_two_days() {
+        let now = Utc::now();
+        let at = |hours: i64| Event {
+            kind: Kind::Limit,
+            key: "claude-1".into(),
+            at: Some(now + Duration::hours(hours)),
+            date_only: false,
+            tag: "weekly",
+            what: "week".into(),
+            note: String::new(),
+            used: None,
+        };
+        assert!(at(20).date(now, true).contains(':'));
+        assert!(at(47).date(now, true).contains(':'));
+        assert!(!at(49).date(now, true).contains(':'));
+        assert!(!at(24 * 9).date(now, true).contains(':'));
+    }
+
+    #[test]
+    fn grants_sort_by_expiry_and_alike_ones_are_counted_together() {
+        let _sb = Sandbox::new();
+        let mut a = account(1);
+        let now = Utc::now();
+        let late = now + Duration::days(9);
+        let grant = |at: Option<DateTime<Utc>>| Grant {
+            scope: "weekly".into(),
+            count: 2,
+            expires_at: at,
+            note: String::new(),
+            source: Source::Manual,
+            usable_now: None,
+        };
+        a.meta.grants = vec![
+            grant(None),
+            grant(Some(late)),
+            grant(Some(now + Duration::days(2))),
+            grant(Some(late)),
+        ];
         let reg = Registry { accounts: vec![a] };
-        let out = grants(&reg, Utc::now());
+        let out = grants(&reg, now);
         assert_eq!(out.len(), 3);
         assert!(out[0].at < out[1].at && out[2].at.is_none());
-        assert_eq!(out[0].what, "2 × weekly reset");
-        assert_eq!(grant_count(&reg, Utc::now()), 6);
+        assert_eq!(out[0].what, "2 × weekly");
+        assert_eq!(out[1].what, "4 × weekly");
+        assert_eq!(grant_count(&reg, now), 8);
     }
 
     #[test]

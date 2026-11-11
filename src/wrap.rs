@@ -150,7 +150,7 @@ fn announce(acc: &Account, via: Via, note: Option<&str>, settings: &Settings) {
         parts.push(acc.email().to_string());
     }
     if let Some(w) = acc.snapshot().and_then(|s| s.weekly()) {
-        let mut text = format!("{} {:.0}%", w.label, w.used_now(now));
+        let mut text = format!("{} {:.0}%", w.period(), w.used_now(now));
         if let Some(t) = w.resets_at.filter(|t| *t > now) {
             text.push_str(&format!(
                 ", resets {}",

@@ -76,13 +76,7 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
         ),
         (
             Page::Resets,
-            &[
-                "Spare resets",
-                "weekly reset",
-                "Coming up",
-                "plan ends",
-                "only shows",
-            ],
+            &["Coming up", "Spare resets", "Weekly", "Renewals", "TYPE"],
         ),
         (Page::Analytics, &["Burn rate", "PER DAY", "AT RESET"]),
         (Page::Health, &["Checks"]),

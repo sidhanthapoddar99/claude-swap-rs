@@ -332,7 +332,7 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
             let bar_w = room.saturating_sub(5 + 2 + 32).clamp(6, 28);
             lines.push(kv(
                 t,
-                &format!("This {}", win.label),
+                &format!("This {}", win.period()),
                 LABEL_W,
                 window_cells(app, win, bar_w, now),
             ));

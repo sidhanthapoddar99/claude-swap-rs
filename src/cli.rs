@@ -426,53 +426,87 @@ pub fn resets() -> Result<()> {
             .unwrap_or_else(|| key.to_string())
     };
 
-    let grants = view::grants(&c.reg, c.now);
-    println!("{}", p.bold("Spare resets"));
-    if grants.is_empty() {
-        println!("  {}", p.dim("none"));
-    }
-    for g in &grants {
-        let when = match g.at {
-            Some(at) => format!(
-                "expires {} · in {}",
-                model::landing(at, c.now, c.settings.clock_24h),
-                model::span(at - c.now)
-            ),
-            None => "does not expire".to_string(),
-        };
-        let urgent =
-            g.at.is_some_and(|at| at - c.now <= chrono::Duration::days(3));
+    // One table shape for all four parts, so the columns line up.
+    let table = |title: &str, heads: [&str; 3], rows: &[view::Event], empty: &str| {
+        println!("{}", p.bold(title));
+        if rows.is_empty() {
+            println!("  {}", p.dim(empty));
+            return;
+        }
         println!(
-            "  {} {} {}  {}",
-            fit(&name(&g.key), 30),
-            p.info(&fit(&g.what, 18)),
-            if urgent {
-                p.warn(&fit(&when, 40))
-            } else {
-                fit(&when, 40)
-            },
-            p.dim(&g.note)
+            "  {}",
+            p.dim(&format!(
+                "{} {} {} {} {}",
+                fit("ACCOUNT", 28),
+                fit("TYPE", 7),
+                fit(heads[0], 18),
+                fit(heads[1], 10),
+                fit(heads[2], 18)
+            ))
         );
-    }
+        for e in rows {
+            let (when, date) = match e.at {
+                Some(_) => (e.countdown(c.now), e.date(c.now, c.settings.clock_24h)),
+                None => ("–".to_string(), "does not expire".to_string()),
+            };
+            let soon = e.kind == Kind::Spare
+                && e.at
+                    .is_some_and(|at| at - c.now <= chrono::Duration::days(3));
+            let when = fit(&when, 10);
+            let what = fit(&e.what, 18);
+            println!(
+                "  {} {} {} {} {}  {}",
+                fit(&name(&e.key), 28),
+                p.dim(&fit(e.tag, 7)),
+                if e.kind == Kind::Spare {
+                    p.info(&what)
+                } else {
+                    what
+                },
+                if soon || e.kind == Kind::PlanEnds {
+                    p.warn(&when)
+                } else {
+                    when
+                },
+                fit(&date, 18),
+                p.dim(&e.note)
+            );
+        }
+    };
+
+    let limits = view::limit_resets(&c.reg, &c.logged_in, c.now);
+    let none_yet = "nothing yet: run `cswap refresh`";
+    table(
+        "Coming up",
+        ["RESET", "IN", "DATE"],
+        &view::coming_up(&c.reg, &c.logged_in, c.now),
+        none_yet,
+    );
     println!();
-    println!("{}", p.bold("Coming up"));
-    let coming = view::upcoming(&c.reg, &c.logged_in, &c.local, c.now);
-    if coming.is_empty() {
-        println!("  {}", p.dim("nothing yet: run `cswap refresh`"));
-    }
-    for e in &coming {
-        let what = match e.kind {
-            Kind::PlanEnds | Kind::LoginExpires => p.warn(&fit(&e.what, 20)),
-            _ => fit(&e.what, 20),
-        };
-        println!(
-            "  {} {} {} {what} {}",
-            fit(&e.when(c.now, c.settings.clock_24h), 19),
-            p.dim(&fit(&format!("in {}", e.countdown(c.now)), 12)),
-            fit(&name(&e.key), 30),
-            p.dim(&e.note)
-        );
-    }
+    table(
+        "Spare resets",
+        ["RESET", "EXPIRES", "DATE"],
+        &view::grants(&c.reg, c.now),
+        "none",
+    );
+    println!();
+    table(
+        if limits.iter().any(|e| e.tag == "monthly") {
+            "Weekly and monthly resets"
+        } else {
+            "Weekly resets"
+        },
+        ["LIMIT", "IN", "DATE"],
+        &limits,
+        none_yet,
+    );
+    println!();
+    table(
+        "Renewals",
+        ["PLAN", "IN", "DATE"],
+        &view::renewals(&c.reg),
+        "no renewal date is known",
+    );
     println!();
     println!(
         "{}",
