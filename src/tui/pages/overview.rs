@@ -293,8 +293,8 @@ fn cols(w: usize) -> Cols {
     let name = (w / 4).clamp(12, 26);
     let plan = if w >= 72 { 12 } else { 0 };
     let status = if w >= 60 { 12 } else { 0 };
-    // The word and room after it, so it does not run into the bar.
-    let default = if w >= 84 { 10 } else { 0 };
+    // As wide as its title, and room after it before the bar.
+    let default = if w >= 84 { 9 } else { 0 };
     let gaps = |n: usize| if n > 0 { n + 1 } else { 0 };
     // marker, dot, name, the bar's own cells and the spaces between.
     let fixed = 3 + name + 1 + gaps(plan) + gaps(default) + window_w(0) + gaps(status);
@@ -324,9 +324,17 @@ fn account_row(
         spans.push(Span::raw(" "));
     }
     if c.default > 0 {
-        // A word in its own column; the dot in front stays a dot.
-        let word = if app.is_default(acc) { "default" } else { "" };
-        spans.push(Span::styled(fit(word, c.default), t.s_text()));
+        // A star in its own column, under the middle of the title; the dot
+        // in front of the name stays a dot.
+        let star = if app.is_default(acc) {
+            format!("   {}", crate::tui::theme::STAR)
+        } else {
+            String::new()
+        };
+        spans.push(Span::styled(
+            fit(&star, c.default),
+            t.s(t.harness(acc.harness)),
+        ));
         spans.push(Span::raw(" "));
     }
     let signed_in = app.derived.logged_in.contains(&acc.key());

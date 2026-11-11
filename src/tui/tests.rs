@@ -946,10 +946,10 @@ fn an_account_is_made_the_default_and_wears_a_star_before_its_name() {
         .unwrap_or_default();
     assert!(toast.contains("already the default"), "{toast}");
 
-    // Only the Accounts page has the star. Everywhere else the dot stays a
-    // dot, and the Overview says which account is the default in a column.
+    // The star is never in the dot's place but on the Accounts page. The
+    // Overview has it in a column of its own; no other page has one.
     for page in Page::ALL {
-        if matches!(page, Page::Accounts | Page::Help) {
+        if matches!(page, Page::Accounts | Page::Overview | Page::Help) {
             continue;
         }
         app.dispatch(Action::Go(page));
@@ -960,11 +960,12 @@ fn an_account_is_made_the_default_and_wears_a_star_before_its_name() {
     let text = screen(&mut app, 132, 40);
     show("overview/default", &text);
     assert!(text.contains("DEFAULT"), "{text}");
-    let said = |name: &str| {
+    let starred = |name: &str| {
         text.lines()
-            .any(|l| l.contains(&format!("● {name} ")) && l.contains(" default "))
+            .any(|l| l.contains(&format!("● {name} ")) && l.contains(" ★ "))
     };
-    assert!(said("side") && !said("work"), "{text}");
+    assert!(starred("side") && !starred("work"), "{text}");
+    assert_eq!(text.matches('★').count(), 1, "{text}");
 
     // The root login gets the default back from its own page.
     app.dispatch(Action::Go(Page::Root));
