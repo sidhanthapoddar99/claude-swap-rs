@@ -38,13 +38,14 @@ pub enum Page {
     Sessions,
     Analytics,
     Health,
+    Integrations,
     Settings,
     Help,
 }
 
 impl Page {
     /// In the order of the menu, which is also the order of the number keys.
-    pub const ALL: [Page; 11] = [
+    pub const ALL: [Page; 12] = [
         Page::Overview,
         Page::Usage,
         Page::Resets,
@@ -54,6 +55,7 @@ impl Page {
         Page::Sessions,
         Page::Analytics,
         Page::Health,
+        Page::Integrations,
         Page::Settings,
         Page::Help,
     ];
@@ -69,6 +71,7 @@ impl Page {
             Page::Sync => "Sync",
             Page::Analytics => "Analytics",
             Page::Health => "Health",
+            Page::Integrations => "Integrations",
             Page::Settings => "Settings",
             Page::Help => "Help",
         }
@@ -85,17 +88,23 @@ impl Page {
             Page::Sync => "what each account shares with the agent's own config dir",
             Page::Analytics => "how fast each account burns through its week",
             Page::Health => "checks for the problems that are otherwise silent",
+            Page::Integrations => {
+                "cswap inside other programs · fetched from GitHub when you install one"
+            }
             Page::Settings => "the dashboard, every agent's options, and the shells that wrap them",
             Page::Help => "starting an agent on an account, cswap's words, and every key",
         }
     }
 
-    /// The key that jumps to this page: 1 to 9, then 0, and `?` for Help.
+    /// The key that jumps to this page: 1 to 9 down the menu, then `i` for
+    /// Integrations, 0 for Settings and `?` for Help.
     pub fn hotkey(self) -> char {
-        if self == Page::Help {
-            return '?';
+        match self {
+            Page::Help => '?',
+            Page::Integrations => 'i',
+            Page::Settings => '0',
+            _ => char::from_digit(self.index() as u32 + 1, 10).unwrap_or('1'),
         }
-        char::from_digit(((self.index() + 1) % 10) as u32, 10).unwrap_or('1')
     }
 
     pub fn index(self) -> usize {
@@ -153,6 +162,12 @@ pub enum Action {
     ModalOk,
     ModalCancel,
     Help,
+    /// What can be done with the selected integration.
+    IntegrationMenu,
+    /// Fetch the herdr layout and put it into herdr's folder.
+    InstallHerdr,
+    /// Ask the running herdr to show the cswap layout.
+    ShowHerdr,
     /// One step back: from the page to the menu, from the menu out.
     Back,
 }
@@ -281,6 +296,8 @@ pub enum Msg {
     },
     /// The answer to a check asked for in Settings: a newer version, or none.
     UpdateChecked(Result<Option<String>, String>),
+    /// How installing the herdr layout went.
+    Integrated(Result<crate::integration::Installed, String>),
 }
 
 /// Where the check for a newer cswap asked for in Settings stands.
@@ -343,13 +360,17 @@ pub struct App {
     pub page: Page,
     pub focus: Focus,
     /// Selected row per page.
-    pub sel: [usize; 11],
+    pub sel: [usize; 12],
     /// The page `?` was pressed on, to go back to with a second `?`.
     pub before_help: Page,
     /// How wide and how tall the Help page's text was when last drawn, so
     /// the keys scroll it no further than its end.
     pub help_view: (usize, usize),
     pub settings_tab: usize,
+    /// Where the herdr integration stands, read when its page is opened.
+    pub integration: crate::integration::State,
+    /// An install is running on its thread.
+    pub installing: bool,
     pub update: UpdateCheck,
     pub modal: Option<Modal>,
     pub toast: Option<Toast>,
@@ -414,11 +435,13 @@ impl App {
             derived: Derived::default(),
             page: Page::Overview,
             focus: Focus::Nav,
-            sel: [0; 11],
+            sel: [0; 12],
             before_help: Page::Overview,
             help_view: (0, 0),
             settings_tab: 0,
             update: UpdateCheck::default(),
+            integration: crate::integration::State::NotInstalled,
+            installing: false,
             modal: None,
             toast: None,
             hits: Hits::default(),
@@ -568,6 +591,7 @@ impl App {
             Page::Sync => self.sync_keys().len(),
             Page::Resets => pages::resets::rows(self).len(),
             Page::Health => self.derived.checks.len(),
+            Page::Integrations => crate::integration::ALL.len(),
             Page::Settings => pages::settings::rows(self).len(),
             // A row here is a line the text is scrolled by: one for every
             // line that does not fit the page.
@@ -722,6 +746,39 @@ impl App {
                     }
                 }
             }
+            Msg::Integrated(done) => {
+                self.installing = false;
+                self.integration = crate::integration::state();
+                match done {
+                    Ok(d) if d.written == 0 && d.removed == 0 => self.say(
+                        Tone::Good,
+                        format!(
+                            "The cswap layout {} is already current in herdr.",
+                            d.version
+                        ),
+                    ),
+                    Ok(d) if d.set_aside.is_empty() => self.say(
+                        Tone::Good,
+                        format!(
+                            "Installed the cswap layout {} into herdr: {} files written.",
+                            d.version, d.written
+                        ),
+                    ),
+                    Ok(d) => self.say(
+                        Tone::Info,
+                        format!(
+                            "Installed the cswap layout {}. Your own {} kept beside it as .mine.",
+                            d.version,
+                            if d.set_aside.len() == 1 {
+                                "file was".to_string()
+                            } else {
+                                format!("{} files were", d.set_aside.len())
+                            }
+                        ),
+                    ),
+                    Err(e) => self.say(Tone::Warn, e),
+                }
+            }
             Msg::UpdateChecked(found) => {
                 let have = crate::update::CURRENT;
                 match found {
@@ -764,6 +821,70 @@ impl App {
         }));
     }
 
+    /// Fetch and install the herdr layout on a thread of its own: the files
+    /// come from GitHub, and the dashboard never waits on the network.
+    pub fn install_herdr(&mut self) {
+        if self.installing {
+            return;
+        }
+        self.installing = true;
+        let tx = self.tx.clone();
+        self.workers.retain(|w| !w.is_finished());
+        self.workers.push(std::thread::spawn(move || {
+            let done = crate::integration::install().map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Msg::Integrated(done));
+        }));
+    }
+
+    fn integration_menu(&mut self) {
+        use crate::integration::State;
+        if self.installing {
+            return;
+        }
+        let state = &self.integration;
+        let there = *state != State::NoHerdr;
+        let installed = matches!(state, State::Installed { .. });
+        let items = vec![
+            ChoiceItem {
+                heading: None,
+                label: if installed {
+                    "Install again".to_string()
+                } else {
+                    "Install".to_string()
+                },
+                detail: if !there {
+                    "herdr is not on this machine".to_string()
+                } else if installed {
+                    "fetch this version's files · your edits are kept as .mine".to_string()
+                } else {
+                    "fetch the layout from GitHub into herdr's folder".to_string()
+                },
+                enabled: there,
+                key: Some('i'),
+                action: Action::InstallHerdr,
+            },
+            ChoiceItem {
+                heading: None,
+                label: "Show it in herdr".to_string(),
+                detail: if installed {
+                    "switch the running herdr to the cswap layout".to_string()
+                } else {
+                    "install it first".to_string()
+                },
+                enabled: installed,
+                key: Some('s'),
+                action: Action::ShowHerdr,
+            },
+        ];
+        self.modal = Some(Modal::Choice {
+            title: "herdr".to_string(),
+            hint: "herdr keeps your own layout · switch back in its settings, or with ctrl-shift-l"
+                .to_string(),
+            items,
+            sel: 0,
+        });
+    }
+
     // ------------------------------------------------------------ navigation
 
     fn go(&mut self, page: Page) {
@@ -772,6 +893,7 @@ impl App {
             Page::Sync => self.check_sync(),
             Page::Analytics => self.load_history(),
             Page::Health => self.reload(),
+            Page::Integrations => self.integration = crate::integration::state(),
             _ => {}
         }
         self.clamp();
@@ -805,7 +927,7 @@ impl App {
         match key.code {
             KeyCode::Esc => self.dispatch(Action::Back),
             KeyCode::Char('?') => self.dispatch(Action::Help),
-            KeyCode::Char(c @ '0'..='9') => {
+            KeyCode::Char(c @ ('0'..='9' | 'i')) => {
                 if let Some(page) = Page::ALL.into_iter().find(|p| p.hotkey() == c) {
                     self.go(page);
                     self.focus = Focus::Main;
@@ -1192,8 +1314,21 @@ impl App {
                         self.dispatch(Action::AccountMenu(k));
                     }
                 }
+                Page::Integrations => self.dispatch(Action::IntegrationMenu),
                 Page::Resets | Page::Sessions | Page::Help => {}
             },
+            Action::IntegrationMenu => self.integration_menu(),
+            Action::InstallHerdr => {
+                self.modal = None;
+                self.install_herdr();
+            }
+            Action::ShowHerdr => {
+                self.modal = None;
+                match crate::integration::show() {
+                    Ok(()) => self.say(Tone::Good, "herdr shows the cswap layout now.".to_string()),
+                    Err(e) => self.say(Tone::Warn, format!("{e:#}")),
+                }
+            }
             // To the Help page, and from it back to where `?` was pressed.
             Action::Help => {
                 if self.page == Page::Help {

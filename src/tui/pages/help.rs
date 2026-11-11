@@ -36,7 +36,7 @@ fn keys() -> Vec<Section> {
         section(
             "Keys · moving",
             &[
-                ("1 – 9, 0", "jump to a page"),
+                ("1 – 9, i, 0", "jump to a page"),
                 ("?", "this page; again goes back to where you were"),
                 ("Tab / Shift-Tab", "next / previous page"),
                 ("↑ ↓  j k", "move in the menu or the list"),

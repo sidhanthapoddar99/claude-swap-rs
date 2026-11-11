@@ -17,6 +17,7 @@ mod health;
 mod herdr;
 mod history;
 mod http;
+mod integration;
 mod manage;
 mod migrate;
 mod model;
@@ -78,6 +79,21 @@ enum HerdrCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Put the cswap layout into herdr, or bring it up to date
+    Install {
+        /// Show the layout in herdr once it is installed
+        #[arg(long)]
+        show: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Whether the cswap layout is installed in herdr
+    Status {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -103,7 +119,7 @@ enum Cmd {
 
     /// Agents in herdr terminals: which account, and switch it
     #[command(
-        after_help = "Examples:\n  cswap herdr ls                  which account each terminal's agent runs on\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. It refuses in the middle of a turn."
+        after_help = "Examples:\n  cswap herdr ls                  which account each terminal's agent runs on\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n  cswap herdr install --show      put the cswap layout into herdr and show it\n  cswap herdr status              whether the layout is installed\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. It refuses in the middle of a turn."
     )]
     Herdr {
         #[command(subcommand)]
@@ -354,6 +370,10 @@ fn help(p: &Paint) -> String {
                     "herdr switch <t> <acct>",
                     "move a herdr terminal's agent to another account",
                 ),
+                (
+                    "herdr install",
+                    "put the cswap layout into herdr (--show switches to it)",
+                ),
             ],
         ),
     ];
@@ -476,6 +496,8 @@ fn run() -> Result<ExitCode> {
                 fresh,
                 json,
             } => herdr::switch_cmd(&terminal, &account, fresh, json)?,
+            HerdrCmd::Install { show, json } => integration::install_cmd(show, json)?,
+            HerdrCmd::Status { json } => ok = integration::status_cmd(json)?,
         },
         Cmd::List { json } => cli::list(json)?,
         Cmd::Usage { account, refresh } => cli::usage(account.as_deref(), refresh)?,

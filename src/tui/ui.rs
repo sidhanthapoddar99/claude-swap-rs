@@ -310,6 +310,7 @@ fn page(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         Page::Resets => pages::resets::draw(f, content, app, hits),
         Page::Analytics => pages::analytics::draw(f, content, app, hits),
         Page::Health => pages::health::draw(f, content, app, hits),
+        Page::Integrations => pages::integrations::draw(f, content, app, hits),
         Page::Settings => pages::settings::draw(f, content, app, hits),
         Page::Help => pages::help::draw(f, content, app),
     }
@@ -451,6 +452,12 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         chips.push(Chip {
             key: "⏎",
             label: "details",
+            action: Action::Activate,
+        });
+    } else if app.page == Page::Integrations {
+        chips.push(Chip {
+            key: "⏎",
+            label: "install · show",
             action: Action::Activate,
         });
     }

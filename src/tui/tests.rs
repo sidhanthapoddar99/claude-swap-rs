@@ -54,7 +54,7 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
     let sb = Sandbox::new();
     sb.demo();
     let (mut app, _rx) = app();
-    let expect: [(Page, &[&str]); 11] = [
+    let expect: [(Page, &[&str]); 12] = [
         (
             Page::Overview,
             &[
@@ -125,6 +125,16 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
         (Page::Sync, &["work", "linked", "private", "settings.json"]),
         (Page::Analytics, &["Burn rate", "PER DAY", "AT RESET"]),
         (Page::Health, &["Checks"]),
+        (
+            Page::Integrations,
+            &[
+                "herdr",
+                "not part of the binary",
+                "What it adds",
+                "same conversation",
+                "herdr is not on this machine",
+            ],
+        ),
         (
             Page::Settings,
             &[
@@ -593,15 +603,18 @@ fn keys_move_between_the_menu_and_the_page() {
     assert_eq!(app.row(), 1);
     key(&mut app, KeyCode::Esc);
     assert_eq!(app.focus, Focus::Nav);
-    // The pages in the order of the menu: 1 to 9, then 0, and ? for Help.
+    // The pages in the order of the menu: 1 to 9, i for Integrations, 0 for
+    // Settings and ? for Help.
     let keys: String = Page::ALL.iter().map(|p| p.hotkey()).collect();
-    assert_eq!(keys, "1234567890?");
+    assert_eq!(keys, "123456789i0?");
     key(&mut app, KeyCode::Char('3'));
     assert_eq!(app.page, Page::Resets);
     key(&mut app, KeyCode::Char('5'));
     assert_eq!(app.page, Page::Root);
     key(&mut app, KeyCode::Char('7'));
     assert_eq!(app.page, Page::Sessions);
+    key(&mut app, KeyCode::Char('i'));
+    assert_eq!((app.page, app.focus), (Page::Integrations, Focus::Main));
     key(&mut app, KeyCode::Char('0'));
     assert_eq!(app.page, Page::Settings);
     // ? opens Help from anywhere, and a second ? goes back.
@@ -1108,16 +1121,80 @@ fn the_dot_tells_the_agent_so_its_name_is_written_only_without_colour() {
     }
 }
 
-/// `cargo test readme_picture -- --ignored --nocapture` prints the Overview
-/// at the size of the picture at the top of the README.
+/// One cell's colour as CSS, or `None` for the terminal's own.
+fn css(c: ratatui::style::Color) -> Option<String> {
+    match c {
+        ratatui::style::Color::Rgb(r, g, b) => Some(format!("rgb({r},{g},{b})")),
+        _ => None,
+    }
+}
+
+/// The screen as HTML, cell by cell, with the colours the terminal would show.
+fn html(app: &mut App, w: u16, h: u16) -> String {
+    use ratatui::style::Modifier;
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw(f, app)).unwrap();
+    let buf = term.backend().buffer().clone();
+    // The padding around the screen takes the screen's own background.
+    let bg = css(buf[(0, 0)].bg).unwrap_or_else(|| "#13161e".to_string());
+    let mut out = format!("<pre style=\"background:{bg}\">");
+    for y in 0..h {
+        for x in 0..w {
+            let cell = &buf[(x, y)];
+            let mut style = String::new();
+            if let Some(c) = css(cell.fg) {
+                style.push_str(&format!("color:{c};"));
+            }
+            if let Some(c) = css(cell.bg) {
+                style.push_str(&format!("background:{c};"));
+            }
+            if cell.modifier.contains(Modifier::BOLD) {
+                style.push_str("font-weight:600;");
+            }
+            let text = cell
+                .symbol()
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            out.push_str(&format!("<span style=\"{style}\">{text}</span>"));
+        }
+        out.push('\n');
+    }
+    out.push_str("</pre>");
+    out
+}
+
+/// `COLORTERM=truecolor cargo test readme_shots -- --ignored` writes the
+/// pages the README shows into `target/shots/` as HTML, with made-up
+/// accounts. `scripts/shots.sh` turns them into the pictures.
 #[test]
-#[ignore = "prints the README's picture"]
-fn readme_picture() {
+#[ignore = "writes the README's pictures"]
+fn readme_shots() {
     let sb = Sandbox::new();
     sb.demo();
+    std::env::remove_var("HERDR_APP_HOME");
+    std::fs::create_dir_all(crate::paths::home().join(".config/herdr-app")).unwrap();
     let (mut app, _rx) = app();
-    app.dispatch(Action::Go(Page::Overview));
-    println!("{}", screen(&mut app, 116, 24));
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/shots");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (page, name) in [
+        (Page::Overview, "overview"),
+        (Page::Usage, "usage"),
+        (Page::Accounts, "accounts"),
+        (Page::Resets, "resets"),
+        (Page::Integrations, "integrations"),
+    ] {
+        app.dispatch(Action::Go(page));
+        app.focus = Focus::Main;
+        let page = format!(
+            "<!doctype html><meta charset=\"utf-8\"><style>\
+             body{{margin:0;background:#ff00ff;}}\
+             pre{{display:inline-block;margin:0;padding:18px 20px;color:#d6d8e0;\
+             font:15px/normal 'DejaVu Sans Mono',monospace;}}</style>{}",
+            html(&mut app, 118, 30)
+        );
+        std::fs::write(dir.join(format!("{name}.html")), page).unwrap();
+    }
 }
 
 #[test]
@@ -1146,4 +1223,60 @@ fn the_help_page_scrolls_to_its_end_and_no_further() {
     for (flag, what) in crate::wrap::FLAGS {
         assert!(text.contains(flag) && text.contains(what), "{flag}\n{text}");
     }
+}
+
+/// The Integrations page installs the herdr layout from the files of this
+/// repository, on a thread, and says where it stands before and after.
+#[test]
+fn the_herdr_layout_installs_from_the_integrations_page() {
+    let sb = Sandbox::new();
+    sb.demo();
+    std::env::set_var(
+        "CSWAP_INTEGRATIONS",
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations"),
+    );
+    std::env::remove_var("HERDR_APP_HOME");
+    std::env::set_var("CSWAP_HERDR_APP", "/nonexistent/herdr-app");
+    let (mut app, rx) = app();
+
+    // No herdr: nothing to install into, and the menu says so.
+    key(&mut app, KeyCode::Char('i'));
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("herdr is not on this machine"), "{text}");
+    key(&mut app, KeyCode::Enter);
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("Install"), "{text}");
+    key(&mut app, KeyCode::Enter);
+    assert!(!app.installing, "an install started without herdr");
+    key(&mut app, KeyCode::Esc);
+
+    // With herdr's folder there: not installed, then installed.
+    let home = crate::paths::home().join(".config").join("herdr-app");
+    std::fs::create_dir_all(&home).unwrap();
+    app.dispatch(Action::Go(Page::Integrations));
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("not installed"), "{text}");
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Enter);
+    assert!(app.installing);
+    assert!(screen(&mut app, 132, 40).contains("installing"));
+    let msg = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the install never answered");
+    app.on_msg(msg);
+    assert!(!app.installing);
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("installed 1."), "{text}");
+    assert!(text.contains("files written"), "{text}");
+    assert!(home.join("layouts/cswap.json").is_file());
+    assert!(home.join("mods/cswap-chrome/main.js").is_file());
+
+    // Showing it needs herdr's own tool; without it the page says what to do.
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Char('s'));
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("Settings → Layout"), "{text}");
+
+    std::env::remove_var("CSWAP_INTEGRATIONS");
+    std::env::remove_var("CSWAP_HERDR_APP");
 }

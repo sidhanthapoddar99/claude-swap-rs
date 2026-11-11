@@ -16,6 +16,7 @@ pub mod accounts;
 pub mod analytics;
 pub mod health;
 pub mod help;
+pub mod integrations;
 pub mod overview;
 pub mod resets;
 pub mod root;
