@@ -225,7 +225,7 @@ update                     install the latest release         (--check)
 | Claude Code | session, week, per-model week, extra usage | count and expiry | yes | set by hand |
 | Codex | session, week | count and expiry | yes | yes |
 | Grok Build | monthly credits | not reported | yes | not reported |
-| Antigravity | week and 5-hour, per group of models, through `agy /usage` | not reported | not reported | not reported |
+| Antigravity | week and 5-hour of the Gemini models, through `agy /usage` | not reported | not reported | not reported |
 
 Where the vendor does not report a renewal date or a reset, you can note it by hand on the Accounts page.
 

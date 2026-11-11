@@ -434,6 +434,14 @@ pub(crate) fn parse(stdout: &str, now: DateTime<Utc>) -> Fetch<(Snapshot, Local)
         ));
     }
 
+    // Antigravity also meters the Claude and GPT models it offers, as a
+    // group of their own. Only its own Gemini limits are shown. When no group
+    // names Gemini, everything is kept rather than showing nothing.
+    let gemini = |b: &Bucket| b.label.to_lowercase().contains("gemini");
+    if buckets.iter().any(gemini) {
+        buckets.retain(gemini);
+    }
+
     let mut windows: Vec<Window> = buckets
         .iter()
         .map(|b| {
@@ -599,10 +607,10 @@ mod tests {
         assert_eq!(
             seen,
             [
-                (WindowKind::Session, "5h", 50.0),
-                (WindowKind::Weekly, "Gemini", 2.0),
-                (WindowKind::WeeklyScoped, "Claude & GPT", 0.0),
-            ]
+                (WindowKind::Session, "5h", 0.0),
+                (WindowKind::Weekly, "week", 2.0),
+            ],
+            "the Claude and GPT group is left out"
         );
         assert_eq!(tidy("Gemini Models"), "Gemini");
         assert_eq!(tidy("models"), "models");
