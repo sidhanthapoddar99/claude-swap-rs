@@ -470,6 +470,74 @@ pub fn menu_cmd() -> Result<()> {
     Ok(())
 }
 
+/// The agent in each herdr terminal and its account. Herdr tells a program
+/// its terminal in `HC_TERMINAL_ID`, so nothing is asked of herdr here. An
+/// agent that another agent started in the same terminal is left out: the
+/// terminal's agent is the outer one.
+fn in_terminals(c: &Ctx) -> Vec<(String, u32, &Account)> {
+    let mut found: Vec<(String, u32, &Account)> = Vec::new();
+    for acc in &c.reg.accounts {
+        for pid in c.live.get(&acc.key()).into_iter().flatten() {
+            if let Some(terminal) = sessions::env_of(*pid, "HC_TERMINAL_ID") {
+                found.push((terminal, *pid, acc));
+            }
+        }
+    }
+    let inner = |terminal: &str, pid: u32| {
+        let mut at = pid;
+        for _ in 0..8 {
+            match sessions::parent(at) {
+                Some(up) if found.iter().any(|(t, p, _)| t == terminal && *p == up) => return true,
+                Some(up) => at = up,
+                None => break,
+            }
+        }
+        false
+    };
+    let mut outer: Vec<_> = found
+        .iter()
+        .filter(|(t, pid, _)| !inner(t, *pid))
+        .cloned()
+        .collect();
+    outer.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+    outer
+}
+
+/// `cswap herdr ls`: which account each herdr terminal's agent runs on.
+pub fn ls_cmd(as_json: bool) -> Result<()> {
+    let c = Ctx::load()?;
+    let rows = in_terminals(&c);
+    if as_json {
+        let all: Vec<Value> = rows
+            .iter()
+            .map(|(terminal, pid, acc)| {
+                json!({
+                    "terminal": terminal,
+                    "agent": acc.harness.id(),
+                    "account": acc.key(),
+                    "name": acc.title(),
+                    "pid": pid,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&all)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("No agent is running in a herdr terminal.");
+        return Ok(());
+    }
+    for (terminal, _, acc) in &rows {
+        println!(
+            "{}  {} on {}",
+            c.p.bold(&format!("{terminal:<6}")),
+            acc.harness.name(),
+            c.p.bold(&acc.title())
+        );
+    }
+    Ok(())
+}
+
 /// `cswap herdr info <terminal>`: the account in use and the ones on offer.
 pub fn info_cmd(t: &str, as_json: bool) -> Result<()> {
     let c = Ctx::load()?;

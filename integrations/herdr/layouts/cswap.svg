@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200">
+  <!-- The cswap layout: agents with their accounts on the left, the cswap
+       button under them, and the dashboard open over the panes. -->
+  <rect width="320" height="200" fill="#16171b"/>
+
+  <!-- sidebar -->
+  <rect width="104" height="200" fill="#1e2025"/>
+  <rect x="104" width="1" height="200" fill="#2c2f36"/>
+  <rect x="10" y="10" width="12" height="12" rx="3" fill="#d97757"/>
+  <rect x="28" y="13" width="38" height="6" rx="3" fill="#6b7080"/>
+  <rect x="10" y="34" width="60" height="5" rx="2.5" fill="#3a3e48"/>
+  <rect x="10" y="46" width="46" height="5" rx="2.5" fill="#3a3e48"/>
+
+  <!-- agents, each with the account it runs on -->
+  <rect x="10" y="66" width="26" height="4" rx="2" fill="#565b68"/>
+  <g fill="none" stroke="#e8a48c" stroke-width="1.600" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="87,60.500 84.500,63 87,65.500"/>
+    <line x1="84.500" y1="63" x2="94" y2="63"/>
+    <polyline points="91.500,66.500 94,69 91.500,71.500"/>
+    <line x1="94" y1="69" x2="84.500" y2="69"/>
+  </g>
+  <rect x="6" y="78" width="92" height="16" rx="4" fill="#2a2d34"/>
+  <circle cx="15" cy="86" r="3.5" fill="#d97757"/>
+  <rect x="24" y="83.500" width="30" height="5" rx="2.500" fill="#9aa0ae"/>
+  <rect x="66" y="81" width="28" height="10" rx="5" fill="#d97757" fill-opacity=".28"/>
+  <circle cx="15" cy="104" r="3.500" fill="#5fb3a1"/>
+  <rect x="24" y="101.500" width="36" height="5" rx="2.500" fill="#6b7080"/>
+  <rect x="70" y="99" width="24" height="10" rx="5" fill="#5fb3a1" fill-opacity=".28"/>
+  <circle cx="15" cy="122" r="3.500" fill="#d97757"/>
+  <rect x="24" y="119.500" width="24" height="5" rx="2.500" fill="#6b7080"/>
+  <rect x="62" y="117" width="32" height="10" rx="5" fill="#d97757" fill-opacity=".28"/>
+  <circle cx="15" cy="140" r="3.500" fill="#8f8ae0"/>
+  <rect x="24" y="137.500" width="32" height="5" rx="2.500" fill="#6b7080"/>
+  <rect x="68" y="135" width="26" height="10" rx="5" fill="#8f8ae0" fill-opacity=".28"/>
+
+  <!-- footer: settings, cswap, add machine -->
+  <rect y="158" width="104" height="1" fill="#2c2f36"/>
+  <rect x="10" y="166" width="34" height="4" rx="2" fill="#4a4f5b"/>
+  <rect x="6" y="174" width="92" height="11" rx="3.500" fill="#d97757" fill-opacity=".2"/>
+  <rect x="10" y="177.500" width="24" height="4" rx="2" fill="#e8a48c"/>
+  <rect x="10" y="190" width="40" height="4" rx="2" fill="#4a4f5b"/>
+
+  <!-- tabs -->
+  <rect x="112" y="8" width="44" height="14" rx="5" fill="#2a2d34"/>
+  <rect x="120" y="13" width="24" height="4" rx="2" fill="#9aa0ae"/>
+  <rect x="160" y="8" width="38" height="14" rx="5" fill="#1e2025"/>
+  <rect x="168" y="13" width="20" height="4" rx="2" fill="#4a4f5b"/>
+  <rect x="204" y="10" width="10" height="10" rx="3" fill="#1e2025"/>
+  <path d="M209 12.500v5M206.500 15h5" stroke="#6b7080" stroke-width="1.200" stroke-linecap="round"/>
+
+  <!-- panes, dimmed behind the dashboard -->
+  <rect x="112" y="30" width="98" height="162" rx="6" fill="#1b1c21" stroke="#282b32"/>
+  <rect x="216" y="30" width="96" height="162" rx="6" fill="#1b1c21" stroke="#282b32"/>
+
+  <!-- the cswap dashboard -->
+  <rect x="130" y="46" width="164" height="128" rx="8" fill="#22242a" stroke="#3a3e48"/>
+  <rect x="140" y="56" width="30" height="5" rx="2.500" fill="#e8a48c"/>
+  <rect x="176" y="56" width="22" height="5" rx="2.500" fill="#4a4f5b"/>
+  <rect x="204" y="56" width="22" height="5" rx="2.500" fill="#4a4f5b"/>
+  <rect x="140" y="68" width="144" height="1" fill="#33363e"/>
+
+  <circle cx="144" cy="84" r="3" fill="#d97757"/>
+  <rect x="152" y="81.500" width="30" height="5" rx="2.500" fill="#9aa0ae"/>
+  <rect x="192" y="81" width="92" height="6" rx="3" fill="#30333b"/>
+  <rect x="192" y="81" width="64" height="6" rx="3" fill="#d9a857"/>
+
+  <circle cx="144" cy="102" r="3" fill="#d97757"/>
+  <rect x="152" y="99.500" width="24" height="5" rx="2.500" fill="#9aa0ae"/>
+  <rect x="192" y="99" width="92" height="6" rx="3" fill="#30333b"/>
+  <rect x="192" y="99" width="22" height="6" rx="3" fill="#6fbf73"/>
+
+  <circle cx="144" cy="120" r="3" fill="#5fb3a1"/>
+  <rect x="152" y="117.500" width="34" height="5" rx="2.500" fill="#9aa0ae"/>
+  <rect x="192" y="117" width="92" height="6" rx="3" fill="#30333b"/>
+  <rect x="192" y="117" width="84" height="6" rx="3" fill="#d96b6b"/>
+
+  <circle cx="144" cy="138" r="3" fill="#8f8ae0"/>
+  <rect x="152" y="135.500" width="26" height="5" rx="2.500" fill="#9aa0ae"/>
+  <rect x="192" y="135" width="92" height="6" rx="3" fill="#30333b"/>
+  <rect x="192" y="135" width="40" height="6" rx="3" fill="#6fbf73"/>
+
+  <rect x="140" y="156" width="60" height="4" rx="2" fill="#4a4f5b"/>
+</svg>

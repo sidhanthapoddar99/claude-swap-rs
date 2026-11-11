@@ -1,0 +1,18 @@
+{
+  "name": "herdr",
+  "version": "1.1.0",
+  "layout": "cswap",
+  "files": [
+    "layouts/cswap.json",
+    "layouts/cswap.svg",
+    "mods/cswap-agents/main.js",
+    "mods/cswap-agents/mod.json",
+    "mods/cswap-chrome/cswap.svg",
+    "mods/cswap-chrome/main.js",
+    "mods/cswap-chrome/mod.json",
+    "mods/cswap-new-menu/main.js",
+    "mods/cswap-new-menu/mod.json",
+    "mods/cswap-tabs/main.js",
+    "mods/cswap-tabs/mod.json"
+  ]
+}

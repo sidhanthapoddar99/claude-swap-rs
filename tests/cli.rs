@@ -648,6 +648,7 @@ fn help_names_every_command_in_groups() {
             "use <agent> [account]",
             "update  ",
             "herdr switch",
+            "herdr install",
             "--cswap=",
             "--cswap  ",
         ] {
@@ -720,7 +721,11 @@ fn herdr_terminal(env: &Env, cmdline: &str) -> u32 {
         fs::write(dir.join("environ"), environ).unwrap();
         fs::write(dir.join("cmdline"), cmdline).unwrap();
     };
-    proc_of(h.join("proc").join(old.to_string()), "", cmdline);
+    proc_of(
+        h.join("proc").join(old.to_string()),
+        "HC_TERMINAL_ID=t7\0",
+        cmdline,
+    );
     fs::create_dir_all(h.join("hc")).unwrap();
     fs::write(h.join("hc/pid"), old.to_string()).unwrap();
     fs::write(h.join("hc/next"), next.to_string()).unwrap();
@@ -778,6 +783,10 @@ fn a_herdr_terminal_moves_to_another_account_and_keeps_its_conversation() {
     let h = env.home();
     fs::write(h.join("hc/status"), "working").unwrap();
 
+    let all: Value = serde_json::from_str(&env.ok(&["herdr", "ls", "--json"])).unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 1);
+    assert_eq!(all[0]["terminal"], "t7");
+    assert_eq!(all[0]["name"], "root");
     let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
     assert_eq!(info["account"], "claude-0");
     assert_eq!(info["session"], SESSION);
@@ -921,4 +930,99 @@ fn doctor_reports_and_migrate_has_nothing_to_do_on_a_fresh_home() {
     assert!(all.contains("Claude Code"), "{all}");
     let out = env.ok(&["migrate"]);
     assert!(out.to_lowercase().contains("nothing"), "{out}");
+}
+
+/// `cswap herdr install` puts the layout's files into herdr's folder from a
+/// checkout of this repository, and `cswap herdr status` says where it stands.
+#[test]
+fn the_herdr_layout_is_installed_from_the_repository() {
+    let env = Env::new();
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("integrations");
+    let herdr = env.home().join("herdr-home");
+    let run = |args: &[&str]| {
+        env.cmd(args)
+            .env("CSWAP_INTEGRATIONS", &source)
+            .env("HERDR_APP_HOME", &herdr)
+            .output()
+            .unwrap()
+    };
+
+    // Without herdr there is nothing to install into.
+    let out = run(&["herdr", "install"]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("Start herdr once"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(text(&run(&["herdr", "status"]).stdout).contains("not on this machine"));
+
+    fs::create_dir_all(&herdr).unwrap();
+    let out = run(&["herdr", "status"]);
+    assert!(
+        !out.status.success(),
+        "status is false until it is installed"
+    );
+    assert!(text(&out.stdout).contains("not installed"));
+
+    let out = run(&["herdr", "install"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).contains("Installed the cswap layout"),
+        "{}",
+        text(&out.stdout)
+    );
+    for file in [
+        "layouts/cswap.json",
+        "layouts/cswap.svg",
+        "mods/cswap-agents/main.js",
+        "mods/cswap-tabs/mod.json",
+    ] {
+        assert!(herdr.join(file).is_file(), "{file} is missing");
+    }
+    // Nothing but the layout's own files went in.
+    let tops: Vec<String> = fs::read_dir(&herdr)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        tops.iter().all(|t| t == "layouts" || t == "mods"),
+        "{tops:?}"
+    );
+
+    let out = run(&["herdr", "status", "--json"]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["installed"], true);
+    assert_eq!(v["installed_by"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        (v["missing"].as_u64(), v["changed"].as_u64()),
+        (Some(0), Some(0))
+    );
+
+    // A second install changes nothing; an edited file is kept beside the new one.
+    assert!(text(&run(&["herdr", "install"]).stdout).contains("all current"));
+    fs::write(herdr.join("layouts/cswap.json"), "{}").unwrap();
+    let out = run(&["herdr", "install", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["written"], 1);
+    assert_eq!(v["set_aside"][0], "layouts/cswap.json.mine");
+    assert_eq!(
+        fs::read_to_string(herdr.join("layouts/cswap.json.mine")).unwrap(),
+        "{}"
+    );
+
+    // Offline and with no checkout to read, it says so and changes nothing.
+    let out = env
+        .cmd(&["herdr", "install"])
+        .env("HERDR_APP_HOME", &herdr)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("offline"),
+        "{}",
+        text(&out.stderr)
+    );
 }
