@@ -74,7 +74,7 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
                 "LIMIT",
                 "USED",
                 "DATE",
-                "Max 20x",
+                "Ultra",
                 "week",
                 "Opus",
                 "5h",
@@ -101,7 +101,7 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
                 "AGENT",
                 "LOGIN",
                 "dev@example.com",
-                "Max 5x",
+                "Max",
                 "SuperGrok",
                 "default login",
             ],
@@ -184,7 +184,7 @@ fn the_default_logins_are_on_their_own_page_and_nowhere_else() {
         app.default_keys(),
         ["claude-0", "codex-0", "agy-0", "grok-0"]
     );
-    // What only the default logins have: their plans.
+    // What only the default logins have: a login and a plan of their own.
     for page in [
         Page::Overview,
         Page::Usage,
@@ -195,7 +195,7 @@ fn the_default_logins_are_on_their_own_page_and_nowhere_else() {
     ] {
         app.dispatch(Action::Go(page));
         let text = screen(&mut app, 132, 40);
-        for word in ["Max 5x", "SuperGrok"] {
+        for word in ["dev@example.com", "SuperGrok"] {
             assert!(!text.contains(word), "{page:?} shows '{word}'\n{text}");
         }
     }
@@ -257,7 +257,7 @@ fn the_account_selected_on_the_accounts_page_is_spelled_out() {
     show("accounts/work", &text);
     for word in [
         "dev@corp.example",
-        "Max 20x",
+        "Ultra",
         "claude --cswap=work",
         "accounts/claude-1",
         // The resets it holds and its credits, in a part of their own.
@@ -744,6 +744,45 @@ fn the_resets_page_has_three_parts_and_one_weekly_figure_per_account() {
 }
 
 #[test]
+fn selecting_a_reset_softly_marks_the_accounts_other_rows() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Resets));
+    app.focus = Focus::Main;
+    // The colour of the marker in front of each row of an account.
+    let marks = |app: &mut App, name: &str| {
+        let mut term = Terminal::new(TestBackend::new(132, 40)).unwrap();
+        term.draw(|f| ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let mut out = Vec::new();
+        for y in 0..40 {
+            let row: String = (0..132).map(|x| buf[(x, y)].symbol()).collect();
+            if let Some(at) = row.find(&format!("▌● {name}")) {
+                let x = row[..at].chars().count() as u16;
+                out.push(buf[(x, y)].fg);
+            }
+        }
+        out
+    };
+    let (strong, faint) = (app.theme.accent(), app.theme.faint());
+
+    // The rows, top to bottom: work's spare reset, the weekly resets of work
+    // and side, then the renewals of side and work.
+    app.sel[Page::Resets.index()] = 0;
+    assert_eq!(marks(&mut app, "work"), [strong, faint, faint]);
+    assert!(marks(&mut app, "side").is_empty());
+
+    app.sel[Page::Resets.index()] = 2;
+    assert_eq!(marks(&mut app, "side"), [strong, faint]);
+    assert!(marks(&mut app, "work").is_empty());
+
+    // Nothing is marked while the menu has the keys.
+    app.focus = Focus::Nav;
+    assert!(marks(&mut app, "work").is_empty() && marks(&mut app, "side").is_empty());
+}
+
+#[test]
 fn the_usage_page_boxes_accounts_by_agent_and_lists_every_limit() {
     let sb = Sandbox::new();
     sb.demo();
@@ -762,7 +801,7 @@ fn the_usage_page_boxes_accounts_by_agent_and_lists_every_limit() {
         let rows: Vec<&str> = text.lines().collect();
         let work = rows.iter().position(|l| l.contains("● work")).unwrap();
         assert!(rows[work].contains("week") && rows[work].contains("38%"));
-        assert!(rows[work + 1].contains("Max 20x") && rows[work + 1].contains("Opus"));
+        assert!(rows[work + 1].contains("Ultra") && rows[work + 1].contains("Opus"));
         // The short window is listed on this page, after the weekly limits.
         assert!(rows[work + 2].contains(" 5h ") && rows[work + 2].contains("12%"));
     }

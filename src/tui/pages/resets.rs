@@ -8,6 +8,9 @@
 //! what resets, how long until then, the date, and how full the account's
 //! week is. Only a spare reset has a count.
 //!
+//! Selecting a row softly marks every other row of the same account, in all
+//! three tables, so one account's resets can be read off at a glance.
+//!
 //! This page only shows. cswap has no way to spend a reset, on purpose.
 
 use chrono::{DateTime, Utc};
@@ -263,6 +266,13 @@ struct Section<'a> {
     note: Option<(String, Color)>,
 }
 
+/// What is selected on the page: the row, counted over all three tables,
+/// and the account it belongs to.
+struct Picked<'a> {
+    row: Option<usize>,
+    key: Option<&'a str>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn table(
     f: &mut Frame,
@@ -273,7 +283,7 @@ fn table(
     rows: &[Row],
     // Where this section's rows start in the page's list, and the selection.
     offset: usize,
-    sel: Option<usize>,
+    picked: &Picked,
 ) {
     let t = &app.theme;
     let now = Utc::now();
@@ -322,16 +332,26 @@ fn table(
     }
     let top = inner.y + header as u16;
     let list_h = (inner.height - header as u16) as usize;
-    let local = sel
+    let local = picked
+        .row
         .and_then(|s| s.checked_sub(offset))
         .filter(|s| *s < rows.len());
-    let start = scroll_start(local.unwrap_or(0), rows.len(), list_h);
+    // A table without the selection scrolls to the selected account's first
+    // row in it, so that row is in view too.
+    let same = |row: &Row| picked.key == Some(row.key.as_str());
+    let anchor = local.or_else(|| rows.iter().position(same)).unwrap_or(0);
+    let start = scroll_start(anchor, rows.len(), list_h);
     for (j, row) in rows.iter().enumerate().skip(start).take(list_h) {
         let rect = Rect::new(inner.x, top + (j - start) as u16, inner.width, 1);
         let selected = local == Some(j);
-        let (mark, bg) = row_style(app, selected);
+        let (mut mark, bg) = row_style(app, selected);
         if selected {
             paint_row(f, rect, bg);
+        } else if same(row) {
+            // The selected account's other rows: a softer shade and a
+            // fainter marker than the selection's own.
+            paint_row(f, rect, Style::default().bg(t.soft()));
+            mark = Span::styled("▌", Style::default().fg(t.faint()).bg(t.soft()));
         }
         let mut spans = vec![mark];
         spans.extend(line(app, row, now, &c));
@@ -379,6 +399,13 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let noted = wants.iter().sum::<u16>() < area.height;
     let hs = heights(wants, area.height.saturating_sub(noted as u16), first);
 
+    let picked = Picked {
+        row: sel,
+        key: sel
+            .and_then(|s| parts.iter().flatten().nth(s))
+            .map(|r| r.key.as_str()),
+    };
+
     let spare = view::grant_count(&app.reg, now);
     let monthly = parts[1].iter().any(|r| r.what == "monthly");
     let list = [
@@ -424,7 +451,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             &list[i],
             &parts[i],
             offsets[i],
-            sel,
+            &picked,
         );
         y += h;
         // The view-only line sits right under the spare resets it is about.

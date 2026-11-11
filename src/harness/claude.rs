@@ -169,6 +169,21 @@ fn s(v: Option<&Value>) -> Option<String> {
         .map(String::from)
 }
 
+/// Anthropic's name for a rate-limit tier. Its two Max plans were renamed on
+/// 30 October 2026: Max 5x is "Max" and Max 20x is "Ultra". The tiers kept
+/// their old names.
+fn plan_name(tier: &str) -> String {
+    let known = tier.trim().to_lowercase();
+    match known
+        .trim_start_matches("default_")
+        .trim_start_matches("claude_")
+    {
+        "max_5x" => "Max".to_string(),
+        "max_20x" => "Ultra".to_string(),
+        _ => pretty_plan(tier),
+    }
+}
+
 pub fn local(config_dir: &Path, native: bool) -> Local {
     let config = fsx::read_value(&claude_json(config_dir, native));
     let account = config.as_ref().and_then(|c| c.get("oauthAccount"));
@@ -176,12 +191,15 @@ pub fn local(config_dir: &Path, native: bool) -> Local {
     let oauth = creds.as_ref().and_then(oauth);
     let get = |k: &str| s(account.and_then(|a| a.get(k)));
 
-    // The plan as Anthropic names it, else worked out from the rate-limit tier.
+    // The plan as Anthropic names it, else worked out from the rate-limit
+    // tier. The tier in the profile comes first: Claude Code fetches the
+    // profile again and again, while the tier beside the token is written at
+    // sign-in and can be a plan behind after an upgrade.
     let plan = get("planDisplayName")
         .or_else(|| {
-            s(oauth.and_then(|o| o.get("rateLimitTier")))
-                .or_else(|| get("organizationRateLimitTier"))
-                .map(|t| pretty_plan(&t))
+            get("organizationRateLimitTier")
+                .or_else(|| s(oauth.and_then(|o| o.get("rateLimitTier"))))
+                .map(|t| plan_name(&t))
         })
         .or_else(|| s(oauth.and_then(|o| o.get("subscriptionType"))).map(|t| pretty_plan(&t)));
     let ms = |k: &str| {
@@ -553,6 +571,44 @@ pub(crate) fn parse(body: &Value, now: DateTime<Utc>) -> Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_plan_is_anthropics_name_else_the_profiles_tier_else_the_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |profile: Value, token: Value| {
+            let file = |name: &str, v: Value| {
+                std::fs::write(dir.path().join(name), v.to_string()).unwrap();
+            };
+            file(".claude.json", json!({ "oauthAccount": profile }));
+            file(".credentials.json", json!({ "claudeAiOauth": token }));
+            local(dir.path(), false).plan
+        };
+        let old_token = json!({"accessToken": "t", "rateLimitTier": "default_claude_max_5x", "subscriptionType": "max"});
+
+        // After an upgrade the token still names the old tier. The profile
+        // has the new one, and it wins.
+        let plan = write(
+            json!({"organizationRateLimitTier": "default_claude_max_20x"}),
+            old_token.clone(),
+        );
+        assert_eq!(plan.as_deref(), Some("Ultra"));
+        // Anthropic's own name beats anything worked out from a tier.
+        let plan = write(
+            json!({"planDisplayName": "Team Premium", "organizationRateLimitTier": "default_claude_max_20x"}),
+            old_token.clone(),
+        );
+        assert_eq!(plan.as_deref(), Some("Team Premium"));
+        // No profile tier: the token's tier, under its current name.
+        assert_eq!(write(json!({}), old_token).as_deref(), Some("Max"));
+        // No tier at all: the kind of subscription.
+        let plan = write(
+            json!({}),
+            json!({"accessToken": "t", "subscriptionType": "pro"}),
+        );
+        assert_eq!(plan.as_deref(), Some("Pro"));
+        // A tier cswap has no name for is shown as it is.
+        assert_eq!(plan_name("default_claude_team_premium"), "Team Premium");
+    }
 
     fn live_shape() -> Value {
         json!({

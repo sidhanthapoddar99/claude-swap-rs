@@ -1131,7 +1131,7 @@ impl App {
                     &format!("Plan for {key}"),
                     "Plan name",
                     &current,
-                    "such as Max 20x · empty goes back to what the vendor reports",
+                    "such as Ultra · empty goes back to what the vendor reports",
                     Then::Plan(key),
                 );
             }

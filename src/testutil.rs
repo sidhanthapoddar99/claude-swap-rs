@@ -192,14 +192,14 @@ impl Sandbox {
         // Claude: the default login nearly spent, a work account with room and
         // a spare reset, and one that is cancelled.
         self.store(Harness::Claude, 0, |m| {
-            m.plan = Some("Max 5x".into());
+            m.plan = Some("Max".into());
             m.refresh.data = Some(week(64.0, 91.0, 30));
         });
         let work = crate::manage::create(Harness::Claude, "work").unwrap();
         self.store(Harness::Claude, work.meta.id, |m| {
             m.identity.email = Some("dev@corp.example".into());
             m.identity.org = Some("Corp".into());
-            m.plan = Some("Max 20x".into());
+            m.plan = Some("Ultra".into());
             m.last_used = Some(now - Duration::hours(2));
             m.billing = Billing {
                 cycle: Some(Cycle::Monthly),

@@ -24,7 +24,7 @@ One place for the accounts of your coding agents: **Claude Code**, **Codex**, **
 │   Health         2  9 │ ╰───────────────────────────────────────────────────────────────────────────────────────╯
 │   Settings          0 │ ╭ Accounts ─────────────────────────────────────────────────────────────────────────────╮
 │                       │ │    ACCOUNT               PLAN         USED                     RESETS IN STATE        │
-│                       │ │ ▌● work                  Max 20x      ━━━━━━━━━━━━━━━━━╋  38%  8h 59m    ● ready      │
+│                       │ │ ▌● work                  Ultra        ━━━━━━━━━━━━━━━━━╋  38%  8h 59m    ● ready      │
 │  AGENTS               │ │  ● side                  Pro          ━━━━━━━━━━╋━━━━━━━ 100%  2d        ● limit hit  │
 │  ● Claude Code     2  │ │  ● team                               not signed in · press l            ○ signed out │
 │  ● Codex           1  │ │                                                                                       │
@@ -185,7 +185,7 @@ The pages are numbered in the order of the menu, so `1` is Overview and `0` is S
 | --- | --- |
 | **Overview** | What to use next for each agent, and every account on one line. |
 | **Usage** | Every limit of every account, in one box per agent: the plan under the name, then a line per limit with a bar and its pace marker, the percent used, how long until it resets and the date. The short windows of a few hours are listed here too. |
-| **Resets** | Three parts: the spare resets you hold with how many and when they expire, when each account's weekly limit resets, and when each plan renews. Every row gives the account, the reset, how long until then, the date, and how much of the account's week is used. |
+| **Resets** | Three parts: the spare resets you hold with how many and when they expire, when each account's weekly limit resets, and when each plan renews. Every row gives the account, the reset, how long until then, the date, and how much of the account's week is used. Selecting a row softly marks the same account's other rows in all three parts. |
 | **Accounts** | Add, sign in, rename, set aliases, remove. For the selected account: its facts a line each, then the spare resets and credits it holds, then the details that explain them. |
 | **Defaults** | Each agent's own login and its usage, which account holds the same login, and `c` to make an account from it. |
 | **Sync** | Per account: what is linked, what is private, what is shadowed, and when it was last synced. |
@@ -257,6 +257,8 @@ update                     install the latest release         (--check)
 | Antigravity | week of the Gemini models, through `agy /usage` | not reported | not reported | not reported |
 
 Where the vendor does not report a renewal date or a reset, you can note it by hand on the Accounts page.
+
+The plan is read again whenever usage is fetched and whenever the dashboard opens. For Claude Code it comes from Claude Code's own login files, not from Anthropic: the plan's name when the files carry it, else the rate-limit tier in the profile, else the tier stored with the token. The profile comes before the token because the token keeps the tier it had at sign-in, which can be a plan behind after an upgrade. A plan you typed by hand is never overwritten.
 
 ## What cswap does and does not do
 
