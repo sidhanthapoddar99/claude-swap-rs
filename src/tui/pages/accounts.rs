@@ -10,7 +10,7 @@ use ratatui::Frame;
 
 use super::{
     dot, launch_hint, main_window, name_cell, no_data, paint_row, plan_text, row_style,
-    scroll_start, status, status_span, window_cells, Status,
+    scroll_start, status, status_span, window_cells,
 };
 use crate::harness::Harness;
 use crate::model::{self, Source};
@@ -37,7 +37,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         Some(acc) => detail(f, right, app, acc),
         None => {
             let inner = card(f, right, "", &app.theme, None);
-            super::empty(f, inner, app, "No accounts yet", &["Press a to add one."]);
+            super::no_accounts(f, inner, app);
         }
     }
 }
@@ -258,12 +258,10 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
         Span::raw(" "),
         state_span,
     ]));
+    let bin = acc.harness.spec().bins[0];
     let mut sub = format!("{key} · {}", acc.harness.name());
-    if acc.is_native() {
-        sub.push_str(" · the agent's own login");
-    }
     if app.is_default(acc) {
-        sub.push_str(" · default");
+        sub.push_str(&format!(" · a bare `{bin}` starts here"));
     }
     lines.push(Line::from(Span::styled(
         format!("  {}", truncate(&sub, w.saturating_sub(2))),
@@ -288,6 +286,16 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
         }
         .to_string();
     }
+    lines.push(kv(
+        t,
+        "Aliases",
+        LABEL_W,
+        if acc.meta.aliases.is_empty() {
+            vec![Span::styled("none · press E to add some", t.s_faint())]
+        } else {
+            plain(acc.meta.aliases.join(", "))
+        },
+    ));
     lines.push(kv(t, "Login", LABEL_W, plain(who)));
     let plan = plan_text(app, acc);
     lines.push(kv(
@@ -329,7 +337,7 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
     // Usage, in one line; the Usage page has the rest.
     match acc.snapshot().and_then(main_window).filter(|_| signed_in) {
         Some(win) => {
-            let bar_w = room.saturating_sub(5 + 2 + 32).clamp(6, 28);
+            let bar_w = room.saturating_sub(super::window_w(0)).clamp(6, 28);
             lines.push(kv(
                 t,
                 &format!("This {}", win.period()),
@@ -357,7 +365,7 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
         if let Some(at) = grants.iter().filter_map(|g| g.expires_at).min() {
             text.push_str(&format!(
                 " · the first expires in {}",
-                model::span(at - now)
+                model::until(at, now)
             ));
         }
         lines.push(kv(
@@ -398,13 +406,8 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
         LABEL_W,
         vec![Span::styled(launch_hint(app, acc), t.s(t.accent()))],
     ));
-    let folder = if acc.is_native() {
-        acc.harness.native_dir()
-    } else {
-        acc.dir()
-    };
-    lines.push(kv(t, "Folder", LABEL_W, dim(paths::tilde(&folder))));
-    if !acc.is_native() {
+    lines.push(kv(t, "Folder", LABEL_W, dim(paths::tilde(&acc.dir()))));
+    {
         let s = &acc.meta.sync;
         let mut text = format!("{} linked · {} private", s.linked, s.private);
         if !s.shadowed.is_empty() {
@@ -427,19 +430,10 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
             )],
         ));
     }
-    let mut used = match acc.meta.last_used {
+    let used = match acc.meta.last_used {
         Some(at) => model::ago(at, now),
-        None if acc.is_native() => "not tracked for the agent's own login".to_string(),
-        None => "never through cswap".to_string(),
+        None => "never".to_string(),
     };
-    if let Status::Live(_) = state {
-        let pids: Vec<String> = app
-            .live
-            .get(&key)
-            .map(|p| p.iter().map(|p| p.to_string()).collect())
-            .unwrap_or_default();
-        used = format!("running now · pid {}", pids.join(", "));
-    }
     lines.push(kv(t, "Last used", LABEL_W, dim(used)));
 
     f.render_widget(Paragraph::new(lines), inner);

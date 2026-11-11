@@ -25,37 +25,65 @@ pub fn installed(h: Harness) -> bool {
         .is_some_and(|hs| find_bin(h, &hs).is_ok())
 }
 
-/// Register a new, empty account for `h`. It has a directory and its links,
-/// and no login yet.
-pub fn create(h: Harness, label: Option<&str>) -> Result<Account> {
+/// Why `name` cannot be an account's name or alias, if it cannot.
+fn check_name(reg: &Registry, h: Harness, name: &str, except: Option<u32>) -> Result<()> {
+    if name.is_empty() {
+        bail!("an account needs a name");
+    }
+    if !store::valid_label(name) {
+        bail!(
+            "'{name}' cannot be a name: use letters, digits, '-', '_' or '.', \
+             not only digits, and not a reserved word"
+        );
+    }
+    if !reg.label_free(h, name, except) {
+        bail!("{} already has an account called '{name}'", h.name());
+    }
+    Ok(())
+}
+
+/// A name to offer for an account that signs in as `email`: the part before
+/// the @, with a number after it when that name is taken. Empty when the
+/// email gives nothing usable.
+pub fn suggest_name(reg: &Registry, h: Harness, email: &str) -> String {
+    let base: String = email
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(24)
+        .collect();
+    if base.is_empty() {
+        return String::new();
+    }
+    std::iter::once(base.clone())
+        .chain((2..100).map(|n| format!("{base}-{n}")))
+        .find(|name| store::valid_label(name) && reg.label_free(h, name, None))
+        .unwrap_or_default()
+}
+
+/// Register a new, empty account for `h`, called `name`. It has a directory
+/// and its links, and no login yet.
+pub fn create(h: Harness, name: &str) -> Result<Account> {
     if !h.wrappable() {
         bail!(
             "{} cannot be pointed at another config dir, so cswap cannot hold a second account for it",
             h.name()
         );
     }
-    let label = label.map(str::trim).filter(|l| !l.is_empty());
+    let name = name.trim();
     fsx::private_dir(&paths::accounts_dir())?;
     let mut acc = fsx::with_lock(&paths::accounts_dir(), || {
         let reg = Registry::load()?;
-        if let Some(l) = label {
-            if !store::valid_label(l) {
-                bail!(
-                    "'{l}' cannot be an alias: use letters, digits, '-', '_' or '.', \
-                     not only digits, and not a reserved word"
-                );
-            }
-            if !reg.label_free(h, l, None) {
-                bail!("{} already has an account called '{l}'", h.name());
-            }
-        }
+        check_name(&reg, h, name, None)?;
         let id = reg.next_id(h);
         let mut acc = Account {
             harness: h,
             meta: AccountMeta {
                 harness: h.id().to_string(),
                 id,
-                label: label.unwrap_or_default().to_string(),
+                label: name.to_string(),
                 created_at: Some(Utc::now()),
                 ..AccountMeta::default()
             },
@@ -226,56 +254,67 @@ pub fn remove(acc: &Account, live: &Live) -> Result<()> {
         fs::remove_dir_all(&dir).with_context(|| format!("cannot remove {}", dir.display()))?;
     }
     let _ = fs::remove_file(paths::history_file(&acc.key()));
-    // A default that pointed at this account falls back to the native login.
+    // A bare launch that started here falls back to the agent's own login.
     let id = acc.meta.id.to_string();
     let hs = HarnessSettings::load(acc.harness)?;
-    if hs.default == id {
-        HarnessSettings::update(acc.harness, |s| s.default = "native".to_string())?;
+    if hs.start == id {
+        HarnessSettings::update(acc.harness, |s| s.start = "default".to_string())?;
     }
     Ok(())
 }
 
-/// Set or clear an account's alias.
-pub fn set_label(acc: &mut Account, label: &str) -> Result<()> {
-    let label = label.trim();
-    if !label.is_empty() {
-        if !store::valid_label(label) {
-            bail!(
-                "'{label}' cannot be an alias: use letters, digits, '-', '_' or '.', \
-                 not only digits, and not a reserved word"
-            );
-        }
-        let reg = Registry::load()?;
-        if !reg.label_free(acc.harness, label, Some(acc.meta.id)) {
-            bail!(
-                "{} already has an account called '{label}'",
-                acc.harness.name()
-            );
-        }
-    }
+/// Give an account another name. The agent's own login has none.
+pub fn rename(acc: &mut Account, name: &str) -> Result<()> {
     if acc.is_native() {
-        fsx::private_dir(&acc.dir())?;
+        bail!(
+            "{}'s own login is called default and cannot be renamed",
+            acc.harness.name()
+        );
     }
-    acc.update(|m| m.label = label.to_string())
+    let name = name.trim();
+    check_name(&Registry::load()?, acc.harness, name, Some(acc.meta.id))?;
+    acc.update(|m| m.label = name.to_string())
 }
 
-/// Make `sel` the account a bare launch of `h` uses. `sel` is `native`,
-/// `auto`, or anything that names one account.
-pub fn set_default(h: Harness, sel: &str) -> Result<String> {
+/// Replace the extra names an account answers to. An empty list clears them.
+pub fn set_aliases(acc: &mut Account, aliases: &[String]) -> Result<()> {
+    if acc.is_native() {
+        bail!(
+            "{}'s own login is called default and takes no alias",
+            acc.harness.name()
+        );
+    }
+    let reg = Registry::load()?;
+    let mut clean: Vec<String> = Vec::new();
+    for a in aliases.iter().map(|a| a.trim()).filter(|a| !a.is_empty()) {
+        if a.eq_ignore_ascii_case(&acc.meta.label)
+            || clean.iter().any(|c| c.eq_ignore_ascii_case(a))
+        {
+            continue;
+        }
+        check_name(&reg, acc.harness, a, Some(acc.meta.id))?;
+        clean.push(a.to_string());
+    }
+    acc.update(|m| m.aliases = clean)
+}
+
+/// Make `sel` the account a bare launch of `h` starts on. `sel` is `default`
+/// (the agent's own login), `auto`, or anything that names one account.
+pub fn set_start(h: Harness, sel: &str) -> Result<String> {
     let value = match sel.trim().to_lowercase().as_str() {
         "auto" => "auto".to_string(),
-        "native" | "default" | "0" => "native".to_string(),
+        "native" | "default" | "0" => "default".to_string(),
         other => {
             let reg = Registry::load()?;
             let acc = reg.find(h, other)?;
             if acc.is_native() {
-                "native".to_string()
+                "default".to_string()
             } else {
                 acc.meta.id.to_string()
             }
         }
     };
-    HarnessSettings::update(h, |s| s.default = value.clone())?;
+    HarnessSettings::update(h, |s| s.start = value.clone())?;
     Ok(value)
 }
 
@@ -290,8 +329,9 @@ mod tests {
         let native = sb.native(Harness::Claude);
         fs::write(native.join("settings.json"), "{}").unwrap();
 
-        let a = create(Harness::Claude, Some("work")).unwrap();
-        let b = create(Harness::Claude, None).unwrap();
+        let a = create(Harness::Claude, "work").unwrap();
+        let b = create(Harness::Claude, " home ").unwrap();
+        assert_eq!(b.meta.label, "home");
         assert_eq!((a.key(), b.key()), ("claude-1".into(), "claude-2".into()));
         assert!(a.dir().join("settings.json").is_file());
         assert!(fs::symlink_metadata(a.config_dir().join("settings.json"))
@@ -300,11 +340,95 @@ mod tests {
             .is_symlink());
         assert_eq!(a.meta.sync.linked, 1);
 
-        // The alias is taken now, within this harness only.
-        assert!(create(Harness::Claude, Some("work")).is_err());
-        assert!(create(Harness::Claude, Some("3")).is_err());
+        // The name is taken now, within this agent only.
+        assert!(create(Harness::Claude, "work").is_err());
+        assert!(create(Harness::Claude, "WORK").is_err());
         sb.native(Harness::Codex);
-        assert!(create(Harness::Codex, Some("work")).is_ok());
+        assert!(create(Harness::Codex, "work").is_ok());
+    }
+
+    #[test]
+    fn an_account_needs_a_name_that_is_not_a_number_or_a_reserved_word() {
+        let sb = Sandbox::new();
+        sb.native(Harness::Claude);
+        for bad in ["", "  ", "3", "default", "native", "auto", "has space"] {
+            let err = create(Harness::Claude, bad);
+            assert!(err.is_err(), "'{bad}' was taken as a name");
+        }
+        assert!(Registry::load().unwrap().profiles().next().is_none());
+    }
+
+    #[test]
+    fn renaming_and_aliases_keep_every_name_of_an_agent_apart() {
+        let sb = Sandbox::new();
+        sb.native(Harness::Claude);
+        let mut work = create(Harness::Claude, "work").unwrap();
+        let mut home = create(Harness::Claude, "home").unwrap();
+
+        set_aliases(&mut work, &["w".into(), "office".into(), "W".into()]).unwrap();
+        assert_eq!(work.meta.aliases, ["w", "office"]);
+        // Another account can take neither a name nor an alias in use.
+        assert!(rename(&mut home, "office").is_err());
+        assert!(set_aliases(&mut home, &["work".into()]).is_err());
+        // An account's own names are not in its own way.
+        rename(&mut work, "office").unwrap();
+        assert_eq!(work.meta.label, "office");
+        // A name cannot be taken away, only replaced.
+        assert!(rename(&mut work, "").is_err());
+        set_aliases(&mut work, &[]).unwrap();
+        assert!(work.meta.aliases.is_empty());
+
+        let reg = Registry::load().unwrap();
+        assert_eq!(
+            reg.find(Harness::Claude, "office").unwrap().key(),
+            work.key()
+        );
+        let mut own = reg.find(Harness::Claude, "default").unwrap().clone();
+        assert!(rename(&mut own, "mine").is_err());
+        assert!(set_aliases(&mut own, &["mine".into()]).is_err());
+    }
+
+    #[test]
+    fn a_name_is_offered_from_the_email_and_numbered_when_taken() {
+        let sb = Sandbox::new();
+        sb.native(Harness::Claude);
+        let reg = Registry::load().unwrap();
+        assert_eq!(
+            suggest_name(&reg, Harness::Claude, "dev@corp.example"),
+            "dev"
+        );
+        assert_eq!(suggest_name(&reg, Harness::Claude, ""), "");
+        create(Harness::Claude, "dev").unwrap();
+        let reg = Registry::load().unwrap();
+        assert_eq!(
+            suggest_name(&reg, Harness::Claude, "dev@corp.example"),
+            "dev-2"
+        );
+        // A name that reads as a number or a reserved word is not offered bare.
+        assert_eq!(suggest_name(&reg, Harness::Claude, "auto@x.io"), "auto-2");
+    }
+
+    #[test]
+    fn only_another_account_counts_as_holding_the_same_login() {
+        let sb = Sandbox::new();
+        sb.native(Harness::Claude);
+        let mut work = create(Harness::Claude, "work").unwrap();
+        let mut home = create(Harness::Claude, "home").unwrap();
+        work.update(|m| m.identity.email = Some("me@x.io".into()))
+            .unwrap();
+        home.update(|m| m.identity.email = Some("me@x.io".into()))
+            .unwrap();
+        let mut reg = Registry::load().unwrap();
+        // The agent's default may hold the same login as an account.
+        reg.get_mut("claude-0").unwrap().meta.identity.email = Some("me@x.io".into());
+        let own = reg.get("claude-0").unwrap();
+        assert_eq!(duplicate_of(&reg, own).unwrap().key(), work.key());
+        assert_eq!(duplicate_of(&reg, &home).unwrap().key(), work.key());
+        assert_eq!(duplicate_of(&reg, &work).unwrap().key(), home.key());
+        home.update(|m| m.identity.email = Some("other@x.io".into()))
+            .unwrap();
+        let reg = Registry::load().unwrap();
+        assert!(duplicate_of(&reg, &work).is_none());
     }
 
     #[test]
@@ -313,15 +437,15 @@ mod tests {
         let native = sb.native(Harness::Claude);
         fs::create_dir_all(native.join("projects")).unwrap();
         fs::write(native.join("projects/keep.jsonl"), "x").unwrap();
-        let a = create(Harness::Claude, None).unwrap();
-        set_default(Harness::Claude, "1").unwrap();
+        let a = create(Harness::Claude, "work").unwrap();
+        set_start(Harness::Claude, "1").unwrap();
 
         remove(&a, &Live::new()).unwrap();
         assert!(!a.dir().exists());
         assert!(native.join("projects/keep.jsonl").is_file());
         assert_eq!(
-            HarnessSettings::load(Harness::Claude).unwrap().default,
-            "native"
+            HarnessSettings::load(Harness::Claude).unwrap().start,
+            "default"
         );
     }
 
@@ -329,7 +453,7 @@ mod tests {
     fn a_late_write_does_not_bring_a_removed_account_back() {
         let sb = Sandbox::new();
         sb.native(Harness::Claude);
-        let a = create(Harness::Claude, Some("gone")).unwrap();
+        let a = create(Harness::Claude, "gone").unwrap();
         // A fetch that started before the removal still holds the account.
         let mut in_flight = a.clone();
         remove(&a, &Live::new()).unwrap();
@@ -341,26 +465,28 @@ mod tests {
     }
 
     #[test]
-    fn remove_refuses_native_and_live_accounts() {
+    fn remove_refuses_the_default_login_and_live_accounts() {
         let sb = Sandbox::new();
         sb.native(Harness::Claude);
-        let a = create(Harness::Claude, None).unwrap();
+        let a = create(Harness::Claude, "work").unwrap();
         let mut live = Live::new();
         live.insert(a.key(), vec![42]);
         assert!(remove(&a, &live).is_err());
         let reg = Registry::load().unwrap();
-        let native = reg.find(Harness::Claude, "native").unwrap();
+        let native = reg.find(Harness::Claude, "default").unwrap();
         assert!(remove(native, &Live::new()).is_err());
     }
 
     #[test]
-    fn defaults_accept_words_ids_and_aliases() {
+    fn a_bare_launch_can_start_on_a_word_a_number_or_a_name() {
         let sb = Sandbox::new();
         sb.native(Harness::Claude);
-        create(Harness::Claude, Some("work")).unwrap();
-        assert_eq!(set_default(Harness::Claude, "work").unwrap(), "1");
-        assert_eq!(set_default(Harness::Claude, "AUTO").unwrap(), "auto");
-        assert_eq!(set_default(Harness::Claude, "0").unwrap(), "native");
-        assert!(set_default(Harness::Claude, "nobody").is_err());
+        create(Harness::Claude, "work").unwrap();
+        assert_eq!(set_start(Harness::Claude, "work").unwrap(), "1");
+        assert_eq!(set_start(Harness::Claude, "AUTO").unwrap(), "auto");
+        assert_eq!(set_start(Harness::Claude, "0").unwrap(), "default");
+        assert_eq!(set_start(Harness::Claude, "1").unwrap(), "1");
+        assert_eq!(set_start(Harness::Claude, "default").unwrap(), "default");
+        assert!(set_start(Harness::Claude, "nobody").is_err());
     }
 }

@@ -213,37 +213,46 @@ impl Hits {
     }
 }
 
-/// One clickable key hint.
+/// One clickable key hint: the key in the accent colour, then what it does.
 pub struct Chip<'a> {
     pub key: &'a str,
     pub label: &'a str,
     pub action: Action,
 }
 
-/// Draw chips left to right on one row and make each clickable. Chips that do
-/// not fit are left out.
+/// The space between two key hints.
+pub const CHIP_GAP: u16 = 3;
+
+impl Chip<'_> {
+    pub fn width(&self) -> u16 {
+        (width(self.key) + 1 + width(self.label)) as u16
+    }
+}
+
+/// The width of a row of key hints.
+pub fn chips_width(items: &[Chip]) -> u16 {
+    let gaps = items.len().saturating_sub(1) as u16 * CHIP_GAP;
+    items.iter().map(Chip::width).sum::<u16>() + gaps
+}
+
+/// Draw key hints left to right on one row and make each clickable. Hints
+/// that do not fit are left out.
 pub fn chips(f: &mut Frame, area: Rect, items: &[Chip], hits: &mut Hits, t: &Theme) {
     let mut x = area.x;
     let end = area.x + area.width;
     for chip in items {
-        let text_w = (width(chip.key) + width(chip.label) + 3) as u16;
+        let text_w = chip.width();
         if x + text_w > end {
             break;
         }
         let rect = Rect::new(x, area.y, text_w, 1);
         let line = Line::from(vec![
-            Span::styled(
-                format!(" {} ", chip.key),
-                Style::default()
-                    .fg(t.bg())
-                    .bg(t.dim())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!(" {}", chip.label), t.s_dim()),
+            Span::styled(chip.key.to_string(), t.s_accent()),
+            Span::styled(format!(" {}", chip.label), t.s_faint()),
         ]);
         f.render_widget(Paragraph::new(line), rect);
         hits.add(rect, chip.action.clone());
-        x += text_w + 2;
+        x += text_w + CHIP_GAP;
     }
 }
 
@@ -257,7 +266,7 @@ mod tests {
 
     #[test]
     fn a_bar_is_always_its_width_and_shows_small_usage() {
-        let t = Theme::detect(true);
+        let t = Theme::detect(true, "violet");
         for (pct, pace) in [
             (0.0, None),
             (1.0, None),
@@ -275,7 +284,7 @@ mod tests {
 
     #[test]
     fn styled_text_wraps_at_spaces_and_keeps_its_styles() {
-        let t = Theme::detect(true);
+        let t = Theme::detect(true, "violet");
         let spans = vec![
             Span::styled("good for 28d", t.s_text()),
             Span::styled(" · until Sat 14 Nov, then sign in again", t.s_dim()),

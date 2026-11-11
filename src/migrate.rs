@@ -119,12 +119,22 @@ fn adopt(old: &Old) -> Result<Account> {
             .filter(|a| store::valid_label(a) && reg.label_free(h, a, None))
             .cloned()
             .collect();
+        // Every account has a name. With no usable old alias it comes from
+        // the email, and failing that from the account's number.
+        let id = reg.next_id(h);
+        let label = usable
+            .first()
+            .cloned()
+            .or_else(|| {
+                Some(crate::manage::suggest_name(&reg, h, &old.email)).filter(|n| !n.is_empty())
+            })
+            .unwrap_or_else(|| format!("account{id}"));
         let mut acc = Account {
             harness: h,
             meta: AccountMeta {
                 harness: h.id().to_string(),
-                id: reg.next_id(h),
-                label: usable.first().cloned().unwrap_or_default(),
+                id,
+                label,
                 aliases: usable.iter().skip(1).cloned().collect(),
                 created_at: Some(Utc::now()),
                 ..AccountMeta::default()

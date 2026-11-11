@@ -2,36 +2,38 @@
 
 One place for the accounts of your coding agents: **Claude Code**, **Codex**, **Grok Build** and **Antigravity** (`agy`).
 
-- Keep several logins per agent and start any of them with one flag: `claude --cswap=work`.
-- See every account's limits, when each week resets, and which resets you still hold.
+- Keep several logins per agent, each under a name you choose, and start any of them with one flag: `claude --cswap=work`.
+- See every account's weekly limits, when each resets, and which resets you still hold.
 - Get told which account to use next, so a week that is about to reset is not wasted.
 - Settings, history, skills and plugins are shared by every account of an agent. Only the login differs.
 
 `cswap` is a single Rust binary for Linux, macOS and Windows. Starting an agent through it adds a few milliseconds and no network call. The agent then runs as itself: cswap replaces its own process with the agent's, so signals, exit codes and the terminal are the agent's own.
 
 ```
-  ◆ cswap  v0.7.0                                            updated 3m ago  ·  next in 10m     Wed 11 Nov  09:09
+  ◆ cswap  v0.7.0                                             updated 3m ago  ·  next in 10m     Wed 11 Nov  21:39
 
 ╭───────────────────────╮
-│ ▌ Overview          1 │  Overview   what to use next, and everything at a glance
-│   Sync              2 │ ╭ Accounts ──────────╮╭ Running now ───────╮╭ Next reset ────────╮╭ Attention ────────╮
-│   Usage             3 │ │ 6 signed in        ││ nothing            ││ in 8h 59m          ││ 2 to look at      │
-│   Accounts          4 │ │ 7 in all · 4 agents││ no agent is running││ work · 62% left    ││ codex-1 is not s… │
-│   Resets         1  5 │ ╰────────────────────╯╰────────────────────╯╰────────────────────╯╰───────────────────╯
-│   Analytics         6 │ ╭ Use next ───────────────────────────────────────────────────────────────────────────╮
-│   Health         2  7 │ │  ● Claude Code  ★ work     62% of the week left, resets in 8h 59m claude --cswap=work │
-│   Settings          8 │ │  ● Codex        ★ native   78% of the week left, resets in 4d 23h               codex │
-│                       │ │  ● Grok Build   ★ native   53% of the month left, resets in 16d 15h              grok │
-│                       │ ╰─────────────────────────────────────────────────────────────────────────────────────╯
-│                       │ ╭ Accounts ───────────────────────────────────────────────────────────────────────────╮
-│                       │ │    ACCOUNT            PLAN       THIS WEEK                     RESETS IN STATE        │
-│                       │ │ ▌● native claude ★    Max 5x     ━━━━━━━━━━━━━━━━━━━╋━━━  91%  1d 5h     ● ready      │
-│  AGENTS               │ │  ● work claude        Max 20x    ━━━━━━━━━━━━━━━━━━━━━╋━  38%  8h 59m    ● ready      │
-│  ● Claude Code     3  │ │  ● side claude        Pro        ━━━━━━━━━━━━━╋━━━━━━━━━ 100%  2d 21h    ● limit hit  │
-│  ● Codex           2  │ │  ● native codex ★     Plus       ━━━━━╋━━━━━━━━━━━━━━━━━  22%  4d 23h    ● ready      │
-│  ● Grok Build      1  │ │  ● native grok ★      SuperGrok  ━━━━━━━━━━╋━━━━━━━━━━━━  47%  16d 15h   ● ready      │
-╰───────────────────────╯ ╰─────────────────────────────────────────────────────────────────────────────────────╯
-   ⏎  actions   o  open   d  default   a  add account   r  refresh                             ? keys   esc  quit
+│ ▌ Overview          1 │  Overview   what to use next, and every account at a glance
+│   Usage             2 │ ╭ Accounts ──────────╮╭ Next reset ─────────╮╭ Spare resets ──────╮╭ Attention ─────────╮
+│   Accounts          3 │ │ 2 signed in        ││ in 8h 59m           ││ 1 held             ││ 2 to look at       │
+│   Defaults          4 │ │ of 3 · 1 agent     ││ work · 38% used     ││ work · 2d left     ││ team (codex-1) is… │
+│   Sessions          5 │ ╰────────────────────╯╰─────────────────────╯╰────────────────────╯╰────────────────────╯
+│   Resets         1  6 │ ╭ Use next ─────────────────────────────────────────────────────────────────────────────╮
+│                       │ │  ● Claude Code  ★ work  62% of the week left, resets in 8h 59m    claude --cswap=work │
+│   Sync              7 │ │  ● Codex        nothing usable right now · not logged in                              │
+│   Analytics         8 │ ╰───────────────────────────────────────────────────────────────────────────────────────╯
+│   Health         2  9 │ ╭ Accounts ─────────────────────────────────────────────────────────────────────────────╮
+│   Settings          0 │ │    ACCOUNT               PLAN         USED                     RESETS IN STATE        │
+│                       │ │ ▌● work claude           Max 20x      ━━━━━━━━━━━━━━━━━╋  38%  8h 59m    ● ready      │
+│  AGENTS               │ │  ● side claude           Pro          ━━━━━━━━━━╋━━━━━━━ 100%  2d        ● limit hit  │
+│  ● Claude Code     2  │ │  ● team codex                         not signed in · press l            ○ signed out │
+│  ● Codex           1  │ │                                                                                       │
+│  ● Antigravity     0  │ │                                                                                       │
+│  ● Grok Build      0  │ │                                                                                       │
+│                       │ │                                                                                       │
+╰───────────────────────╯ ╰───────────────────────────────────────────────────────────────────────────────────────╯
+
+  ⏎ actions   o open   d start here   a add account   r refresh                                  ? keys   esc menu
 ```
 
 ## Install
@@ -84,14 +86,25 @@ Invoke-Expression (& cswap shell-init powershell | Out-String)   # $PROFILE
 
 ```bash
 cswap                     # open the dashboard
-cswap add claude work     # add a second Claude account named "work", then sign in
+cswap add claude work     # add a Claude account named "work", then sign in
 claude --cswap=work       # start Claude Code on it
-claude                    # start it on the default account, as before
-cswap default claude work # make "work" the default
+claude                    # start it on its default login, as before
+cswap use claude work     # from now on a bare `claude` starts on "work"
 cswap suggest             # which account to use next, and why
 ```
 
-Nothing changes until you add an account. Your existing login in `~/.claude`, `~/.codex`, `~/.gemini` or `~/.grok` shows up as account `0`, called `native`. cswap reads it and never writes to it.
+Nothing changes until you add an account. The login you already have in `~/.claude`, `~/.codex`, `~/.gemini` or `~/.grok` is that agent's **default**. cswap shows it on its own page, reads it and never writes to it.
+
+## Accounts and defaults
+
+There are two kinds of login, and cswap keeps them apart.
+
+- An **account** is a login cswap holds for you. Every account has a **name** (`work`); it is asked for when you add the account and cannot be left empty. An account can also have **aliases**, extra names it answers to. Names and aliases are unique within an agent.
+- A **default** is an agent's own login, the one in `~/.claude` and friends. Each agent has exactly one. It is called `default`, and it is listed on the Defaults page and by `cswap defaults`, not among your accounts.
+
+One login belongs to one account. If you sign a new account in as someone an account of that agent already holds, cswap says so and adds nothing. The one exception is the default: an account may hold the same login as its agent's default.
+
+To turn a default into an account, press `c` on the Defaults page (or run `cswap add <agent> <name>`), name it, and sign in once more. cswap does not copy the default's login into the account. The vendors replace a login's token every time it is renewed, so two copies of one login sign each other out.
 
 ## How accounts work
 
@@ -109,10 +122,10 @@ A cswap account is a directory of its own that mirrors the agent's dir with link
 ```
 ~/.cswap/
   settings.json                     cswap's own settings
-  harness/claude/settings.json      per agent: default account, wrapping, sync
+  harness/claude/settings.json      per agent: where a bare launch starts, wrapping, sync
   accounts/
     claude-1/
-      settings.json                 alias, identity, plan, last refresh and its data
+      settings.json                 name, aliases, identity, plan, last refresh and its data
       config_dir/                   what the agent is pointed at
         .credentials.json           real: this account's login
         .claude.json                real: who it is
@@ -139,15 +152,15 @@ Each agent has a short built-in list of names that stay private (logins, identit
 ## Starting agents
 
 ```bash
-cswap claude [args…]            # the default account
-cswap claude --cswap=work       # by alias
+cswap claude [args…]            # where a bare launch starts
+cswap claude --cswap=work       # by name or alias
 cswap claude --cswap=2          # by number
-cswap claude --cswap=native     # the agent's own login
+cswap claude --cswap=default    # the agent's default login
 cswap claude --cswap=auto       # the best account right now
 cswap claude --cswap=work,side  # the first of these that is free
 cswap claude --cswap-select     # pick from a list
 cswap start                     # pick the agent, then the account
-cswap start --default           # pick the agent, use its default account
+cswap start --default           # pick the agent, start where a bare launch does
 ```
 
 Everything after the agent's name goes to the agent untouched, `--help` and `-h` included. The only arguments cswap takes out are `--cswap=…` and `--cswap-select`.
@@ -156,30 +169,40 @@ Which account a launch uses, first match wins:
 
 1. `--cswap=<account>` on the command line
 2. `CSWAP_CLAUDE`, `CSWAP_CODEX`, `CSWAP_AGY` or `CSWAP_GROK` in the environment (`export CSWAP_CLAUDE=work` pins one terminal)
-3. the agent's default: `native`, `auto` or an account, set with `cswap default` or in Settings
+3. where a bare launch of the agent starts: its `default` login, `auto` or an account, set with `cswap use <agent> <account>` or in Settings
 
-An account is named by its alias (`work`), its key (`claude-2`), its number within the agent (`2`), its email, or `native`.
+An account answers to its name (`work`), its aliases, its key (`claude-2`), its number within the agent (`2`) and its email. `default` is the agent's own login.
 
 `cswap ps` lists the agents that are running and which account each is on.
 
 ## The dashboard
 
-Run `cswap` with no arguments. Keys: `1`–`8` or the arrow keys to move, `Enter` to act, `?` for every key. `Esc` steps back: out of a dialog, out of the page, then out of cswap. The mouse works too.
+Run `cswap` with no arguments. Keys: `1`–`9` and `0` or the arrow keys to move, `Enter` to act, `?` for every key. `Esc` steps back: out of a dialog, out of the page, then out of cswap. The mouse works too.
 
 | Page | What it shows |
 | --- | --- |
-| **Overview** | What to use next for each agent, and every account on one screen. |
-| **Sync** | Per account: what is linked, what is private, what is shadowed, and when it was last synced. |
-| **Usage** | One card per account: the weekly limit with a pace marker, the day and time it resets, extra usage, spare resets. |
-| **Accounts** | Add, sign in, alias, set default, remove. Plan, renewal date, how long the login is valid, where it lives. |
+| **Overview** | What to use next for each agent, and every account on one line. |
+| **Usage** | Every limit of every account in one grid: a bar with a pace marker, the percent used, and how long until it resets. Nothing else. |
+| **Accounts** | Add, sign in, rename, set aliases, remove. Plan, renewal date, how long the login is valid, where it lives. |
+| **Defaults** | Each agent's own login and its usage, which account holds the same login, and `c` to make an account from it. |
+| **Sessions** | The agents running right now: which account each is on, since when, and in which folder. |
 | **Resets** | Four parts: everything coming up in one list by time, the spare resets you hold and when they expire, when each weekly limit resets, and when each plan renews. |
+| **Sync** | Per account: what is linked, what is private, what is shadowed, and when it was last synced. |
 | **Analytics** | Burn rate per account over the last week and where it lands at the reset. More is planned. |
-| **Health** | Anything that needs attention: signed-out accounts, shadowed files, a missing shell integration. |
-| **Settings** | General settings, one tab per agent, and the shell line to copy. |
+| **Health** | Anything that needs attention: signed-out accounts, two accounts on one login, shadowed files, a missing shell integration. |
+| **Settings** | The theme and the general settings, one tab per agent, and the shell line to copy. |
+
+Every bar, percent and countdown sits in the same column on every page. A countdown is as short as it can be: `3d` when it is more than two days off, `1d 6h` within two days, `4h 25m` within one. The exact date is on the Resets page.
+
+Only the weekly and monthly limits are shown. The agents also have short windows of a few hours; cswap reads them to know when an account is rate limited right now, and shows them nowhere.
 
 Usage is fetched when the dashboard opens and then every 10 minutes while it stays open (change it in Settings). Nothing is fetched in the background when the dashboard is closed, and starting an agent never fetches.
 
-**Adding an account** from the Accounts page: press `a`, pick the agent, type an alias or leave it empty, press `Enter`. cswap steps aside and the agent's own sign-in runs in your terminal. When it finishes you are back in the dashboard with the new account. If the sign-in is abandoned, nothing is added.
+**Adding an account**: press `a`, pick the agent, type its name, press `Enter`. cswap steps aside and the agent's own sign-in runs in your terminal. When it finishes you are back in the dashboard with the new account. If the sign-in is abandoned, or another account already holds that login, nothing is added.
+
+### Themes
+
+Settings → General → Theme steps through six: `violet` (the one in the picture), `blue`, `green`, `dark` (true black), `grey` (no colour at all: how full a bar is shows as brightness) and `terminal`, which uses your terminal's own 16 colours and so follows the theme you already have. The choice is kept in `~/.cswap/settings.json` as `theme`.
 
 ### Resets are view only
 
@@ -193,19 +216,21 @@ The suggestion follows one idea: use what you would otherwise lose. An account w
 
 ```
 cswap                      open the dashboard
-cswap <agent> [args…]      run an agent on its default account
+cswap <agent> [args…]      run an agent on the account it starts on
 cswap start [--default]    pick an agent and an account, then run it
 
-ps                         which agents are running, on which account
 list                       every account and its state        (--json)
-usage [account]            limits, pace and reset times       (--refresh)
+defaults                   the agents' own logins             (--json)
+ps                         which agents are running, on which account
+usage [account]            weekly limits and when they reset  (--refresh)
 resets                     spare resets and what resets when
 suggest [agent]            which account to use next, and why
 
-add <agent> [alias]        add an account and sign in
+add <agent> <name>         add an account and sign in
 login <account>            sign in again
-alias <account> [name]     name an account, or clear its name
-default <agent> [account]  show or set what a bare launch uses
+rename <account> <name>    give an account another name
+alias <account> [names…]   show or set its extra names        (--clear)
+use <agent> [account]      show or set where a bare launch starts
 remove <account>           delete an account's login          (--yes)
 
 refresh [account]          fetch usage now
@@ -222,10 +247,10 @@ update                     install the latest release         (--check)
 
 | | Limits | Spare resets | Plan | Renewal date |
 | --- | --- | --- | --- | --- |
-| Claude Code | session, week, per-model week, extra usage | count and expiry | yes | set by hand |
-| Codex | session, week | count and expiry | yes | yes |
+| Claude Code | week, per-model week, extra usage | count and expiry | yes | set by hand |
+| Codex | week | count and expiry | yes | yes |
 | Grok Build | monthly credits | not reported | yes | not reported |
-| Antigravity | week and 5-hour of the Gemini models, through `agy /usage` | not reported | not reported | not reported |
+| Antigravity | week of the Gemini models, through `agy /usage` | not reported | not reported | not reported |
 
 Where the vendor does not report a renewal date or a reset, you can note it by hand on the Accounts page.
 
@@ -247,7 +272,7 @@ Logins are stored the way each agent stores them, in files only you can read (`0
 cswap migrate
 ```
 
-Each old profile becomes a Claude account and keeps its aliases. The profile's directory is moved, and a link is left at the old path so that paths recorded by Claude still resolve.
+Each old profile becomes a Claude account. Its first alias becomes its name and the rest stay as aliases; a profile with no usable alias is named after its email. The profile's directory is moved, and a link is left at the old path so that paths recorded by Claude still resolve.
 
 | 0.6 | now |
 | --- | --- |
@@ -265,7 +290,7 @@ Each old profile becomes a Claude account and keeps its aliases. The profile's d
 | macOS | Built in CI. Claude Code keeps its login in the keychain there, which cswap reads with `/usr/bin/security`. Not yet tested on a real Mac. |
 | Windows | Built in CI. The agent runs as a child process, since Windows cannot replace a process. Linking needs Developer Mode or an elevated shell. Not yet tested on a real PC. |
 
-`cswap ps` reads `/proc` on Linux and sees every session. On macOS and Windows it lists the sessions that were started through cswap.
+`cswap ps` and the Sessions page read `/proc` on Linux and see every session. On macOS and Windows they list the sessions that were started through cswap.
 
 ## Environment
 
@@ -288,6 +313,7 @@ Remove the shell integration line from your rc file, delete the binary, and dele
 cargo test                                   # unit tests and end-to-end tests of the binary
 cargo clippy --all-targets -- -D warnings
 CSWAP_SHOW=1 cargo test every_page -- --nocapture   # print every dashboard page
+cargo test readme_picture -- --ignored --nocapture  # print the picture at the top of this file
 ```
 
 Tests run in a fabricated home with shell scripts standing in for the agents. They never touch your logins or the network.

@@ -47,6 +47,10 @@ fn rate(v: Option<f64>) -> String {
 pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let t = &app.theme;
     let now = Utc::now();
+    if app.reg.accounts.is_empty() {
+        super::no_accounts(f, area, app);
+        return;
+    }
     let [table, foot] = Layout::vertical([Constraint::Min(5), Constraint::Length(5)]).areas(area);
     let focused = app.focus == Focus::Main;
     let inner = card(f, table, "Burn rate", t, focused.then(|| t.accent()));
@@ -142,7 +146,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         let win = acc.snapshot().and_then(main_window);
         let text = match (
             win,
-            win.and_then(|w| super::pace_text(w, now, app.settings.clock_24h)),
+            win.and_then(|w| crate::view::pace_text(w, now, app.settings.clock_24h)),
         ) {
             (_, Some((text, _))) => format!("{}: {text}.", acc.title()),
             (Some(w), None) if w.used_now(now) >= 99.5 => format!(

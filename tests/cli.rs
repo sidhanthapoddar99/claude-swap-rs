@@ -30,10 +30,10 @@ name=$(basename "$0")
 case "$name $*" in
   "claude auth login")
     printf '%s' '{"claudeAiOauth":{"accessToken":"tok-new","refreshToken":"r","expiresAt":4102444800000}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
-    printf '%s' '{"oauthAccount":{"emailAddress":"new@example.com"}}' > "$CLAUDE_CONFIG_DIR/.claude.json" ;;
+    printf '{"oauthAccount":{"emailAddress":"%s"}}' "${CSWAP_FAKE_EMAIL:-new@example.com}" > "$CLAUDE_CONFIG_DIR/.claude.json" ;;
   "codex login")
     if [ -n "${CSWAP_FAKE_FAIL:-}" ]; then echo "login cancelled"; exit 1; fi
-    printf '%s' '{"tokens":{"access_token":"a.b.c","account_id":"acct-new"}}' > "$CODEX_HOME/auth.json" ;;
+    printf '{"tokens":{"access_token":"a.b.c","account_id":"%s"}}' "${CSWAP_FAKE_ACCT:-acct-new}" > "$CODEX_HOME/auth.json" ;;
   *) echo "$name ran" ;;
 esac
 exit "${CSWAP_FAKE_EXIT:-0}"
@@ -157,15 +157,32 @@ impl Env {
         self.cswap_home().join("accounts").join(key)
     }
 
+    /// The accounts cswap holds. The agents' own logins are not among them.
     fn list(&self) -> Vec<Value> {
         serde_json::from_str(&self.ok(&["list", "--json"])).unwrap()
+    }
+
+    /// The agents' own logins.
+    fn defaults(&self) -> Vec<Value> {
+        serde_json::from_str(&self.ok(&["defaults", "--json"])).unwrap()
     }
 
     fn account(&self, key: &str) -> Value {
         self.list()
             .into_iter()
+            .chain(self.defaults())
             .find(|a| a["key"] == key)
             .unwrap_or_else(|| panic!("no account {key}"))
+    }
+
+    /// Add a Claude Code account that signs in as `email`.
+    fn add_claude(&self, name: &str, email: &str) {
+        let out = self
+            .cmd(&["add", "claude", name])
+            .env("CSWAP_FAKE_EMAIL", email)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
     }
 }
 
@@ -275,8 +292,8 @@ fn the_cswap_flag_picks_the_account_and_is_removed() {
         );
     }
 
-    // The agent's own login can be asked for by name as well.
-    env.ok(&["claude", "--cswap=native"]);
+    // The agent's own login is asked for as `default`.
+    env.ok(&["claude", "--cswap=default"]);
     assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"));
 }
 
@@ -305,9 +322,11 @@ fn the_default_and_the_pin_variable_choose_the_account() {
     env.ok(&["add", "claude", "work"]);
     env.log();
 
-    // Out of the box the agent's own login stays the default.
+    // Out of the box a bare launch stays on the agent's own login.
     env.ok(&["claude"]);
     assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"));
+    assert_eq!(env.account("claude-0")["starts_here"], true);
+    assert!(env.ok(&["use", "claude"]).contains("default login"));
 
     // A pin for one shell wins over the default.
     let out = env
@@ -318,10 +337,12 @@ fn the_default_and_the_pin_variable_choose_the_account() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(env.log().contains("CSWAP_ACCOUNT=claude-1\n"));
 
-    env.ok(&["default", "claude", "work"]);
+    env.ok(&["use", "claude", "work"]);
     env.ok(&["claude"]);
     assert!(env.log().contains("CSWAP_ACCOUNT=claude-1\n"));
-    assert_eq!(env.account("claude-1")["default"], true);
+    assert_eq!(env.account("claude-1")["starts_here"], true);
+    assert_eq!(env.account("claude-0")["starts_here"], false);
+    assert!(env.ok(&["use", "claude"]).contains("work"));
 
     // The flag wins over both.
     let out = env
@@ -335,6 +356,12 @@ fn the_default_and_the_pin_variable_choose_the_account() {
     // Codex was never touched by any of this.
     env.ok(&["codex"]);
     assert!(env.log().contains("CSWAP_ACCOUNT=codex-0\n"));
+
+    // And back to the agent's own login.
+    env.ok(&["use", "claude", "default"]);
+    env.ok(&["claude"]);
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"));
+    env.fails(&["use", "claude", "nobody"]);
 }
 
 #[test]
@@ -355,7 +382,7 @@ fn add_shares_everything_but_the_login() {
 
     let out = env.ok(&["add", "claude", "work"]);
     assert!(
-        out.contains("claude-1 is signed in as new@example.com"),
+        out.contains("work is signed in as new@example.com"),
         "{out}"
     );
     let log = env.log();
@@ -388,16 +415,130 @@ fn add_shares_everything_but_the_login() {
     assert_eq!(tree(&env.home().join(".claude")), native_before);
 
     let acc = env.account("claude-1");
-    assert_eq!(acc["alias"], "work");
+    assert_eq!(acc["name"], "work");
     assert_eq!(acc["email"], "new@example.com");
     assert_eq!(acc["signed_in"], true);
     assert_eq!(env.account("claude-0")["email"], "own@example.com");
 }
 
 #[test]
+fn the_agents_own_logins_are_defaults_and_not_accounts() {
+    let env = Env::new();
+    assert!(env.list().is_empty());
+    let keys: Vec<String> = env
+        .defaults()
+        .iter()
+        .map(|d| d["key"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(keys, ["claude-0", "codex-0"]);
+    for d in env.defaults() {
+        assert_eq!(d["name"], "default");
+        assert_eq!(d["same_login_as"], Value::Null);
+    }
+
+    // An account that signs in as the same person: the one pairing allowed.
+    env.add_claude("mine", "own@example.com");
+    let keys: Vec<String> = env
+        .list()
+        .iter()
+        .map(|a| a["key"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(keys, ["claude-1"]);
+    assert_eq!(env.account("claude-0")["same_login_as"], "mine");
+
+    let text = env.ok(&["defaults"]);
+    assert!(
+        text.contains("own@example.com") && text.contains("same login as mine"),
+        "{text}"
+    );
+    let list = env.ok(&["list"]);
+    // One row: the account. The agent's own login is not listed with it.
+    assert!(list.contains("mine"), "{list}");
+    assert_eq!(list.matches("own@example.com").count(), 1, "{list}");
+    // Nowhere is the old word for it.
+    for cmd in [
+        &["list"][..],
+        &["defaults"],
+        &["usage"],
+        &["resets"],
+        &["-h"],
+    ] {
+        let out = env.ok(cmd).to_lowercase();
+        assert!(!out.contains("native"), "cswap {cmd:?}\n{out}");
+    }
+}
+
+#[test]
+fn every_account_has_a_name() {
+    let env = Env::new();
+    // No name and nobody to ask: nothing is added and no sign-in runs.
+    let err = env.fails(&["add", "claude"]);
+    assert!(err.contains("name"), "{err}");
+    for bad in ["3", "default", "auto", "two words"] {
+        let err = env.fails(&["add", "claude", bad]);
+        assert!(err.contains("name"), "{bad}: {err}");
+    }
+    assert_eq!(env.log(), "", "no sign-in must have run");
+    assert!(env.list().is_empty());
+
+    env.add_claude("work", "a@example.com");
+    env.add_claude("side", "b@example.com");
+    // A name is one account's, within its agent.
+    let err = env.fails(&["add", "claude", "work"]);
+    assert!(err.contains("work"), "{err}");
+    let err = env.fails(&["rename", "side", "work"]);
+    assert!(err.contains("work"), "{err}");
+
+    env.ok(&["rename", "side", "play"]);
+    assert_eq!(env.account("claude-2")["name"], "play");
+    env.log();
+    env.ok(&["claude", "--cswap=play"]);
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-2\n"));
+    env.fails(&["claude", "--cswap=side"]);
+    // The agent's own login is called default, and that cannot change.
+    env.fails(&["rename", "claude-0", "mine"]);
+}
+
+#[test]
+fn a_login_is_held_by_one_account_only() {
+    let env = Env::new();
+    env.add_claude("work", "a@example.com");
+    env.log();
+
+    // Signing in as the same person again adds nothing.
+    let out = env
+        .cmd(&["add", "claude", "again"])
+        .env("CSWAP_FAKE_EMAIL", "a@example.com")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("work already holds the login a@example.com"),
+        "{err}"
+    );
+    assert!(!env.account_dir("claude-2").exists());
+    assert_eq!(env.list().len(), 1);
+    // The name is free, for the login that is someone else's.
+    env.add_claude("again", "b@example.com");
+    assert_eq!(env.account("claude-2")["email"], "b@example.com");
+
+    // Codex tells logins apart by the account behind them.
+    env.ok(&["add", "codex", "team"]);
+    let err = env.fails(&["add", "codex", "team2"]);
+    assert!(err.contains("team already holds"), "{err}");
+    let out = env
+        .cmd(&["add", "codex", "team2"])
+        .env("CSWAP_FAKE_ACCT", "acct-other")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+}
+
+#[test]
 fn a_file_the_agent_makes_later_is_shared_at_the_next_launch() {
     let env = Env::new();
-    env.ok(&["add", "claude"]);
+    env.ok(&["add", "claude", "work"]);
     let dir = env.account_dir("claude-1").join("config_dir");
     fs::create_dir_all(env.home().join(".claude/plugins")).unwrap();
     assert!(fs::symlink_metadata(dir.join("plugins")).is_err());
@@ -423,36 +564,49 @@ fn a_sign_in_that_fails_adds_nothing() {
         text(&out.stderr)
     );
     assert!(!env.account_dir("codex-1").exists());
-    assert_eq!(
-        env.list().iter().filter(|a| a["agent"] == "codex").count(),
-        1
-    );
+    assert!(env.list().is_empty());
 
     // The name is free again.
     env.ok(&["add", "codex", "team"]);
-    assert_eq!(env.account("codex-1")["alias"], "team");
+    assert_eq!(env.account("codex-1")["name"], "team");
 }
 
 #[test]
-fn an_alias_is_unique_and_can_be_changed_or_cleared() {
+fn aliases_are_extra_names_that_can_be_set_shown_and_cleared() {
     let env = Env::new();
-    env.ok(&["add", "claude", "work"]);
-    env.ok(&["add", "claude", "side"]);
-    assert_eq!(env.account("claude-2")["alias"], "side");
+    env.add_claude("work", "a@example.com");
+    env.add_claude("side", "b@example.com");
+    assert_eq!(env.account("claude-2")["name"], "side");
+    assert_eq!(env.account("claude-2")["aliases"], serde_json::json!([]));
 
+    // An alias cannot be another account's name or alias.
     let err = env.fails(&["alias", "claude-2", "work"]);
     assert!(err.contains("work"), "{err}");
-    env.ok(&["alias", "side", "play"]);
-    assert_eq!(env.account("claude-2")["alias"], "play");
-    env.ok(&["claude", "--cswap=play"]);
-    assert!(env.log().contains("CSWAP_ACCOUNT=claude-2\n"));
+    env.ok(&["alias", "side", "play", "s"]);
+    let acc = env.account("claude-2");
+    assert_eq!(acc["name"], "side", "an alias does not replace the name");
+    assert_eq!(acc["aliases"], serde_json::json!(["play", "s"]));
+    let err = env.fails(&["alias", "work", "play"]);
+    assert!(err.contains("play"), "{err}");
+    let shown = env.ok(&["alias", "side"]);
+    assert!(shown.contains("play") && shown.contains('s'), "{shown}");
+
+    env.log();
+    for name in ["side", "play", "s"] {
+        env.ok(&["claude", &format!("--cswap={name}")]);
+        assert!(env.log().contains("CSWAP_ACCOUNT=claude-2\n"), "{name}");
+    }
+    env.ok(&["alias", "side", "--clear"]);
+    assert_eq!(env.account("claude-2")["aliases"], serde_json::json!([]));
+    env.fails(&["claude", "--cswap=play"]);
+    env.ok(&["claude", "--cswap=side"]);
 }
 
 #[test]
 fn remove_deletes_the_account_and_leaves_the_agents_own_login() {
     let env = Env::new();
     env.ok(&["add", "claude", "work"]);
-    env.ok(&["default", "claude", "work"]);
+    env.ok(&["use", "claude", "work"]);
 
     // Without --yes and without a terminal, nothing is removed.
     env.fails(&["remove", "work"]);
@@ -461,7 +615,7 @@ fn remove_deletes_the_account_and_leaves_the_agents_own_login() {
     env.ok(&["remove", "work", "--yes"]);
     assert!(!env.account_dir("claude-1").exists());
     assert!(env.home().join(".claude/.credentials.json").exists());
-    // The default fell back to the agent's own login.
+    // A bare launch fell back to the agent's own login.
     env.log();
     env.ok(&["claude"]);
     assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"));
@@ -487,7 +641,10 @@ fn help_names_every_command_in_groups() {
             "EXAMPLES",
             "cswap start",
             "ps  ",
-            "add <agent> [alias]",
+            "defaults  ",
+            "add <agent> <name>",
+            "rename <account> <name>",
+            "use <agent> [account]",
             "update  ",
             "--cswap=",
             "--cswap-select",
@@ -510,12 +667,14 @@ fn the_text_views_work_without_a_terminal() {
     env.ok(&["add", "claude", "work"]);
     let list = env.ok(&["list"]);
     assert!(
-        list.contains("work") && list.contains("own@example.com"),
+        list.contains("work") && list.contains("new@example.com"),
         "{list}"
     );
     assert!(!list.contains('\x1b'), "no colour codes when piped");
     for cmd in [
         &["usage"][..],
+        &["usage", "work"],
+        &["defaults"],
         &["resets"],
         &["suggest"],
         &["suggest", "claude"],

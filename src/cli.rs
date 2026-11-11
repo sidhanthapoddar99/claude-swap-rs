@@ -59,39 +59,39 @@ impl Ctx {
     }
 
     fn state(&self, acc: &Account) -> view::State {
-        view::state(
-            acc,
-            self.signed_in(acc),
-            self.live.get(&acc.key()).map_or(0, Vec::len),
-            false,
-            self.now,
-        )
+        view::state(acc, self.signed_in(acc), false, self.now)
     }
 
     fn state_text(&self, acc: &Account) -> String {
         let s = self.state(acc);
         let text = s.label();
         match s {
-            view::State::Live(_) => self.p.ok(&text),
+            view::State::Ready => self.p.ok(&text),
             view::State::Blocked => self.p.bad(&text),
             view::State::Stale => self.p.warn(&text),
             _ => self.p.dim(&text),
         }
     }
 
-    /// The agents that have at least one account, in their fixed order.
+    /// The agents that have at least one cswap account, in their fixed order.
     fn agents(&self) -> Vec<Harness> {
         Harness::ALL
             .into_iter()
-            .filter(|h| self.reg.of(*h).next().is_some())
+            .filter(|h| self.reg.profiles().any(|a| a.harness == *h))
             .collect()
+    }
+
+    /// The cswap account that holds the same login as `acc`, an agent's
+    /// default.
+    fn twin(&self, acc: &Account) -> Option<&Account> {
+        manage::duplicate_of(&self.reg, acc)
     }
 
     fn agent_header(&self, h: Harness) -> String {
         let hs = &self.hs[&h];
-        let default = match hs.default.as_str() {
-            "native" => "its own login".to_string(),
-            "auto" => "auto".to_string(),
+        let default = match hs.start.as_str() {
+            "default" => "its default login".to_string(),
+            "auto" => "the best account (auto)".to_string(),
             id => self
                 .reg
                 .of(h)
@@ -142,15 +142,15 @@ fn account_json(c: &Ctx, acc: &Account) -> serde_json::Value {
         "key": acc.key(),
         "agent": acc.harness.id(),
         "id": acc.meta.id,
-        "alias": acc.meta.label,
+        "name": acc.title(),
+        "aliases": acc.meta.aliases,
         "email": acc.meta.identity.email,
         "plan": view::plan_text(acc, &c.local),
-        "default": c.is_default(acc),
+        "starts_here": c.is_default(acc),
         "signed_in": c.signed_in(acc),
-        "running": c.live.get(&acc.key()).cloned().unwrap_or_default(),
         "state": c.state(acc).label(),
         "fetched_at": snap.map(|s| s.fetched_at),
-        "windows": snap.map(|s| s.windows.iter().map(|w| json!({
+        "windows": snap.map(|s| view::usage_windows(s).into_iter().map(|w| json!({
             "label": w.label,
             "used_pct": w.used_now(c.now),
             "resets_at": w.resets_at,
@@ -178,7 +178,7 @@ fn usage_cell(c: &Ctx, acc: &Account) -> String {
         Some(w) => {
             let used = w.used_now(c.now);
             let reset = match w.resets_at {
-                Some(at) if at > c.now => format!("resets in {}", model::span(at - c.now)),
+                Some(at) if at > c.now => format!("in {}", model::until(at, c.now)),
                 Some(_) => "has reset".to_string(),
                 None => String::new(),
             };
@@ -186,7 +186,7 @@ fn usage_cell(c: &Ctx, acc: &Account) -> String {
                 "{} {}  {}",
                 p.bar(used, 12),
                 p.severity(used, &format!("{used:>3.0}%")),
-                p.dim(&fit(&reset, 18))
+                p.dim(&fit(&reset, 12))
             )
         }
         None => {
@@ -198,20 +198,23 @@ fn usage_cell(c: &Ctx, acc: &Account) -> String {
                     None => "no usage yet: cswap refresh".to_string(),
                 }
             };
-            p.dim(&fit(&text, 37))
+            p.dim(&fit(&text, 31))
         }
     }
 }
 
+const NO_ACCOUNTS: &str = "No accounts yet. Add one with: cswap add <agent> <name>\n\
+     Your agents' own logins are listed by: cswap defaults";
+
 pub fn list(as_json: bool) -> Result<()> {
     let c = Ctx::load()?;
     if as_json {
-        let all: Vec<_> = c.reg.accounts.iter().map(|a| account_json(&c, a)).collect();
+        let all: Vec<_> = c.reg.profiles().map(|a| account_json(&c, a)).collect();
         println!("{}", serde_json::to_string_pretty(&all)?);
         return Ok(());
     }
-    if c.reg.accounts.is_empty() {
-        println!("No agent found. cswap looks for claude, codex, agy and grok.");
+    if c.reg.profiles().next().is_none() {
+        println!("{NO_ACCOUNTS}");
         return Ok(());
     }
     let p = &c.p;
@@ -220,23 +223,17 @@ pub fn list(as_json: bool) -> Result<()> {
             println!();
         }
         println!("{}", c.agent_header(h));
-        for acc in c.reg.of(h) {
+        for acc in c.reg.of(h).filter(|a| !a.is_native()) {
             let star = if c.is_default(acc) {
                 p.accent("★")
             } else {
                 " ".to_string()
             };
-            let title = acc.title();
-            let email = if acc.email() == title {
-                ""
-            } else {
-                acc.email()
-            };
             println!(
                 "  {star} {} {} {} {} {}  {}",
                 p.dim(&fit_right(&id_text(acc), 2)),
-                p.bold(&fit(&title, 18)),
-                p.dim(&fit(email, 28)),
+                p.bold(&fit(&acc.title(), 18)),
+                p.dim(&fit(acc.email(), 28)),
                 fit(&view::plan_text(acc, &c.local), 10),
                 usage_cell(&c, acc),
                 c.state_text(acc),
@@ -246,7 +243,62 @@ pub fn list(as_json: bool) -> Result<()> {
     println!();
     println!(
         "{}",
-        p.dim("★ default · `cswap usage` for every limit · `cswap` alone opens the dashboard")
+        p.dim("★ a bare launch starts here · `cswap usage` for every limit · `cswap` alone opens the dashboard")
+    );
+    Ok(())
+}
+
+/// `cswap defaults`: each agent's own login.
+pub fn defaults(as_json: bool) -> Result<()> {
+    let c = Ctx::load()?;
+    if as_json {
+        let all: Vec<_> = c
+            .reg
+            .defaults()
+            .map(|a| {
+                let mut v = account_json(&c, a);
+                v["same_login_as"] = json!(c.twin(a).map(|t| t.title()));
+                v
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&all)?);
+        return Ok(());
+    }
+    if c.reg.defaults().next().is_none() {
+        println!("No agent found. cswap looks for claude, codex, agy and grok.");
+        return Ok(());
+    }
+    let p = &c.p;
+    println!("{}", p.bold("Defaults"));
+    println!(
+        "  {}",
+        p.dim("each agent's own login, used when no account is asked for")
+    );
+    for acc in c.reg.defaults() {
+        let h = acc.harness;
+        let star = if c.is_default(acc) {
+            p.accent("★")
+        } else {
+            " ".to_string()
+        };
+        let twin = match c.twin(acc) {
+            Some(t) => format!("same login as {}", t.title()),
+            None if c.signed_in(acc) => "no account holds this login".to_string(),
+            None => String::new(),
+        };
+        println!(
+            "  {star} {} {} {} {}  {}",
+            p.bold(&fit(h.name(), 12)),
+            p.dim(&fit(acc.email(), 28)),
+            fit(&view::plan_text(acc, &c.local), 10),
+            usage_cell(&c, acc),
+            p.dim(&twin),
+        );
+    }
+    println!();
+    println!(
+        "{}",
+        p.dim("★ a bare launch starts here · make an account from a login with: cswap add <agent> <name>")
     );
     Ok(())
 }
@@ -328,8 +380,12 @@ pub fn usage(account: Option<&str>, refresh_first: bool) -> Result<()> {
     let p = &c.p;
     let accounts: Vec<&Account> = match account {
         Some(sel) => vec![c.reg.find_any(sel)?],
-        None => c.reg.accounts.iter().collect(),
+        None => c.reg.profiles().collect(),
     };
+    if accounts.is_empty() {
+        println!("{NO_ACCOUNTS}");
+        return Ok(());
+    }
     for (i, acc) in accounts.iter().enumerate() {
         if i > 0 {
             println!();
@@ -362,50 +418,26 @@ pub fn usage(account: Option<&str>, refresh_first: bool) -> Result<()> {
             println!("  {}", p.dim(&text));
             continue;
         };
-        let main = view::main_window(snap).map(|w| w.label.clone());
-        // The long windows first; the short one last, as in the dashboard.
-        let mut windows: Vec<_> = snap.windows.iter().collect();
-        windows.sort_by_key(|w| w.kind == crate::model::WindowKind::Session);
-        for w in windows {
+        // One line per limit, in one grid: name, bar, percent, time left.
+        for w in view::usage_windows(snap) {
             let used = w.used_now(c.now);
             let reset = match w.resets_at {
-                Some(at) if at > c.now => format!(
-                    "{} · in {}",
-                    model::landing(at, c.now, c.settings.clock_24h),
-                    model::span(at - c.now)
-                ),
-                Some(_) => "has reset since the last fetch".to_string(),
+                Some(at) if at > c.now => format!("in {}", model::until(at, c.now)),
+                Some(_) => "has reset".to_string(),
                 None => String::new(),
             };
+            let warning = view::pace_warning(w, c.now).unwrap_or_default();
             println!(
-                "  {} {} {}  {}",
+                "  {} {} {}  {} {}",
                 fit(&w.label, 12),
                 p.bar(used, 24),
                 p.severity(used, &format!("{used:>3.0}%")),
-                reset
+                fit(&reset, 10),
+                p.warn(&warning)
             );
-            if Some(&w.label) == main.as_ref() {
-                if let Some((text, hot)) = view::pace_text(w, c.now, c.settings.clock_24h) {
-                    let pad = " ".repeat(15);
-                    println!("{pad}{}", if hot { p.warn(&text) } else { p.dim(&text) });
-                }
-            }
         }
         if let Some(text) = snap.credits.as_ref().and_then(view::credits_text) {
             println!("  {} {text}", fit("extra usage", 12));
-        }
-        let grants = acc.grants(c.now);
-        if !grants.is_empty() {
-            let n: u32 = grants.iter().map(|g| g.count).sum();
-            let soonest = grants.iter().filter_map(|g| g.expires_at).min();
-            let mut text = plural(n as usize, "spare reset");
-            if let Some(at) = soonest {
-                text.push_str(&format!(
-                    " · the first expires in {}",
-                    model::span(at - c.now)
-                ));
-            }
-            println!("  {} {}", fit("resets", 12), p.info(&text));
         }
         if let Some(e) = &acc.meta.refresh.error {
             println!("  {} {}", fit("last fetch", 12), p.warn(e));
@@ -419,6 +451,10 @@ pub fn usage(account: Option<&str>, refresh_first: bool) -> Result<()> {
 pub fn resets() -> Result<()> {
     let c = Ctx::load()?;
     let p = &c.p;
+    if c.reg.profiles().next().is_none() {
+        println!("{NO_ACCOUNTS}");
+        return Ok(());
+    }
     let name = |key: &str| -> String {
         c.reg
             .get(key)
@@ -526,14 +562,18 @@ pub fn suggest_cmd(agent: Option<&str>) -> Result<()> {
         Some(a) => vec![harness(a)?],
         None => c.agents(),
     };
+    if agents.is_empty() {
+        println!("{NO_ACCOUNTS}");
+        return Ok(());
+    }
     for (i, h) in agents.into_iter().enumerate() {
         if i > 0 {
             println!();
         }
         println!("{}", p.bold(h.name()));
-        let accounts: Vec<&Account> = c.reg.of(h).collect();
+        let accounts: Vec<&Account> = c.reg.of(h).filter(|a| !a.is_native()).collect();
         if accounts.is_empty() {
-            println!("  {}", p.dim("no account"));
+            println!("  {}", p.dim("no account yet: cswap add <agent> <name>"));
             continue;
         }
         let ranked = suggest::rank(&accounts, &c.settings, c.now);
@@ -666,20 +706,33 @@ fn confirm(question: &str) -> Result<bool> {
     Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
+/// Ask for one line on the terminal.
+fn ask(question: &str) -> Result<String> {
+    if !std::io::stdin().is_terminal() {
+        bail!("an account needs a name: cswap add <agent> <name>");
+    }
+    eprint!("{question} ");
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
 fn after_sign_in(key: &str) -> Result<()> {
     let reg = Registry::load()?;
     let acc = reg.get(key).context("the account is gone")?;
     let p = Paint::stdout();
     let who = match acc.email() {
-        "" => "a login that names no one".to_string(),
-        e => e.to_string(),
+        "" => String::new(),
+        e => format!(" as {e}"),
     };
-    println!("{} {key} is signed in as {who}.", p.ok("✓"));
+    println!("{} {} is signed in{who}.", p.ok("✓"), acc.title());
     if let Some(other) = manage::duplicate_of(&reg, acc) {
         println!(
-            "{} That is the same login as {}. Two accounts on one login share one limit.",
+            "{} {} holds the same login. Keep one of the two: they share one limit, \
+             and one login in two places stops working when it renews.",
             p.warn("▲"),
-            other.key()
+            other.title()
         );
     }
     let hs = HarnessSettings::load(acc.harness)?;
@@ -690,17 +743,34 @@ fn after_sign_in(key: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn add(agent: &str, alias: Option<&str>) -> Result<()> {
+pub fn add(agent: &str, name: Option<&str>) -> Result<()> {
     let h = harness(agent)?;
     manage::find_bin(h, &HarnessSettings::load(h)?)?;
-    let mut acc = manage::create(h, alias)?;
+    let name = match name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => n.to_string(),
+        None => ask(&format!("Name for the new {} account:", h.name()))?,
+    };
+    let mut acc = manage::create(h, &name)?;
     let key = acc.key();
     eprintln!("{}", manage::sign_in_banner(&acc));
     let undo = |acc: &Account| {
         let _ = manage::remove(acc, &Live::new());
     };
     match manage::sign_in(&mut acc) {
-        Ok(true) => after_sign_in(&key),
+        Ok(true) => {
+            // One account per login. The agent's own default is the one
+            // place the same login may also sit.
+            let reg = Registry::load()?;
+            if let Some(other) = manage::duplicate_of(&reg, &acc) {
+                let (other, who) = (other.title(), acc.email().to_string());
+                undo(&acc);
+                bail!(
+                    "{other} already holds the login {who}, so '{name}' was not added. \
+                     One account per login"
+                );
+            }
+            after_sign_in(&key)
+        }
         Ok(false) => {
             undo(&acc);
             bail!("the sign-in was not completed, so nothing was added");
@@ -719,7 +789,7 @@ pub fn login(account: &str) -> Result<()> {
     let acc = reg.get_mut(&key).context("the account is gone")?;
     if acc.is_native() {
         bail!(
-            "{key} is {}'s own login. Sign in by running `{}` itself",
+            "{key} is {}'s default login. Sign in by running `{}` itself",
             acc.harness.name(),
             acc.harness.spec().bins[0]
         );
@@ -762,30 +832,46 @@ pub fn remove(account: &str, yes: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn alias(account: &str, name: Option<&str>) -> Result<()> {
+pub fn rename(account: &str, name: &str) -> Result<()> {
     let mut reg = Registry::load()?;
     let key = reg.find_any(account)?.key();
     let acc = reg.get_mut(&key).context("the account is gone")?;
-    let name = name.unwrap_or("").trim();
-    manage::set_label(acc, name)?;
-    if name.is_empty() {
-        println!("{key}: alias cleared.");
-    } else {
-        println!(
-            "{key} is now '{name}'. Use it as: {} --cswap={name}",
-            acc.harness.spec().bins[0]
-        );
+    manage::rename(acc, name)?;
+    println!(
+        "{key} is now '{}'. Use it as: {} --cswap={}",
+        acc.title(),
+        acc.harness.spec().bins[0],
+        acc.title()
+    );
+    Ok(())
+}
+
+/// Show an account's aliases, replace them, or clear them.
+pub fn alias(account: &str, aliases: &[String], clear: bool) -> Result<()> {
+    let mut reg = Registry::load()?;
+    let key = reg.find_any(account)?.key();
+    let acc = reg.get_mut(&key).context("the account is gone")?;
+    if clear || !aliases.is_empty() {
+        manage::set_aliases(acc, aliases)?;
+    }
+    match acc.meta.aliases.as_slice() {
+        [] => println!(
+            "{} has no alias. Its name is all it answers to.",
+            acc.title()
+        ),
+        list => println!("{} also answers to: {}", acc.title(), list.join(", ")),
     }
     Ok(())
 }
 
-pub fn default(agent: &str, account: Option<&str>) -> Result<()> {
+/// `cswap use`: which account a bare launch of an agent starts on.
+pub fn use_cmd(agent: &str, account: Option<&str>) -> Result<()> {
     let h = harness(agent)?;
     let bin = h.spec().bins[0];
     let describe = |value: &str| -> Result<String> {
         Ok(match value {
-            "native" => format!("{}'s own login", h.name()),
-            "auto" => "the best pick at every launch (auto)".to_string(),
+            "default" => format!("{}'s default login", h.name()),
+            "auto" => "the best account at every launch (auto)".to_string(),
             id => {
                 let reg = Registry::load()?;
                 let found = reg.of(h).find(|a| a.meta.id.to_string() == id);
@@ -800,14 +886,14 @@ pub fn default(agent: &str, account: Option<&str>) -> Result<()> {
     match account {
         None => {
             let hs = HarnessSettings::load(h)?;
-            println!("`{bin}` starts on {}.", describe(&hs.default)?);
+            println!("`{bin}` starts on {}.", describe(&hs.start)?);
             println!(
-                "Change it with: cswap default {} <account | native | auto>",
+                "Change it with: cswap use {} <account | default | auto>",
                 h.id()
             );
         }
         Some(sel) => {
-            let value = manage::set_default(h, sel)?;
+            let value = manage::set_start(h, sel)?;
             println!("`{bin}` now starts on {}.", describe(&value)?);
         }
     }

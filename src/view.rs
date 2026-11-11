@@ -32,8 +32,8 @@ pub fn facts(reg: &mut Registry) -> (HashSet<String>, HashMap<String, Local>) {
 
 /// Is `acc` what a bare launch of its agent uses?
 pub fn is_default(acc: &Account, hs: &HarnessSettings) -> bool {
-    match hs.default.as_str() {
-        "native" => acc.is_native(),
+    match hs.start.as_str() {
+        "default" => acc.is_native(),
         "auto" => false,
         id => id == acc.meta.id.to_string(),
     }
@@ -45,10 +45,10 @@ pub fn launch_hint(acc: &Account, is_default: bool) -> String {
     if is_default {
         return bin.to_string();
     }
-    let sel = if !acc.meta.label.is_empty() {
+    let sel = if acc.is_native() {
+        "default".to_string()
+    } else if !acc.meta.label.is_empty() {
         acc.meta.label.clone()
-    } else if acc.is_native() {
-        "native".to_string()
     } else {
         acc.meta.id.to_string()
     };
@@ -68,8 +68,26 @@ pub fn plan_text(acc: &Account, local: &HashMap<String, Local>) -> String {
 /// for an agent with no weekly limit the longest one it has.
 pub fn main_window(snap: &Snapshot) -> Option<&Window> {
     snap.weekly()
-        .or_else(|| snap.windows.iter().find(|w| w.kind != WindowKind::Session))
-        .or_else(|| snap.windows.first())
+        .or_else(|| snap.windows.iter().find(|w| !is_short(w)))
+}
+
+/// A window that comes round within hours. cswap keeps these to know when an
+/// account is blocked, and never shows them.
+pub fn is_short(w: &Window) -> bool {
+    w.kind == WindowKind::Session || w.window_secs.is_some_and(|s| s <= 12 * 3600)
+}
+
+/// The limits to show for an account: the weekly one first, then the rest.
+/// The short windows are left out.
+pub fn usage_windows(snap: &Snapshot) -> Vec<&Window> {
+    let mut out: Vec<&Window> = snap.windows.iter().filter(|w| !is_short(w)).collect();
+    out.sort_by_key(|w| match w.kind {
+        WindowKind::Weekly => 0,
+        WindowKind::Monthly => 1,
+        WindowKind::WeeklyScoped => 2,
+        _ => 3,
+    });
+    out
 }
 
 /// What state an account is in, in one word.
@@ -77,7 +95,6 @@ pub fn main_window(snap: &Snapshot) -> Option<&Window> {
 pub enum State {
     SignedOut,
     Fetching,
-    Live(usize),
     Blocked,
     Stale,
     Ready,
@@ -88,8 +105,6 @@ impl State {
         match self {
             State::SignedOut => "signed out".to_string(),
             State::Fetching => "waiting".to_string(),
-            State::Live(1) => "running".to_string(),
-            State::Live(n) => format!("running ×{n}"),
             State::Blocked => "limit hit".to_string(),
             State::Stale => "stale".to_string(),
             State::Ready => "ready".to_string(),
@@ -97,20 +112,10 @@ impl State {
     }
 }
 
-/// `sessions` is how many agents run on the account now; `fetching` is true
-/// while a refresh for it is in flight.
-pub fn state(
-    acc: &Account,
-    signed_in: bool,
-    sessions: usize,
-    fetching: bool,
-    now: DateTime<Utc>,
-) -> State {
+/// `fetching` is true while a refresh for the account is in flight.
+pub fn state(acc: &Account, signed_in: bool, fetching: bool, now: DateTime<Utc>) -> State {
     if !signed_in {
         return State::SignedOut;
-    }
-    if sessions > 0 {
-        return State::Live(sessions);
     }
     if fetching && acc.snapshot().is_none() {
         return State::Fetching;
@@ -158,6 +163,23 @@ pub fn pace_text(w: &Window, now: DateTime<Utc>, clock_24h: bool) -> Option<(Str
         ),
         false,
     ))
+}
+
+/// A short warning when the limit will be hit before it resets, and nothing
+/// otherwise: the bar and its pace marker already show the rest.
+pub fn pace_warning(w: &Window, now: DateTime<Utc>) -> Option<String> {
+    let used = w.used_now(now);
+    let (reset, secs) = (w.resets_at?, w.window_secs?);
+    if used >= 99.5 || used <= 0.0 || w.elapsed_pct(now)? < 5.0 {
+        return None;
+    }
+    if w.projected_pct(now)? < 100.0 {
+        return None;
+    }
+    let start = reset - Duration::seconds(secs);
+    let elapsed_secs = (now - start).num_seconds() as f64;
+    let runs_out = start + Duration::seconds((elapsed_secs * 100.0 / used) as i64);
+    Some(format!("runs out {} early", model::until(reset, runs_out)))
 }
 
 fn money(c: &crate::model::Credits, v: f64) -> String {
@@ -257,7 +279,7 @@ fn noon(date: chrono::NaiveDate) -> DateTime<Utc> {
 /// with a count.
 pub fn grants(reg: &Registry, now: DateTime<Utc>) -> Vec<Event> {
     let mut out = Vec::new();
-    for acc in &reg.accounts {
+    for acc in reg.profiles() {
         let mut merged: Vec<crate::model::Grant> = Vec::new();
         for g in acc.grants(now) {
             match merged.iter_mut().find(|m| {
@@ -302,8 +324,7 @@ pub fn grants(reg: &Registry, now: DateTime<Utc>) -> Vec<Event> {
 
 /// How many spare resets all accounts hold together.
 pub fn grant_count(reg: &Registry, now: DateTime<Utc>) -> u32 {
-    reg.accounts
-        .iter()
+    reg.profiles()
         .flat_map(|a| a.grants(now))
         .map(|g| g.count)
         .sum()
@@ -324,7 +345,7 @@ fn long_window(w: &Window) -> bool {
 /// week and its per-model week reset together, so they read `week + Fable`.
 pub fn limit_resets(reg: &Registry, logged_in: &HashSet<String>, now: DateTime<Utc>) -> Vec<Event> {
     let mut out = Vec::new();
-    for acc in &reg.accounts {
+    for acc in reg.profiles() {
         let key = acc.key();
         let Some(snap) = acc.snapshot().filter(|_| logged_in.contains(&key)) else {
             continue;
@@ -386,7 +407,7 @@ pub fn coming_up(reg: &Registry, logged_in: &HashSet<String>, now: DateTime<Utc>
 pub fn renewals(reg: &Registry) -> Vec<Event> {
     let today = store::today();
     let mut out = Vec::new();
-    for acc in &reg.accounts {
+    for acc in reg.profiles() {
         let billing = &acc.meta.billing;
         let Some(date) = billing.next(today).filter(|d| *d >= today) else {
             continue;
@@ -597,24 +618,90 @@ mod tests {
         let _sb = Sandbox::new();
         let now = Utc::now();
         let mut a = account(1);
-        assert_eq!(state(&a, false, 0, false, now), State::SignedOut);
-        assert_eq!(state(&a, true, 0, false, now), State::Fetching);
+        assert_eq!(state(&a, false, false, now), State::SignedOut);
+        assert_eq!(state(&a, true, false, now), State::Fetching);
         a.meta.refresh.data = Some(week(100.0, 50));
-        assert_eq!(state(&a, true, 0, false, now), State::Blocked);
-        assert_eq!(state(&a, true, 2, false, now), State::Live(2));
+        assert_eq!(state(&a, true, false, now), State::Blocked);
         a.meta.refresh.data = Some(week(30.0, 50));
+        assert_eq!(state(&a, true, false, now), State::Ready);
+        // Old numbers stay on screen while new ones are fetched.
+        assert_eq!(state(&a, true, true, now), State::Ready);
         a.meta.refresh.error = Some("offline".into());
-        assert_eq!(state(&a, true, 0, false, now), State::Stale);
+        assert_eq!(state(&a, true, false, now), State::Stale);
     }
 
     #[test]
-    fn the_launch_hint_prefers_the_alias() {
+    fn the_short_windows_are_never_among_the_limits_shown() {
+        let mut snap = week(40.0, 50);
+        snap.windows.push(Window {
+            kind: WindowKind::WeeklyScoped,
+            label: "Fable".into(),
+            used_pct: 70.0,
+            resets_at: snap.windows[1].resets_at,
+            window_secs: Some(604800),
+        });
+        snap.windows.push(Window {
+            kind: WindowKind::Other,
+            label: "other 5h".into(),
+            used_pct: 99.0,
+            resets_at: None,
+            window_secs: Some(18000),
+        });
+        let labels: Vec<&str> = usage_windows(&snap)
+            .iter()
+            .map(|w| w.label.as_str())
+            .collect();
+        assert_eq!(labels, ["week", "Fable"]);
+        assert_eq!(main_window(&snap).unwrap().label, "week");
+        // An account with nothing but a short window has no limit to show.
+        snap.windows.truncate(1);
+        assert!(usage_windows(&snap).is_empty() && main_window(&snap).is_none());
+    }
+
+    #[test]
+    fn a_warning_is_given_only_when_the_limit_runs_out_before_the_reset() {
+        let now = Utc::now();
+        let win = |used: f64, reset_h: i64| Window {
+            kind: WindowKind::Weekly,
+            label: "week".into(),
+            used_pct: used,
+            resets_at: Some(now + Duration::hours(reset_h)),
+            window_secs: Some(604800),
+        };
+        // Half the week gone and 40% used: on pace, nothing to say.
+        assert_eq!(pace_warning(&win(40.0, 84), now), None);
+        // Half the week gone and 80% used: out with a good day to spare.
+        let text = pace_warning(&win(80.0, 84), now).unwrap();
+        assert!(
+            text.starts_with("runs out ") && text.ends_with(" early"),
+            "{text}"
+        );
+        // Already used up, or only just started: the bar says it.
+        assert_eq!(pace_warning(&win(100.0, 84), now), None);
+        assert_eq!(pace_warning(&win(3.0, 167), now), None);
+    }
+
+    #[test]
+    fn a_bare_launch_starts_on_the_default_login_an_account_or_the_best_one() {
+        let hs = |start: &str| HarnessSettings {
+            start: start.to_string(),
+            ..HarnessSettings::default()
+        };
+        assert!(is_default(&account(0), &hs("default")));
+        assert!(!is_default(&account(1), &hs("default")));
+        assert!(is_default(&account(2), &hs("2")));
+        assert!(!is_default(&account(0), &hs("2")));
+        assert!(!is_default(&account(0), &hs("auto")) && !is_default(&account(2), &hs("auto")));
+    }
+
+    #[test]
+    fn the_launch_hint_uses_the_name() {
         let mut a = account(2);
         assert_eq!(launch_hint(&a, false), "claude --cswap=2");
         a.meta.label = "work".into();
         assert_eq!(launch_hint(&a, false), "claude --cswap=work");
         assert_eq!(launch_hint(&a, true), "claude");
-        assert_eq!(launch_hint(&account(0), false), "claude --cswap=native");
+        assert_eq!(launch_hint(&account(0), false), "claude --cswap=default");
     }
 
     #[test]

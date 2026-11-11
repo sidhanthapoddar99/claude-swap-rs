@@ -239,6 +239,23 @@ pub fn ago(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
+/// How long until `at`, at the precision that matters: whole days when it is
+/// more than two days off, days and hours within two days, hours and minutes
+/// within one.
+pub fn until(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (at - now).num_seconds().max(0);
+    let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
+    if secs > 2 * 86400 {
+        format!("{d}d")
+    } else if secs >= 86400 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m:02}m")
+    } else {
+        format!("{m}m")
+    }
+}
+
 /// `Sat 14 Nov · 09:30` in local time; `today · 09:30` and `tomorrow · 09:30`
 /// for the two nearest days.
 pub fn landing(t: DateTime<Utc>, now: DateTime<Utc>, clock_24h: bool) -> String {

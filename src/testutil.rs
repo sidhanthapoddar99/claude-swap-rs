@@ -182,19 +182,20 @@ impl Sandbox {
                 fs::create_dir_all(native.join(dir)).unwrap();
             }
         }
+        // Claude Code keeps who is signed in beside its config dir.
         fs::write(
-            Harness::Claude.native_dir().join(".claude.json"),
+            crate::paths::home().join(".claude.json"),
             r#"{"oauthAccount":{"emailAddress":"dev@example.com","organizationName":"Personal"}}"#,
         )
         .unwrap();
 
-        // Claude: the native login nearly spent, a work account with room and
+        // Claude: the default login nearly spent, a work account with room and
         // a spare reset, and one that is cancelled.
         self.store(Harness::Claude, 0, |m| {
             m.plan = Some("Max 5x".into());
             m.refresh.data = Some(week(64.0, 91.0, 30));
         });
-        let work = crate::manage::create(Harness::Claude, Some("work")).unwrap();
+        let work = crate::manage::create(Harness::Claude, "work").unwrap();
         self.store(Harness::Claude, work.meta.id, |m| {
             m.identity.email = Some("dev@corp.example".into());
             m.identity.org = Some("Corp".into());
@@ -232,7 +233,7 @@ impl Sandbox {
             }];
             m.refresh.data = Some(snap);
         });
-        let side = crate::manage::create(Harness::Claude, Some("side")).unwrap();
+        let side = crate::manage::create(Harness::Claude, "side").unwrap();
         self.store(Harness::Claude, side.meta.id, |m| {
             m.identity.email = Some("side@example.com".into());
             m.plan = Some("Pro".into());
@@ -245,13 +246,13 @@ impl Sandbox {
             m.refresh.data = Some(week(0.0, 100.0, 70));
         });
 
-        // Codex: the native login, and a second account that never signed in.
+        // Codex: the default login, and a second account that never signed in.
         self.store(Harness::Codex, 0, |m| {
             m.identity.email = Some("dev@example.com".into());
             m.plan = Some("Plus".into());
             m.refresh.data = Some(week(3.0, 22.0, 120));
         });
-        crate::manage::create(Harness::Codex, Some("team")).unwrap();
+        crate::manage::create(Harness::Codex, "team").unwrap();
 
         // Grok reports one monthly credit window.
         self.store(Harness::Grok, 0, |m| {

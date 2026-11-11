@@ -1,5 +1,6 @@
-//! Usage: one card per account. The weekly limit gets the bar, a pace marker
-//! and the day and time it resets; the short window gets one quiet line.
+//! Usage: every limit of every account in one grid, so the bars, the percents
+//! and the countdowns line up down the page. Nothing here but usage: what
+//! resets when is the Resets page, and who an account is the Accounts page.
 
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
@@ -8,118 +9,115 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::{no_data, pace_text, plan_text, status, status_span, window_cells};
-use crate::model::{self, WindowKind};
+use super::{dot, head, name_cell, no_data, paint_row, row_style, window_cells, window_w};
 use crate::store::Account;
 use crate::tui::app::{Action, App, Focus};
-use crate::tui::theme::DOT;
-use crate::tui::widgets::{card, card_note, fit, truncate, Hits};
+use crate::tui::widgets::{card, fit, truncate, Hits};
+use crate::view::{credits_text, pace_warning, usage_windows};
 
-const LABEL_W: usize = 12;
+/// Column widths for an inner width of `w`.
+struct Cols {
+    name: usize,
+    label: usize,
+    bar: usize,
+    note: usize,
+}
 
-/// The lines inside one account's card.
-fn body(app: &App, acc: &Account, w: usize, now: DateTime<Utc>) -> Vec<Line<'static>> {
+fn cols(w: usize) -> Cols {
+    let name = (w / 5).clamp(14, 24);
+    let label = 9;
+    // marker, dot, name, limit, the bar's own cells and the spaces between.
+    let fixed = 3 + name + 1 + label + 1 + window_w(0);
+    let rest = w.saturating_sub(fixed);
+    // The note needs room for `runs out 1d 2h early`; a narrow page gives
+    // every cell it has to the bar instead.
+    let (bar, note) = if rest >= 8 + 2 + 20 {
+        let bar = (rest - 22).clamp(8, 40);
+        (bar, rest - bar - 2)
+    } else {
+        (rest.clamp(8, 40), 0)
+    };
+    Cols {
+        name,
+        label,
+        bar,
+        note,
+    }
+}
+
+/// The lines of one account: one per limit, the name on the first.
+fn block(
+    app: &App,
+    acc: &Account,
+    c: &Cols,
+    selected: bool,
+    now: DateTime<Utc>,
+) -> Vec<Line<'static>> {
     let t = &app.theme;
+    let (mark, _) = row_style(app, selected);
+    let mut first = vec![mark, dot(app, acc)];
+    first.extend(name_cell(app, acc, c.name, selected, true));
+    first.push(Span::raw(" "));
+    let indent = || Span::raw(" ".repeat(3 + c.name + 1));
+    let rest_w = c.label + 1 + window_w(c.bar) + if c.note > 0 { 2 + c.note } else { 0 };
+
     let signed_in = app.derived.logged_in.contains(&acc.key());
     let Some(snap) = acc.snapshot().filter(|_| signed_in) else {
         let (text, color) = no_data(app, acc);
-        return vec![Line::from(Span::styled(
-            truncate(&text, w),
+        first.push(Span::styled(
+            truncate(&text, rest_w),
             Style::default().fg(color),
-        ))];
+        ));
+        return vec![Line::from(first)];
     };
-    let bar_w = w.saturating_sub(LABEL_W + 5 + 2 + 34).clamp(8, 44);
-    let mut out = Vec::new();
 
-    // The long windows, weekly first.
-    let mut long: Vec<_> = snap
-        .windows
-        .iter()
-        .filter(|w| w.kind != WindowKind::Session)
-        .collect();
-    long.sort_by_key(|w| match w.kind {
-        WindowKind::Weekly => 0,
-        WindowKind::WeeklyScoped => 1,
-        _ => 2,
-    });
-    for (i, win) in long.iter().enumerate() {
-        let scoped = win.kind == WindowKind::WeeklyScoped;
-        let mut spans = vec![Span::styled(
-            fit(&win.label, LABEL_W),
-            if scoped { t.s_dim() } else { t.s_text() },
-        )];
-        spans.extend(window_cells(app, win, bar_w, now));
-        out.push(Line::from(spans));
-        // Pace is said once, for the window the account is judged by.
-        if i == 0 {
-            if let Some((text, hot)) = pace_text(win, now, app.settings.clock_24h) {
-                out.push(Line::from(vec![
-                    Span::raw(" ".repeat(LABEL_W)),
-                    Span::styled(
-                        truncate(&text, w.saturating_sub(LABEL_W)),
-                        if hot { t.s(t.warn()) } else { t.s_faint() },
-                    ),
-                ]));
-            }
-        }
-    }
-
-    if let Some(s) = snap.session() {
-        let used = s.used_now(now);
-        let mut text = format!("{used:.0}% used");
-        match s.resets_at {
-            Some(at) if at > now => {
-                text.push_str(&format!(" · resets in {}", model::span(at - now)))
-            }
-            Some(_) => text = "reset since the last fetch".to_string(),
-            None => {}
-        }
-        out.push(Line::from(vec![
-            Span::styled(fit(&format!("{} window", s.label), LABEL_W), t.s_faint()),
+    // Each row after the name: a label, then cells.
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    for (i, win) in usage_windows(snap).into_iter().enumerate() {
+        let mut cells = vec![
             Span::styled(
-                text,
-                if used >= 85.0 {
-                    t.s(t.severity(used))
-                } else {
-                    t.s_faint()
-                },
+                fit(&win.label, c.label),
+                if i == 0 { t.s_text() } else { t.s_dim() },
             ),
-        ]));
-    }
-    if let Some(text) = snap.credits.as_ref().and_then(crate::view::credits_text) {
-        out.push(Line::from(vec![
-            Span::styled(fit("extra usage", LABEL_W), t.s_faint()),
-            Span::styled(text, t.s_dim()),
-        ]));
-    }
-    let grants = acc.grants(now);
-    if !grants.is_empty() {
-        let n: u32 = grants.iter().map(|g| g.count).sum();
-        let soonest = grants.iter().filter_map(|g| g.expires_at).min();
-        let mut text = format!("{n} spare reset{}", if n == 1 { "" } else { "s" });
-        if let Some(at) = soonest {
-            text.push_str(&format!(
-                " · the first expires {} (in {})",
-                model::landing(at, now, app.settings.clock_24h),
-                model::span(at - now)
-            ));
+            Span::raw(" "),
+        ];
+        cells.extend(window_cells(app, win, c.bar, now));
+        // Said only when the limit will be hit before it resets: the bar and
+        // its pace marker already show everything else.
+        if let Some(warning) = pace_warning(win, now).filter(|_| c.note > 0) {
+            cells.push(Span::raw("  "));
+            cells.push(Span::styled(truncate(&warning, c.note), t.s(t.warn())));
         }
-        out.push(Line::from(vec![
-            Span::styled(fit("resets", LABEL_W), t.s_faint()),
-            Span::styled(text, t.s(t.info())),
-        ]));
+        rows.push(cells);
+    }
+    if let Some(text) = snap.credits.as_ref().and_then(credits_text) {
+        rows.push(vec![
+            Span::styled(fit("extra", c.label + 1), t.s_dim()),
+            Span::styled(truncate(&text, rest_w - c.label - 1), t.s_dim()),
+        ]);
+    }
+    if rows.is_empty() {
+        rows.push(vec![Span::styled(
+            truncate("the vendor reported no limits", rest_w),
+            t.s_dim(),
+        )]);
     }
     if let Some(e) = &acc.meta.refresh.error {
-        out.push(Line::from(vec![
-            Span::styled(fit("last fetch", LABEL_W), t.s_faint()),
-            Span::styled(truncate(e, w.saturating_sub(LABEL_W)), t.s(t.warn())),
-        ]));
+        rows.push(vec![
+            Span::styled(fit("stale", c.label + 1), t.s(t.warn())),
+            Span::styled(truncate(e, rest_w - c.label - 1), t.s(t.warn())),
+        ]);
     }
-    if out.is_empty() {
-        out.push(Line::from(Span::styled(
-            "the vendor reported no limits",
-            t.s_dim(),
-        )));
+
+    let mut out = Vec::new();
+    for (i, cells) in rows.into_iter().enumerate() {
+        let mut spans = if i == 0 {
+            std::mem::take(&mut first)
+        } else {
+            vec![indent()]
+        };
+        spans.extend(cells);
+        out.push(Line::from(spans));
     }
     out
 }
@@ -129,91 +127,90 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let now = Utc::now();
     let accounts = &app.reg.accounts;
     if accounts.is_empty() {
-        super::empty(f, area, app, "No accounts yet", &["Press a to add one."]);
+        super::no_accounts(f, area, app);
         return;
     }
-    let w = area.width.saturating_sub(4) as usize;
-    let bodies: Vec<Vec<Line>> = accounts.iter().map(|a| body(app, a, w, now)).collect();
-    let heights: Vec<u16> = bodies.iter().map(|b| b.len() as u16 + 2).collect();
+    let focused = app.focus == Focus::Main;
+    let inner = card(f, area, "", t, focused.then(|| t.accent()));
+    if inner.height < 3 {
+        return;
+    }
+    let c = cols(inner.width as usize);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("   "),
+            head(t, "ACCOUNT", c.name + 1),
+            head(t, "LIMIT", c.label + 1),
+            head(t, "USED", c.bar + 1 + 4 + 2),
+            head(t, "RESETS IN", super::IN_W),
+        ])),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
 
-    // Scroll so the selected card is whole.
     let sel = app.row().min(accounts.len() - 1);
+    let blocks: Vec<Vec<Line>> = accounts
+        .iter()
+        .enumerate()
+        .map(|(i, a)| block(app, a, &c, focused && i == sel, now))
+        .collect();
+    let list_h = inner.height as usize - 1;
+    // A blank line between accounts when everything still fits.
+    let lines: usize = blocks.iter().map(Vec::len).sum();
+    let gap = usize::from(lines + blocks.len() - 1 <= list_h);
+    let height = |i: usize| blocks[i].len() + gap;
+
+    // Scroll by whole accounts, so the selected one is never cut.
     let mut start = 0;
-    while start < sel && heights[start..=sel].iter().sum::<u16>() > area.height {
+    while start < sel && (start..=sel).map(height).sum::<usize>() > list_h + gap {
         start += 1;
     }
 
-    let focused = app.focus == Focus::Main;
-    let mut y = area.y;
-    for (i, acc) in accounts.iter().enumerate().skip(start) {
-        let room = area.y + area.height - y;
-        if room < 3 {
+    let mut y = inner.y + 1;
+    let end = inner.y + inner.height;
+    let mut shown_to = start;
+    for (i, lines) in blocks.iter().enumerate().skip(start) {
+        if y + lines.len() as u16 > end {
             break;
         }
-        let h = heights[i].min(room);
-        let rect = Rect::new(area.x, y, area.width, h);
         let selected = focused && i == sel;
-        let plan = plan_text(app, acc);
-        let mut title = format!("{} · {}", acc.title(), acc.harness.name());
-        if !plan.is_empty() {
-            title.push_str(&format!(" · {plan}"));
+        for line in lines {
+            let rect = Rect::new(inner.x, y, inner.width, 1);
+            if selected {
+                paint_row(f, rect, Style::default().bg(t.raised()));
+            }
+            f.render_widget(Paragraph::new(line.clone()), rect);
+            hits.add(rect, Action::Row(i));
+            y += 1;
         }
-        let inner = card(
-            f,
-            rect,
-            &truncate(&title, w.saturating_sub(34)),
-            t,
-            selected.then(|| t.accent()),
-        );
-        // The agent's colour, just left of the title.
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                DOT,
-                Style::default().fg(t.harness(acc.harness)).bg(t.panel()),
-            )),
-            Rect::new(rect.x + 1, rect.y, 1, 1),
-        );
-        let mut note = vec![status_span(t, status(app, acc))];
-        if let Some(at) = acc.snapshot().map(|s| s.fetched_at) {
-            note.push(Span::styled(
-                format!(" · {}", model::ago(at, now)),
-                t.s_faint(),
-            ));
-        }
-        card_note(f, rect, Line::from(note), t);
-        f.render_widget(Paragraph::new(bodies[i].clone()), inner);
-        hits.add(rect, Action::Row(i));
-        y += h;
+        y += gap as u16;
+        shown_to = i + 1;
     }
-    // Say so when cards are out of view.
-    let shown_to = accounts.len().min(
-        start
-            + heights[start..]
-                .iter()
-                .scan(0u16, |sum, h| {
-                    *sum += *h;
-                    (*sum <= area.height).then_some(())
-                })
-                .count(),
-    );
     if start > 0 || shown_to < accounts.len() {
-        let text = format!(
-            " {}–{} of {} ",
+        super::range_note(
+            f,
+            area,
+            app,
             start + 1,
             shown_to.max(start + 1),
-            accounts.len()
+            accounts.len(),
         );
-        let tw = text.chars().count() as u16;
-        if area.width > tw + 2 {
-            f.render_widget(
-                Paragraph::new(Span::styled(text, t.s_faint().bg(t.panel()))),
-                Rect::new(
-                    area.x + area.width - tw - 2,
-                    area.y + area.height - 1,
-                    tw,
-                    1,
-                ),
-            );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_columns_never_ask_for_more_than_the_width() {
+        // 53 cells is what the smallest frame leaves a page.
+        for w in 53..200 {
+            let c = cols(w);
+            let note = if c.note > 0 { 2 + c.note } else { 0 };
+            let used = 3 + c.name + 1 + c.label + 1 + window_w(c.bar) + note;
+            assert!(used <= w, "{w}: {used}");
+            assert!(c.note == 0 || c.note >= 20, "{w}: {}", c.note);
+            assert!(c.bar >= 8);
         }
     }
 }

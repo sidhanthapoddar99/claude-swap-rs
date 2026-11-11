@@ -279,6 +279,10 @@ fn table(
 pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let t = &app.theme;
     let now = Utc::now();
+    if app.reg.accounts.is_empty() {
+        super::no_accounts(f, area, app);
+        return;
+    }
     let parts = sections(app);
     let total: usize = parts.iter().map(Vec::len).sum();
     let sel = (app.focus == Focus::Main && total > 0).then(|| app.row().min(total - 1));

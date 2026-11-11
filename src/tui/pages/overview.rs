@@ -1,5 +1,5 @@
 //! Overview: four numbers, what to use next for each agent, and every account
-//! on one line.
+//! on one line. Only cswap's accounts: each agent's own login is on Defaults.
 
 use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -10,7 +10,7 @@ use ratatui::Frame;
 
 use super::{
     dot, head, launch_hint, main_window, name_cell, no_data, paint_row, plan_text, row_style,
-    scroll_start, status, status_span,
+    scroll_start, status, status_span, window_cells, window_w,
 };
 use crate::harness::Harness;
 use crate::health::{self, Level};
@@ -23,16 +23,7 @@ use crate::tui::widgets::{self, card, fit, fit_right, width, Hits};
 pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let now = Utc::now();
     if app.reg.accounts.is_empty() {
-        super::empty(
-            f,
-            area,
-            app,
-            "No agent found",
-            &[
-                "cswap looks for claude, codex, agy and grok on your PATH.",
-                "Install one, sign in to it once, then open cswap again.",
-            ],
-        );
+        super::no_accounts(f, area, app);
         return;
     }
     // One "use next" line per agent that has somewhere to launch.
@@ -97,7 +88,12 @@ fn tiles(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits, now: DateTime<Ut
 
     // Accounts.
     let total = app.reg.accounts.len();
-    let signed = app.derived.logged_in.len();
+    let signed = app
+        .reg
+        .accounts
+        .iter()
+        .filter(|x| app.derived.logged_in.contains(&x.key()))
+        .count();
     let agents = Harness::ALL
         .into_iter()
         .filter(|h| {
@@ -113,48 +109,12 @@ fn tiles(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits, now: DateTime<Ut
         "Accounts",
         Span::styled(format!("{signed} signed in"), big(t.text())),
         format!(
-            "{total} in all · {agents} agent{}",
+            "of {total} · {agents} agent{}",
             if agents == 1 { "" } else { "s" }
         ),
         (&format!("{signed} / {total}"), "signed in"),
     );
     hits.add(a, Action::Go(Page::Accounts));
-
-    // Running now.
-    let sessions: usize = app.live.values().map(Vec::len).sum();
-    let names: Vec<String> = app
-        .reg
-        .accounts
-        .iter()
-        .filter(|x| app.is_live(&x.key()))
-        .map(super::clear_name)
-        .collect();
-    let (value, caption) = if sessions == 0 {
-        (
-            Span::styled("nothing", big(t.dim())),
-            "no agent is running".to_string(),
-        )
-    } else {
-        (
-            Span::styled(
-                format!("{sessions} session{}", if sessions == 1 { "" } else { "s" }),
-                big(t.ok()),
-            ),
-            format!("on {}", names.join(", ")),
-        )
-    };
-    tile(
-        f,
-        b,
-        app,
-        "Running now",
-        value,
-        caption,
-        (
-            &sessions.to_string(),
-            if sessions == 1 { "session" } else { "sessions" },
-        ),
-    );
 
     // The next weekly reset.
     let soonest = app
@@ -169,14 +129,9 @@ fn tiles(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits, now: DateTime<Ut
         .min_by_key(|(at, _, _)| *at);
     let (value, caption, short) = match soonest {
         Some((at, acc, used)) => (
-            Span::styled(format!("in {}", model::span(at - now)), big(t.text())),
-            format!(
-                "{} · {:.0}% left · {}",
-                super::clear_name(acc),
-                100.0 - used,
-                model::landing(at, now, app.settings.clock_24h)
-            ),
-            (model::span(at - now), acc.title()),
+            Span::styled(format!("in {}", model::until(at, now)), big(t.text())),
+            format!("{} · {:.0}% used", acc.title(), used),
+            (model::until(at, now), acc.title()),
         ),
         None => (
             Span::styled("unknown", big(t.dim())),
@@ -186,12 +141,49 @@ fn tiles(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits, now: DateTime<Ut
     };
     tile(
         f,
-        c,
+        b,
         app,
         "Next reset",
         value,
         caption,
         (&short.0, &short.1),
+    );
+    hits.add(b, Action::Go(Page::Resets));
+
+    // Spare resets held, and the first one to expire.
+    let spare = crate::view::grants(&app.reg, now);
+    let held = crate::view::grant_count(&app.reg, now);
+    let first = spare.iter().find(|e| e.at.is_some());
+    let (value, caption) = match (held, first) {
+        (0, _) => (
+            Span::styled("none", big(t.dim())),
+            "no account holds one".to_string(),
+        ),
+        (n, Some(e)) => (
+            Span::styled(format!("{n} held"), big(t.info())),
+            format!(
+                "{} · {} left",
+                app.reg.get(&e.key).map(Account::title).unwrap_or_default(),
+                e.at.map(|at| model::until(at, now)).unwrap_or_default()
+            ),
+        ),
+        (n, None) => (
+            Span::styled(format!("{n} held"), big(t.info())),
+            "none of them expires".to_string(),
+        ),
+    };
+    tile(
+        f,
+        c,
+        app,
+        if c.width >= 18 {
+            "Spare resets"
+        } else {
+            "Spare"
+        },
+        value,
+        caption,
+        (&held.to_string(), "spare"),
     );
     hits.add(c, Action::Go(Page::Resets));
 
@@ -234,7 +226,14 @@ fn use_next(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits, agents: &[Har
     let inner = card(f, area, "Use next", t, None);
     let w = inner.width as usize;
     let agent_w = 13;
-    let name_w = (w / 5).clamp(10, 22);
+    // As wide as the longest name on offer, so the reason starts close by.
+    let name_w = agents
+        .iter()
+        .filter_map(|h| app.best(*h).and_then(|p| app.reg.get(&p.key)))
+        .map(|a| width(&a.title()))
+        .max()
+        .unwrap_or(0)
+        .clamp(4, 22);
     for (i, h) in agents.iter().enumerate() {
         let rect = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
         if rect.y >= inner.y + inner.height {
@@ -254,10 +253,10 @@ fn use_next(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits, agents: &[Har
                 // On a narrow terminal the reason matters more than the
                 // command, which the Accounts page also shows.
                 let cmd_w = if w < 72 { 0 } else { width(&cmd).min(w / 3) };
-                let room = w.saturating_sub(3 + agent_w + 2 + name_w + 1 + cmd_w + 2);
+                let room = w.saturating_sub(3 + agent_w + 2 + name_w + 2 + cmd_w + 1);
                 spans.push(Span::styled(format!("{STAR} "), t.s(t.accent())));
                 spans.push(Span::styled(fit(&acc.title(), name_w), t.s_bold()));
-                spans.push(Span::raw(" "));
+                spans.push(Span::raw("  "));
                 spans.push(Span::styled(fit(&pick.headline, room), t.s_dim()));
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(fit_right(&cmd, cmd_w), t.s(t.accent())));
@@ -284,23 +283,20 @@ struct Cols {
     name: usize,
     plan: usize,
     bar: usize,
-    reset: usize,
     status: usize,
 }
 
 fn cols(w: usize) -> Cols {
     let name = (w / 4).clamp(12, 26);
-    let plan = if w >= 72 { 10 } else { 0 };
-    let status = if w >= 88 { 13 } else { 0 };
-    let reset = if w >= 118 { 30 } else { 9 };
+    let plan = if w >= 72 { 12 } else { 0 };
+    let status = if w >= 60 { 12 } else { 0 };
     let gaps = |n: usize| if n > 0 { n + 1 } else { 0 };
-    // marker, dot, name, percent and the spaces between.
-    let fixed = 3 + name + 1 + gaps(plan) + 5 + 2 + reset + gaps(status);
+    // marker, dot, name, the bar's own cells and the spaces between.
+    let fixed = 3 + name + 1 + gaps(plan) + window_w(0) + gaps(status);
     Cols {
         name,
         plan,
-        bar: w.saturating_sub(fixed).clamp(6, 34),
-        reset,
+        bar: w.saturating_sub(fixed).clamp(6, 40),
         status,
     }
 }
@@ -323,28 +319,11 @@ fn account_row(
     }
     let signed_in = app.derived.logged_in.contains(&acc.key());
     match acc.snapshot().and_then(main_window).filter(|_| signed_in) {
-        Some(w) => {
-            let used = w.used_now(now);
-            spans.extend(widgets::bar(t, used, c.bar, w.elapsed_pct(now)));
-            spans.push(Span::raw(" "));
-            spans.push(widgets::pct_span(t, used));
-            spans.push(Span::raw("  "));
-            let reset = match w.resets_at {
-                Some(at) if at > now && c.reset >= 30 => format!(
-                    "{} · in {}",
-                    model::landing(at, now, app.settings.clock_24h),
-                    model::span(at - now)
-                ),
-                Some(at) if at > now => model::span(at - now),
-                Some(_) => "reset".to_string(),
-                None => "–".to_string(),
-            };
-            spans.push(Span::styled(fit(&reset, c.reset), t.s_dim()));
-        }
+        Some(w) => spans.extend(window_cells(app, w, c.bar, now)),
         None => {
             let (text, color) = no_data(app, acc);
             spans.push(Span::styled(
-                fit(&text, c.bar + 1 + 4 + 2 + c.reset),
+                fit(&text, window_w(c.bar)),
                 Style::default().fg(color),
             ));
         }
@@ -368,12 +347,8 @@ fn table(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits, now: DateTime<Ut
     if c.plan > 0 {
         header.push(head(t, "PLAN", c.plan + 1));
     }
-    header.push(head(t, "THIS WEEK", c.bar + 1 + 4 + 2));
-    header.push(head(
-        t,
-        if c.reset >= 30 { "RESETS" } else { "RESETS IN" },
-        c.reset,
-    ));
+    header.push(head(t, "USED", c.bar + 1 + 4 + 2));
+    header.push(head(t, "RESETS IN", super::IN_W));
     if c.status > 0 {
         header.push(Span::raw(" "));
         header.push(head(t, "STATE", c.status));

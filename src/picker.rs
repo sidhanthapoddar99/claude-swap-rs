@@ -264,8 +264,8 @@ pub fn pick_harness(reg: &Registry) -> Result<Option<Harness>> {
             let installed = manage::installed(h);
             let n = reg.of(h).count();
             let hs = HarnessSettings::load(h).unwrap_or_default();
-            let default = match hs.default.as_str() {
-                "native" => "its own login".to_string(),
+            let default = match hs.start.as_str() {
+                "default" => "its default login".to_string(),
                 "auto" => "auto".to_string(),
                 id => reg
                     .of(h)

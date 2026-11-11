@@ -148,22 +148,50 @@ pub fn run(reg: &Registry, live: &Live) -> Vec<Check> {
                 Level::Info,
                 h.id(),
                 format!("{} cannot be moved to another config dir", h.name()),
-                "cswap shows its native login but cannot hold more accounts for it.",
+                "cswap shows its default login but cannot hold accounts for it.",
             ));
         }
-        if hs.default != "native" && hs.default != "auto" && reg.find(h, &hs.default).is_err() {
+        if hs.start != "default" && hs.start != "auto" && reg.find(h, &hs.start).is_err() {
             out.push(check(
                 Level::Warn,
                 h.id(),
-                format!("default account '{}' no longer exists", hs.default),
-                "Launches fall back to the native login. Pick a default in Settings.",
+                format!(
+                    "the account a bare launch starts on ('{}') is gone",
+                    hs.start
+                ),
+                "Launches fall back to the agent's default login. Pick another in Settings.",
             ));
         }
 
         for acc in accounts {
             let key = acc.key();
-            let name = format!("{key} ({})", acc.title());
+            let name = if acc.is_native() {
+                format!("{}'s default login", h.name())
+            } else {
+                format!("{} ({key})", acc.title())
+            };
             let dir = acc.config_dir();
+            if !acc.is_native() && acc.meta.label.is_empty() {
+                out.push(check(
+                    Level::Warn,
+                    &key,
+                    format!("{key} has no name"),
+                    format!("Every account has one. Run: cswap rename {key} <name>"),
+                ));
+            }
+            // One login, one account. Said once for each pair.
+            if let Some(other) = manage::duplicate_of(reg, acc)
+                .filter(|o| !acc.is_native() && o.meta.id < acc.meta.id)
+            {
+                out.push(check(
+                    Level::Warn,
+                    &key,
+                    format!("{name} holds the same login as {}", other.title()),
+                    format!(
+                        "A login kept in two accounts stops working in one as soon as the other renews it. Remove one: cswap remove {key}"
+                    ),
+                ));
+            }
             if !h.logged_in(&dir) {
                 if !acc.is_native() {
                     out.push(check(

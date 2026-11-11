@@ -54,6 +54,7 @@ pub enum Id {
     Clock24h,
     Mouse,
     PaintBackground,
+    Theme,
     UpdateCheck,
     Wrapped(Harness),
     Default(Harness),
@@ -106,11 +107,11 @@ fn note(label: &str, value: String, help: &str) -> Row {
 
 /// What a bare launch of `h` uses, in words.
 fn default_text(app: &App, h: Harness, hs: &HarnessSettings) -> String {
-    match hs.default.as_str() {
-        "native" => "the agent's own login".to_string(),
-        "auto" => "auto: the best pick".to_string(),
+    match hs.start.as_str() {
+        "default" => "its default login".to_string(),
+        "auto" => "auto: the best account".to_string(),
         id => match app.reg.of(h).find(|a| a.meta.id.to_string() == id) {
-            Some(acc) => format!("{} · {}", acc.key(), acc.title()),
+            Some(acc) => format!("account {}", acc.title()),
             None => format!("{id} (missing)"),
         },
     }
@@ -120,6 +121,15 @@ pub fn rows(app: &App) -> Vec<Row> {
     let s = &app.settings;
     match TABS[app.settings_tab.min(TABS.len() - 1)] {
         Tab::General => vec![
+            value(
+                Id::Theme,
+                "Theme",
+                {
+                    let scheme = app.theme.scheme();
+                    format!("{} · {}", scheme.name(), scheme.blurb())
+                },
+                "The dashboard's colours. Violet, blue and green are tinted; dark is true black; grey has no colour at all; terminal uses your terminal's own 16 colours, so it follows the theme you already have.",
+            ),
             value(
                 Id::RefreshMinutes,
                 "Refresh every",
@@ -187,19 +197,19 @@ pub fn rows(app: &App) -> Vec<Row> {
                     Id::Wrapped(h),
                     &format!("Wrap `{bin}`"),
                     hs.wrapped,
-                    &format!("On: `{bin}` starts on the default account below. Off: cswap passes straight through unless you give --cswap=."),
+                    &format!("On: a bare `{bin}` starts where the next row says. Off: cswap passes straight through unless you give --cswap=."),
                 ),
                 value(
                     Id::Default(h),
-                    "Default account",
+                    &format!("A bare `{bin}` starts on"),
                     default_text(app, h, &hs),
-                    &format!("What a bare `{bin}` uses. Auto asks the suggestion engine at every launch."),
+                    &format!("What `{bin}` uses when you name no account: its default login, one of your accounts, or auto, which picks the best account at every launch."),
                 ),
                 toggle(
                     Id::Announce(h),
                     "Say which account at launch",
                     hs.announce,
-                    "One dim line on stderr before the agent starts, and only when cswap chose something other than the agent's own login.",
+                    "One dim line on stderr before the agent starts, and only when cswap chose something other than the agent's default login.",
                 ),
                 toggle(
                     Id::SyncEnabled(h),
@@ -236,7 +246,7 @@ pub fn rows(app: &App) -> Vec<Row> {
                 out.push(note(
                     "Status",
                     "experimental".to_string(),
-                    "cswap accounts for this agent rely on behaviour its vendor does not document. The agent's own login always works.",
+                    "cswap accounts for this agent rely on behaviour its vendor does not document. The agent's default login always works.",
                 ));
             }
             out
@@ -280,7 +290,7 @@ pub fn rows(app: &App) -> Vec<Row> {
                 note(
                     "Pick an account once",
                     "claude --cswap=work".to_string(),
-                    "--cswap=<alias or number> picks the account for one launch. --cswap=auto takes the best pick. --cswap-select asks.",
+                    "--cswap=<name or number> picks the account for one launch. --cswap=auto takes the best one, --cswap=default the agent's default login. --cswap-select asks.",
                 ),
                 note(
                     "Pin a terminal",
@@ -364,28 +374,31 @@ pub fn change(app: &mut App, dir: i32) {
         Id::PaintBackground => {
             Settings::update(|s| s.paint_background = !s.paint_background).map(|_| ())
         }
+        Id::Theme => Settings::update(|s| {
+            s.theme = crate::tui::theme::Scheme::parse(&s.theme)
+                .step(dir)
+                .name()
+                .to_string()
+        })
+        .map(|_| ()),
         Id::UpdateCheck => Settings::update(|s| s.update_check = !s.update_check).map(|_| ()),
         Id::Wrapped(h) => flip_h(h, |s| s.wrapped = !s.wrapped),
         Id::Announce(h) => flip_h(h, |s| s.announce = !s.announce),
         Id::SyncEnabled(h) => flip_h(h, |s| s.sync.enabled = !s.sync.enabled),
         Id::CliIdentity(h) => flip_h(h, |s| s.cli_identity = !s.cli_identity),
         Id::Default(h) => {
-            let mut options = vec!["native".to_string(), "auto".to_string()];
+            let mut options = vec!["default".to_string(), "auto".to_string()];
             options.extend(
                 app.reg
                     .of(h)
                     .filter(|a| !a.is_native())
                     .map(|a| a.meta.id.to_string()),
             );
-            let current = app
-                .hs
-                .get(&h)
-                .map(|s| s.default.clone())
-                .unwrap_or_default();
+            let current = app.hs.get(&h).map(|s| s.start.clone()).unwrap_or_default();
             let at = options.iter().position(|o| *o == current).unwrap_or(0) as i64;
             let n = options.len() as i64;
             let next = (at + if dir < 0 { -1 } else { 1 }).rem_euclid(n) as usize;
-            manage::set_default(h, &options[next]).map(|_| ())
+            manage::set_start(h, &options[next]).map(|_| ())
         }
         Id::Exclude(h) => {
             if dir != 0 {
@@ -497,7 +510,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         };
         let style = if current {
             Style::default()
-                .fg(t.bg())
+                .fg(t.on_accent())
                 .bg(color)
                 .add_modifier(Modifier::BOLD)
         } else {

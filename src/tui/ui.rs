@@ -17,6 +17,8 @@ use crate::model;
 use crate::refresh;
 
 const NAV_W: u16 = 25;
+/// The pages from here down are about cswap itself, not about accounts.
+const NAV_SPLIT: usize = 6;
 pub const MIN_W: u16 = 84;
 pub const MIN_H: u16 = 22;
 
@@ -38,7 +40,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 &format!("this window is {}×{}", area.width, area.height),
                 &format!("make it at least {MIN_W}×{MIN_H}"),
                 "",
-                "q quits",
+                "Esc quits",
             ],
         );
         app.hits = hits;
@@ -156,9 +158,12 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let inner = card(f, area, "", t, focused.then(|| t.accent()));
     let attention = health::attention(&app.derived.checks);
     let w = inner.width as usize;
+    let legend_h = Harness::ALL.len() as u16 + 2;
+    let roomy = inner.height > Page::ALL.len() as u16 + legend_h + 1;
 
     for (i, page) in Page::ALL.into_iter().enumerate() {
-        let y = inner.y + i as u16;
+        // A gap sets the pages about the app itself apart from the rest.
+        let y = inner.y + i as u16 + u16::from(i >= NAV_SPLIT && roomy);
         if y >= inner.y + inner.height {
             break;
         }
@@ -182,6 +187,10 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
                 let n = crate::view::grant_count(&app.reg, Utc::now());
                 (n > 0).then(|| (n.to_string(), t.info()))
             }
+            Page::Sessions => {
+                let n = app.sessions.len();
+                (n > 0).then(|| (n.to_string(), t.ok()))
+            }
             Page::Sync => {
                 let n: usize = app
                     .reg
@@ -193,7 +202,7 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             }
             _ => None,
         };
-        let key = format!("{}", i + 1);
+        let key = page.hotkey().to_string();
         let tail_w = badge.as_ref().map(|(b, _)| width(b) + 1).unwrap_or(0) + 2;
         let label = fit(page.title(), w.saturating_sub(2 + tail_w));
         let mut spans = vec![bar, Span::styled(format!(" {label}"), style)];
@@ -217,7 +226,6 @@ fn sidebar(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     }
 
     // The agents, with how many accounts each has and whether it is wrapped.
-    let legend_h = Harness::ALL.len() as u16 + 2;
     if inner.height > Page::ALL.len() as u16 + legend_h {
         let mut ly = inner.y + inner.height - legend_h;
         f.render_widget(
@@ -291,6 +299,8 @@ fn page(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         Page::Sync => pages::sync::draw(f, content, app, hits),
         Page::Usage => pages::usage::draw(f, content, app, hits),
         Page::Accounts => pages::accounts::draw(f, content, app, hits),
+        Page::Defaults => pages::defaults::draw(f, content, app, hits),
+        Page::Sessions => pages::sessions::draw(f, content, app, hits),
         Page::Resets => pages::resets::draw(f, content, app, hits),
         Page::Analytics => pages::analytics::draw(f, content, app, hits),
         Page::Health => pages::health::draw(f, content, app, hits),
@@ -352,7 +362,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             });
             chips.push(Chip {
                 key: "d",
-                label: "default",
+                label: "start here",
                 action: Action::SetDefault(k.clone()),
             });
             if app.page == Page::Accounts {
@@ -363,7 +373,7 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
                 });
                 chips.push(Chip {
                     key: "e",
-                    label: "alias",
+                    label: "rename",
                     action: Action::EditLabel(k.clone()),
                 });
                 chips.push(Chip {
@@ -377,6 +387,29 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
                     action: Action::Remove(k.clone()),
                 });
             }
+        }
+    } else if app.page == Page::Defaults {
+        if let Some(k) = &key {
+            chips.push(Chip {
+                key: "⏎",
+                label: "actions",
+                action: Action::AccountMenu(k.clone()),
+            });
+            chips.push(Chip {
+                key: "c",
+                label: "make account",
+                action: Action::NewFromDefault(k.clone()),
+            });
+            chips.push(Chip {
+                key: "o",
+                label: "open",
+                action: Action::Launch(k.clone()),
+            });
+            chips.push(Chip {
+                key: "d",
+                label: "start here",
+                action: Action::SetDefault(k.clone()),
+            });
         }
     } else if app.page == Page::Sync {
         chips.push(Chip {
@@ -442,15 +475,11 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             action: Action::Back,
         },
     ];
-    let fixed_w: u16 = fixed
-        .iter()
-        .map(|c| (width(c.key) + width(c.label) + 3) as u16 + 2)
-        .sum::<u16>()
-        - 2;
+    let fixed_w = widgets::chips_width(&fixed);
     let row = pad(keys);
     if row.width > fixed_w + 4 {
         let right = Rect::new(row.x + row.width - fixed_w, row.y, fixed_w, 1);
-        let left = Rect::new(row.x, row.y, row.width - fixed_w - 2, 1);
+        let left = Rect::new(row.x, row.y, row.width - fixed_w - widgets::CHIP_GAP, 1);
         widgets::chips(f, right, &fixed, hits, t);
         widgets::chips(f, left, &chips, hits, t);
     } else {

@@ -30,22 +30,26 @@ use crate::{manage, refresh, store};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Page {
     Overview,
-    Sync,
     Usage,
     Accounts,
+    Defaults,
+    Sessions,
     Resets,
+    Sync,
     Analytics,
     Health,
     Settings,
 }
 
 impl Page {
-    pub const ALL: [Page; 8] = [
+    pub const ALL: [Page; 10] = [
         Page::Overview,
-        Page::Sync,
         Page::Usage,
         Page::Accounts,
+        Page::Defaults,
+        Page::Sessions,
         Page::Resets,
+        Page::Sync,
         Page::Analytics,
         Page::Health,
         Page::Settings,
@@ -54,10 +58,12 @@ impl Page {
     pub fn title(self) -> &'static str {
         match self {
             Page::Overview => "Overview",
-            Page::Sync => "Sync",
             Page::Usage => "Usage",
             Page::Accounts => "Accounts",
+            Page::Defaults => "Defaults",
+            Page::Sessions => "Sessions",
             Page::Resets => "Resets",
+            Page::Sync => "Sync",
             Page::Analytics => "Analytics",
             Page::Health => "Health",
             Page::Settings => "Settings",
@@ -66,15 +72,22 @@ impl Page {
 
     pub fn blurb(self) -> &'static str {
         match self {
-            Page::Overview => "what to use next, and everything at a glance",
-            Page::Sync => "what each account shares with the agent's own config dir",
-            Page::Usage => "weekly limits, pace and when each one resets",
-            Page::Accounts => "sign in, label, set defaults and renewals",
+            Page::Overview => "what to use next, and every account at a glance",
+            Page::Usage => "how much of each weekly limit is used",
+            Page::Accounts => "add, sign in, name and remove accounts",
+            Page::Defaults => "each agent's own login, used when no account is asked for",
+            Page::Sessions => "the agents running right now",
             Page::Resets => "what resets when, and the resets you hold · view only",
+            Page::Sync => "what each account shares with the agent's own config dir",
             Page::Analytics => "how fast each account burns through its week",
             Page::Health => "checks for the problems that are otherwise silent",
-            Page::Settings => "refresh, defaults, wrapping and sync rules",
+            Page::Settings => "theme, refresh, startup account, wrapping and sync rules",
         }
+    }
+
+    /// The key that jumps to this page: 1 to 9, then 0.
+    pub fn hotkey(self) -> char {
+        char::from_digit(((self.index() + 1) % 10) as u32, 10).unwrap_or('1')
     }
 
     pub fn index(self) -> usize {
@@ -98,13 +111,17 @@ pub enum Action {
     RefreshAll,
     Refresh(String),
     AddAccount,
-    NewAccountAlias(Harness),
+    /// Ask for the new account's name; the text is a suggestion.
+    NewAccountName(Harness, String),
+    /// Make an account for the login an agent's default holds.
+    NewFromDefault(String),
     AccountMenu(String),
     Login(String),
     DoLogin(String),
     Remove(String),
     DoRemove(String),
     EditLabel(String),
+    EditAliases(String),
     EditPlan(String),
     EditBilling(String),
     BillingCycle(String, NaiveDate, Option<Cycle>),
@@ -133,6 +150,7 @@ pub enum Action {
 pub enum Then {
     CreateAccount(Harness),
     Label(String),
+    Aliases(String),
     Plan(String),
     BillingDate(String),
     GrantExpiry(String),
@@ -205,6 +223,15 @@ pub enum Exit {
     Launch { key: String },
 }
 
+/// One running agent, for the Sessions page.
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub key: String,
+    pub pid: u32,
+    pub cwd: Option<PathBuf>,
+    pub started: Option<chrono::DateTime<Utc>>,
+}
+
 /// Facts read from disk on every reload, so drawing a frame touches no files.
 #[derive(Default)]
 pub struct Derived {
@@ -220,15 +247,20 @@ pub struct Derived {
 pub struct App {
     pub settings: Settings,
     pub hs: HashMap<Harness, HarnessSettings>,
+    /// The accounts cswap holds. Every list of accounts shows these.
     pub reg: Registry,
+    /// The same, plus each agent's own login. Only the Defaults page and the
+    /// work behind the scenes (refresh, health, sessions) look here.
+    pub all: Registry,
     pub live: Live,
+    pub sessions: Vec<Session>,
     pub derived: Derived,
     pub theme: Theme,
 
     pub page: Page,
     pub focus: Focus,
     /// Selected row per page.
-    pub sel: [usize; 8],
+    pub sel: [usize; 10],
     pub settings_tab: usize,
     pub modal: Option<Modal>,
     pub toast: Option<Toast>,
@@ -283,15 +315,17 @@ impl App {
         let settings = Settings::load()?;
         let now = Instant::now();
         let mut app = App {
-            theme: Theme::detect(settings.paint_background),
+            theme: Theme::detect(settings.paint_background, &settings.theme),
             settings,
             hs: HashMap::new(),
             reg: Registry::default(),
+            all: Registry::default(),
             live: Live::new(),
+            sessions: Vec::new(),
             derived: Derived::default(),
             page: Page::Overview,
             focus: Focus::Nav,
-            sel: [0; 8],
+            sel: [0; 10],
             settings_tab: 0,
             modal: None,
             toast: None,
@@ -323,28 +357,31 @@ impl App {
 
     pub fn reload(&mut self) {
         if let Ok(s) = Settings::load() {
-            self.theme = Theme::detect(s.paint_background);
+            self.theme = Theme::detect(s.paint_background, &s.theme);
             self.settings = s;
         }
         if let Ok(reg) = Registry::load() {
-            self.reg = reg;
+            self.all = reg;
         }
         self.hs = Harness::ALL
             .into_iter()
             .map(|h| (h, HarnessSettings::load(h).unwrap_or_default()))
             .collect();
-        self.live = sessions::scan(&self.reg);
+        self.scan_sessions();
 
         let now = Utc::now();
         let mut d = Derived::default();
-        (d.logged_in, d.local) = crate::view::facts(&mut self.reg);
+        (d.logged_in, d.local) = crate::view::facts(&mut self.all);
+        self.reg = Registry {
+            accounts: self.all.profiles().cloned().collect(),
+        };
         for h in Harness::ALL {
             let accounts: Vec<&Account> = self.reg.of(h).collect();
             d.picks
                 .insert(h, suggest::rank(&accounts, &self.settings, now));
             d.bins.insert(h, manage::find_bin(h, &self.hs[&h]).ok());
         }
-        d.checks = health::run(&self.reg, &self.live);
+        d.checks = health::run(&self.all, &self.live);
         // What the last check stored. The check itself runs on its own thread.
         d.newer = crate::update::enabled(&self.settings)
             .then(crate::update::known_newer)
@@ -353,6 +390,27 @@ impl App {
         self.last_reload = Instant::now();
         self.last_scan = Instant::now();
         self.clamp();
+    }
+
+    /// Find the running agents and what is known about each.
+    fn scan_sessions(&mut self) {
+        self.live = sessions::scan(&self.all);
+        let mut list: Vec<Session> = Vec::new();
+        for acc in &self.all.accounts {
+            for pid in self.live.get(&acc.key()).into_iter().flatten() {
+                let d = sessions::details(*pid);
+                list.push(Session {
+                    key: acc.key(),
+                    pid: *pid,
+                    cwd: d.cwd,
+                    started: d.started,
+                });
+            }
+        }
+        // Newest first.
+        list.sort_by_key(|s| std::cmp::Reverse(s.started));
+        self.sessions = list;
+        self.last_scan = Instant::now();
     }
 
     fn load_history(&mut self) {
@@ -369,7 +427,7 @@ impl App {
     pub fn check_sync(&mut self) {
         let keys: Vec<String> = self.sync_keys();
         for key in keys {
-            let Some(acc) = self.reg.get_mut(&key) else {
+            let Some(acc) = self.all.get_mut(&key) else {
                 continue;
             };
             let hs = self.hs.get(&acc.harness).cloned().unwrap_or_default();
@@ -402,11 +460,18 @@ impl App {
             .collect()
     }
 
+    /// Keys of the agents' own logins, in display order.
+    pub fn default_keys(&self) -> Vec<String> {
+        self.all.defaults().map(|a| a.key()).collect()
+    }
+
     pub fn rows_len(&self) -> usize {
         match self.page {
             Page::Overview | Page::Usage | Page::Accounts | Page::Analytics => {
                 self.reg.accounts.len()
             }
+            Page::Defaults => self.default_keys().len(),
+            Page::Sessions => self.sessions.len(),
             Page::Sync => self.sync_keys().len(),
             Page::Resets => pages::resets::rows(self).len(),
             Page::Health => self.derived.checks.len(),
@@ -431,6 +496,7 @@ impl App {
                 self.account_keys().get(self.row()).cloned()
             }
             Page::Sync => self.sync_keys().get(self.row()).cloned(),
+            Page::Defaults => self.default_keys().get(self.row()).cloned(),
             _ => None,
         }
     }
@@ -517,8 +583,8 @@ impl App {
         if now.duration_since(self.last_reload) > Duration::from_secs(20) && self.modal.is_none() {
             self.reload();
         } else if now.duration_since(self.last_scan) > Duration::from_secs(5) {
-            self.live = sessions::scan(&self.reg);
-            self.last_scan = now;
+            self.scan_sessions();
+            self.clamp();
         }
         if now.duration_since(self.last_due_check) < Duration::from_secs(2) {
             return;
@@ -534,7 +600,7 @@ impl App {
         }
         let utc = Utc::now();
         let due: Vec<String> = self
-            .reg
+            .all
             .accounts
             .iter()
             .filter(|a| !self.busy.contains(&a.key()))
@@ -611,10 +677,11 @@ impl App {
         match key.code {
             KeyCode::Esc => self.dispatch(Action::Back),
             KeyCode::Char('?') => self.dispatch(Action::Help),
-            KeyCode::Char(c @ '1'..='8') => {
-                let page = Page::ALL[c as usize - '1' as usize];
-                self.go(page);
-                self.focus = Focus::Main;
+            KeyCode::Char(c @ '0'..='9') => {
+                if let Some(page) = Page::ALL.into_iter().find(|p| p.hotkey() == c) {
+                    self.go(page);
+                    self.focus = Focus::Main;
+                }
             }
             KeyCode::Tab => self.move_page(1),
             KeyCode::BackTab => self.move_page(-1),
@@ -665,6 +732,13 @@ impl App {
             ('d', Some(k)) if on_account => self.dispatch(Action::SetDefault(k)),
             ('l', Some(k)) if on_account => self.dispatch(Action::Login(k)),
             ('e', Some(k)) if on_account => self.dispatch(Action::EditLabel(k)),
+            ('E', Some(k)) if on_account => self.dispatch(Action::EditAliases(k)),
+            ('c', Some(k)) if self.page == Page::Defaults => {
+                self.dispatch(Action::NewFromDefault(k))
+            }
+            ('o', Some(k)) if self.page == Page::Defaults => self.dispatch(Action::Launch(k)),
+            ('d', Some(k)) if self.page == Page::Defaults => self.dispatch(Action::SetDefault(k)),
+            ('u', Some(k)) if self.page == Page::Defaults => self.dispatch(Action::Refresh(k)),
             ('p', Some(k)) if on_account => self.dispatch(Action::EditPlan(k)),
             ('b', Some(k)) if on_account => self.dispatch(Action::EditBilling(k)),
             ('n', Some(k)) if on_account => self.dispatch(Action::AddGrant(k)),
@@ -781,7 +855,7 @@ impl App {
     fn submit(&mut self, then: Then, value: String) {
         let value = value.trim().to_string();
         match then {
-            Then::CreateAccount(h) => match manage::create(h, Some(&value)) {
+            Then::CreateAccount(h) => match manage::create(h, &value) {
                 Ok(acc) => {
                     self.modal = None;
                     self.reload();
@@ -793,18 +867,37 @@ impl App {
                 Err(e) => self.input_error(format!("{e:#}")),
             },
             Then::Label(key) => {
-                let result = match self.reg.get_mut(&key) {
-                    Some(acc) => manage::set_label(acc, &value),
+                let result = match self.all.get_mut(&key) {
+                    Some(acc) => manage::rename(acc, &value),
                     None => Ok(()),
                 };
                 match result {
                     Ok(()) => {
                         self.modal = None;
                         self.reload();
-                        let text = if value.is_empty() {
-                            format!("{key}: alias cleared")
+                        self.say(Tone::Good, format!("Renamed to '{value}'."));
+                    }
+                    Err(e) => self.input_error(format!("{e:#}")),
+                }
+            }
+            Then::Aliases(key) => {
+                let list: Vec<String> = value
+                    .split([',', ' '])
+                    .map(|a| a.trim().to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect();
+                let result = match self.all.get_mut(&key) {
+                    Some(acc) => manage::set_aliases(acc, &list).map(|_| acc.title()),
+                    None => Ok(String::new()),
+                };
+                match result {
+                    Ok(name) => {
+                        self.modal = None;
+                        self.reload();
+                        let text = if list.is_empty() {
+                            format!("{name} has no alias now.")
                         } else {
-                            format!("{key} is now '{value}'")
+                            format!("{name} also answers to {}.", list.join(", "))
                         };
                         self.say(Tone::Good, text);
                     }
@@ -887,7 +980,7 @@ impl App {
     }
 
     fn update_account(&mut self, key: &str, f: impl FnOnce(&mut store::AccountMeta)) {
-        let result = match self.reg.get_mut(key) {
+        let result = match self.all.get_mut(key) {
             Some(acc) => {
                 // The native login has no cswap dir until something is stored.
                 let _ = crate::fsx::private_dir(&acc.dir());
@@ -950,7 +1043,12 @@ impl App {
                         });
                     }
                 }
-                Page::Resets => {}
+                Page::Defaults => {
+                    if let Some(k) = self.selected_key() {
+                        self.dispatch(Action::AccountMenu(k));
+                    }
+                }
+                Page::Resets | Page::Sessions => {}
             },
             Action::Help => self.modal = Some(pages::help()),
             Action::RefreshAll => self.refresh_all(),
@@ -965,13 +1063,14 @@ impl App {
 
             // ---- accounts
             Action::AddAccount => self.add_account(),
-            Action::NewAccountAlias(h) => self.input(
+            Action::NewAccountName(h, suggestion) => self.input(
                 &format!("New {} account", h.name()),
-                "Alias (optional)",
-                "",
-                "a short name such as work, used as --cswap=work · Enter continues · Esc cancels",
+                "Name",
+                &suggestion,
+                "a short name such as work, used as --cswap=work · Enter goes on to the sign-in",
                 Then::CreateAccount(h),
             ),
+            Action::NewFromDefault(key) => self.new_from_default(&key),
             Action::AccountMenu(key) => self.account_menu(&key),
             Action::Login(key) => self.login(&key),
             Action::DoLogin(key) => {
@@ -984,7 +1083,7 @@ impl App {
             Action::Remove(key) => self.remove(&key),
             Action::DoRemove(key) => {
                 self.modal = None;
-                let result = match self.reg.get(&key) {
+                let result = match self.all.get(&key) {
                     Some(acc) => manage::remove(acc, &self.live),
                     None => Ok(()),
                 };
@@ -997,13 +1096,27 @@ impl App {
                 }
             }
             Action::EditLabel(key) => {
-                let current = self.reg.get(&key).map(|a| a.meta.label.clone()).unwrap_or_default();
+                let current = self.all.get(&key).map(|a| a.meta.label.clone()).unwrap_or_default();
                 self.input(
-                    &format!("Alias for {key}"),
-                    "Alias",
+                    &format!("Rename {current}"),
+                    "Name",
                     &current,
-                    "letters, digits, - _ . · empty clears it",
+                    "letters, digits, - _ . · used as --cswap=<name>",
                     Then::Label(key),
+                );
+            }
+            Action::EditAliases(key) => {
+                let (name, current) = self
+                    .all
+                    .get(&key)
+                    .map(|a| (a.title(), a.meta.aliases.join(", ")))
+                    .unwrap_or_default();
+                self.input(
+                    &format!("Aliases for {name}"),
+                    "Aliases",
+                    &current,
+                    "extra names it answers to, separated by commas · empty clears them",
+                    Then::Aliases(key),
                 );
             }
             Action::EditPlan(key) => {
@@ -1085,10 +1198,10 @@ impl App {
             }
             Action::SetDefault(key) => {
                 self.modal = None;
-                let Some(acc) = self.reg.get(&key) else { return };
+                let Some(acc) = self.all.get(&key) else { return };
                 let (h, id) = (acc.harness, acc.meta.id.to_string());
                 let title = acc.title();
-                match manage::set_default(h, &id) {
+                match manage::set_start(h, &id) {
                     Ok(_) => {
                         self.reload();
                         self.say(
@@ -1134,7 +1247,8 @@ impl App {
                             String::new(),
                             "They will be moved to ~/.cswap/parked/ and replaced by links to the"
                                 .to_string(),
-                            "native files. Nothing is deleted and nothing is merged.".to_string(),
+                            "agent's own files. Nothing is deleted and nothing is merged."
+                                .to_string(),
                         ],
                         "Move aside and relink",
                         false,
@@ -1144,7 +1258,7 @@ impl App {
             }
             Action::DoRepair(key) => {
                 self.modal = None;
-                let Some(acc) = self.reg.get(&key) else { return };
+                let Some(acc) = self.all.get(&key) else { return };
                 let hs = self.hs.get(&acc.harness).cloned().unwrap_or_default();
                 match sync::repair(acc.harness, &key, &acc.config_dir(), &hs.sync.exclude) {
                     Ok(Some(park)) => {
@@ -1201,9 +1315,9 @@ impl App {
                 let mut detail = if !installed {
                     format!("`{}` is not installed", h.spec().bins[0])
                 } else if count == 0 {
-                    "no cswap accounts yet".to_string()
+                    "no accounts yet".to_string()
                 } else {
-                    format!("{count} cswap account{}", if count == 1 { "" } else { "s" })
+                    format!("{count} account{}", if count == 1 { "" } else { "s" })
                 };
                 if h.spec().experimental && installed {
                     detail.push_str(" · experimental");
@@ -1213,20 +1327,135 @@ impl App {
                     detail,
                     enabled: installed && h.wrappable(),
                     key: char::from_digit(i as u32 + 1, 10),
-                    action: Action::NewAccountAlias(h),
+                    action: Action::NewAccountName(h, String::new()),
                 }
             })
             .collect();
         self.modal = Some(Modal::Choice {
             title: "Add an account".to_string(),
-            hint: "pick the agent · you sign in with the agent's own flow next".to_string(),
+            hint: "pick the agent · then name the account · then the agent's own sign-in runs"
+                .to_string(),
+            items,
+            sel: 0,
+        });
+    }
+
+    /// Start an account for the login an agent's default holds. The login is
+    /// not copied: one login in two places stops working as soon as either
+    /// side renews it. The agent's sign-in runs, and you sign in again.
+    fn new_from_default(&mut self, key: &str) {
+        let Some(acc) = self.all.get(key) else { return };
+        let h = acc.harness;
+        if !self.derived.logged_in.contains(key) {
+            self.say(
+                Tone::Warn,
+                format!(
+                    "{} is not signed in, so there is no login to make an account from.",
+                    h.name()
+                ),
+            );
+            return;
+        }
+        if let Some(twin) = manage::duplicate_of(&self.all, acc) {
+            self.say(
+                Tone::Info,
+                format!("{} already holds this login.", twin.title()),
+            );
+            return;
+        }
+        if !h.wrappable() || self.derived.bins.get(&h).is_none_or(|b| b.is_none()) {
+            self.say(
+                Tone::Warn,
+                format!("cswap cannot hold accounts for {}.", h.name()),
+            );
+            return;
+        }
+        let suggestion = manage::suggest_name(&self.all, h, acc.email());
+        let who = match acc.email() {
+            "" => "the same login".to_string(),
+            e => e.to_string(),
+        };
+        self.input(
+            &format!("Account from {}'s default login", h.name()),
+            "Name",
+            &suggestion,
+            &format!("next you sign in as {who} again · cswap never copies a login"),
+            Then::CreateAccount(h),
+        );
+    }
+
+    /// What can be done with an agent's own login.
+    fn default_menu(&mut self, key: &str) {
+        let Some(acc) = self.all.get(key) else { return };
+        let h = acc.harness;
+        let bin = h.spec().bins[0];
+        let signed_in = self.derived.logged_in.contains(key);
+        let twin = manage::duplicate_of(&self.all, acc).map(|t| t.title());
+        let k = key.to_string();
+        let item =
+            |label: String, detail: String, key: char, enabled: bool, action: Action| ChoiceItem {
+                label,
+                detail,
+                enabled,
+                key: Some(key),
+                action,
+            };
+        let items = vec![
+            item(
+                "Create an account from this login".to_string(),
+                match &twin {
+                    Some(t) => format!("{t} already holds it"),
+                    None if !signed_in => "not signed in".to_string(),
+                    None => "name it, then sign in again".to_string(),
+                },
+                'c',
+                signed_in && twin.is_none() && h.wrappable(),
+                Action::NewFromDefault(k.clone()),
+            ),
+            item(
+                format!("Open {bin} on its default login"),
+                "closes the dashboard and starts the agent".to_string(),
+                'o',
+                signed_in,
+                Action::Launch(k.clone()),
+            ),
+            item(
+                format!("Start a bare `{bin}` here"),
+                if self.is_default(acc) {
+                    "it already does".to_string()
+                } else {
+                    "instead of on an account".to_string()
+                },
+                'd',
+                !self.is_default(acc),
+                Action::SetDefault(k.clone()),
+            ),
+            item(
+                "Refresh usage".to_string(),
+                String::new(),
+                'u',
+                signed_in,
+                Action::Refresh(k),
+            ),
+        ];
+        let mut hint = acc.email().to_string();
+        if hint.is_empty() {
+            hint = "not signed in".to_string();
+        }
+        self.modal = Some(Modal::Choice {
+            title: format!("{} · default login", h.name()),
+            hint,
             items,
             sel: 0,
         });
     }
 
     fn account_menu(&mut self, key: &str) {
-        let Some(acc) = self.reg.get(key) else { return };
+        let Some(acc) = self.all.get(key) else { return };
+        if acc.is_native() {
+            self.default_menu(key);
+            return;
+        }
         let h = acc.harness;
         let signed_in = self.derived.logged_in.contains(key);
         let native = acc.is_native();
@@ -1249,11 +1478,11 @@ impl App {
                 Action::Launch(k.clone()),
             ),
             item(
-                format!("Make it the default for {bin}"),
+                format!("Start a bare `{bin}` here"),
                 if self.is_default(acc) {
-                    "it already is"
+                    "it already does"
                 } else {
-                    "what a bare launch uses"
+                    "what runs with no --cswap"
                 },
                 'd',
                 !self.is_default(acc),
@@ -1283,11 +1512,18 @@ impl App {
                 Action::Login(k.clone()),
             ),
             item(
-                "Set alias".to_string(),
+                "Rename".to_string(),
                 "",
                 'e',
                 true,
                 Action::EditLabel(k.clone()),
+            ),
+            item(
+                "Set aliases".to_string(),
+                "extra names it answers to",
+                'E',
+                true,
+                Action::EditAliases(k.clone()),
             ),
             item(
                 "Set plan name".to_string(),
@@ -1344,7 +1580,7 @@ impl App {
     }
 
     fn login(&mut self, key: &str) {
-        let Some(acc) = self.reg.get(key) else { return };
+        let Some(acc) = self.all.get(key) else { return };
         if acc.is_native() {
             self.say(
                 Tone::Info,
@@ -1385,7 +1621,7 @@ impl App {
     }
 
     fn remove(&mut self, key: &str) {
-        let Some(acc) = self.reg.get(key) else { return };
+        let Some(acc) = self.all.get(key) else { return };
         if acc.is_native() {
             self.say(
                 Tone::Info,
@@ -1421,7 +1657,7 @@ impl App {
     }
 
     fn sync_one(&mut self, key: &str) -> Option<Report> {
-        let acc = self.reg.get_mut(key)?;
+        let acc = self.all.get_mut(key)?;
         let hs = self.hs.get(&acc.harness).cloned().unwrap_or_default();
         let h = acc.harness;
         match sync::sync_account(acc, &hs) {
@@ -1479,21 +1715,30 @@ impl App {
         self.reload();
         match result {
             Ok(true) => {
-                let who = match self.reg.get(key).map(|a| a.email().to_string()) {
-                    Some(e) if !e.is_empty() => format!(" as {e}"),
-                    _ => String::new(),
+                let Some(acc) = self.all.get(key) else { return };
+                let name = acc.title();
+                let who = match acc.email() {
+                    "" => String::new(),
+                    e => format!(" as {e}"),
                 };
-                let dup = self
-                    .reg
-                    .get(key)
-                    .and_then(|a| manage::duplicate_of(&self.reg, a))
-                    .map(|d| d.key());
-                match dup {
+                let twin = manage::duplicate_of(&self.all, acc).map(|d| d.title());
+                match twin {
+                    // One account per login. The agent's own default is the
+                    // one place the same login may also sit.
+                    Some(other) if created => {
+                        let _ = manage::remove(acc, &Live::new());
+                        self.reload();
+                        self.say(
+                            Tone::Bad,
+                            format!("{other} already holds that login, so '{name}' was not added."),
+                        );
+                        return;
+                    }
                     Some(other) => self.say(
-                        Tone::Warn,
-                        format!("{key} is signed in{who}, the same login as {other}."),
+                        Tone::Bad,
+                        format!("{name} is signed in{who}, the login {other} already holds. Remove one of the two."),
                     ),
-                    None => self.say(Tone::Good, format!("{key} is signed in{who}.")),
+                    None => self.say(Tone::Good, format!("{name} is signed in{who}.")),
                 }
                 self.page = Page::Accounts;
                 self.focus = Focus::Main;
@@ -1503,7 +1748,7 @@ impl App {
                 self.spawn_refresh(key);
             }
             Ok(false) if created => {
-                if let Some(acc) = self.reg.get(key) {
+                if let Some(acc) = self.all.get(key) {
                     let _ = manage::remove(acc, &Live::new());
                 }
                 self.reload();
@@ -1515,7 +1760,7 @@ impl App {
             ),
             Err(e) => {
                 if created {
-                    if let Some(acc) = self.reg.get(key) {
+                    if let Some(acc) = self.all.get(key) {
                         let _ = manage::remove(acc, &Live::new());
                     }
                     self.reload();

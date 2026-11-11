@@ -31,6 +31,8 @@ pub struct Settings {
     pub clock_24h: bool,
     /// Paint cswap's own dark background. Off keeps the terminal's.
     pub paint_background: bool,
+    /// The dashboard's colours: a name from `tui::theme::Scheme`.
+    pub theme: String,
     /// Days of usage samples kept for the analytics page.
     pub history_days: u32,
     /// Auto-pick skips an account whose weekly usage is at or above this.
@@ -48,6 +50,7 @@ impl Default for Settings {
             mouse: true,
             clock_24h: true,
             paint_background: true,
+            theme: "violet".to_string(),
             history_days: 90,
             auto_skip_above_pct: 97.0,
             update_check: true,
@@ -108,8 +111,10 @@ pub struct HarnessSettings {
     /// When off, `cswap <harness>` hands straight to the real binary unless an
     /// account is named with `--cswap=`.
     pub wrapped: bool,
-    /// Which account a bare launch uses: `native`, `auto`, or an account id.
-    pub default: String,
+    /// Which account a bare launch starts on: `default` (the agent's own
+    /// login), `auto`, or an account id.
+    #[serde(alias = "default")]
+    pub start: String,
     /// Path to the real binary, when it is not the first one on `PATH`.
     pub binary: Option<String>,
     /// Print one line on stderr saying which account a launch uses.
@@ -125,7 +130,7 @@ impl Default for HarnessSettings {
         HarnessSettings {
             schema: SCHEMA,
             wrapped: true,
-            default: "native".to_string(),
+            start: "default".to_string(),
             binary: None,
             announce: true,
             cli_identity: true,
@@ -136,7 +141,13 @@ impl Default for HarnessSettings {
 
 impl HarnessSettings {
     pub fn load(h: Harness) -> Result<HarnessSettings> {
-        Ok(fsx::read_json(&paths::harness_settings(h.id()))?.unwrap_or_default())
+        let mut s: HarnessSettings =
+            fsx::read_json(&paths::harness_settings(h.id()))?.unwrap_or_default();
+        // The word an early build stored for the agent's own login.
+        if s.start == "native" {
+            s.start = "default".to_string();
+        }
+        Ok(s)
     }
 
     pub fn update(h: Harness, f: impl FnOnce(&mut HarnessSettings)) -> Result<HarnessSettings> {
@@ -256,9 +267,11 @@ pub struct SyncState {
 pub struct AccountMeta {
     pub schema: u32,
     pub harness: String,
-    /// 0 is the harness's own native login; cswap accounts count from 1.
+    /// 0 is the agent's own login, its default; cswap accounts count from 1.
     pub id: u32,
+    /// The account's name. Every cswap account has one. The default has none.
     pub label: String,
+    /// More names the account answers to.
     pub aliases: Vec<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub last_used: Option<DateTime<Utc>>,
@@ -326,13 +339,13 @@ impl Account {
         }
     }
 
-    /// What to call this account in a list: its label, else its email, else
-    /// its key.
+    /// What to call this account in a list: its name. The agent's own login
+    /// is `default`.
     pub fn title(&self) -> String {
-        if !self.meta.label.is_empty() {
+        if self.is_native() {
+            "default".to_string()
+        } else if !self.meta.label.is_empty() {
             self.meta.label.clone()
-        } else if self.is_native() {
-            "native".to_string()
         } else if let Some(e) = &self.meta.identity.email {
             e.clone()
         } else {
@@ -473,6 +486,16 @@ impl Registry {
 
     pub fn of(&self, h: Harness) -> impl Iterator<Item = &Account> {
         self.accounts.iter().filter(move |a| a.harness == h)
+    }
+
+    /// The accounts cswap holds: every one but the agents' own logins.
+    pub fn profiles(&self) -> impl Iterator<Item = &Account> {
+        self.accounts.iter().filter(|a| !a.is_native())
+    }
+
+    /// The agents' own logins, one per installed agent.
+    pub fn defaults(&self) -> impl Iterator<Item = &Account> {
+        self.accounts.iter().filter(|a| a.is_native())
     }
 
     pub fn get(&self, key: &str) -> Option<&Account> {

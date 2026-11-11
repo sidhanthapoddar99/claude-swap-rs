@@ -101,13 +101,13 @@ enum Cmd {
 
     /// Add an account and sign in
     #[command(
-        after_help = "Examples:\n  cswap add claude            a second Claude Code account\n  cswap add codex work        a Codex account called work\n\nThe agent's own sign-in runs next. The account is kept only if it completes."
+        after_help = "Examples:\n  cswap add claude work       a Claude Code account called work\n  cswap add codex             asks for the name\n\nThe agent's own sign-in runs next. The account is kept only if it completes,\nand only if no other account already holds that login."
     )]
     Add {
         /// claude, codex, agy or grok
         agent: String,
-        /// A short name, used as --cswap=<alias>
-        alias: Option<String>,
+        /// The account's name, used as --cswap=<name>
+        name: Option<String>,
     },
 
     /// Sign in to an account again
@@ -126,23 +126,45 @@ enum Cmd {
         yes: bool,
     },
 
-    /// Name an account, or clear its name
-    Alias {
-        /// An alias, a key such as claude-2, or an email
+    /// Give an account another name
+    Rename {
+        /// A name, a key such as claude-2, or an email
         account: String,
-        /// The new alias; leave out to clear it
-        name: Option<String>,
+        /// The new name
+        name: String,
     },
 
-    /// Show or set what a bare launch of an agent uses
+    /// Show or set the extra names an account answers to
     #[command(
-        after_help = "Examples:\n  cswap default claude          show it\n  cswap default claude work     always start on work\n  cswap default claude auto     let cswap pick at every launch\n  cswap default claude native   the agent's own login"
+        after_help = "Examples:\n  cswap alias work              show them\n  cswap alias work w office     set them\n  cswap alias work --clear      remove them"
     )]
-    Default {
+    Alias {
+        /// A name, a key such as claude-2, or an email
+        account: String,
+        /// The aliases; they replace the ones it has
+        aliases: Vec<String>,
+        /// Remove every alias
+        #[arg(long, conflicts_with = "aliases")]
+        clear: bool,
+    },
+
+    /// Show or set which account a bare launch of an agent starts on
+    #[command(
+        alias = "default",
+        after_help = "Examples:\n  cswap use claude            show it\n  cswap use claude work       always start on work\n  cswap use claude auto       let cswap pick at every launch\n  cswap use claude default    the agent's own login"
+    )]
+    Use {
         /// claude, codex, agy or grok
         agent: String,
-        /// An account, `native` or `auto`
+        /// An account, `default` or `auto`
         account: Option<String>,
+    },
+
+    /// The agents' own logins
+    Defaults {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
     },
 
     /// Fetch usage now
@@ -205,7 +227,7 @@ fn help(p: &Paint) -> String {
     out.push_str(&row("cswap", "open the dashboard"));
     out.push_str(&row(
         "cswap <agent> [args…]",
-        "run an agent on its default account",
+        "run an agent on the account it starts on",
     ));
     out.push_str(&row(
         "cswap start [--default]",
@@ -232,7 +254,7 @@ fn help(p: &Paint) -> String {
     out.push_str("\n  Everything after the agent's name goes to the agent untouched, except:\n");
     out.push_str(&row(
         "  --cswap=<account>",
-        "run on this account: an alias, a number, native or auto",
+        "run on this account: a name, a number, default or auto",
     ));
     out.push_str(&row(
         "  --cswap=a,b,c",
@@ -244,9 +266,10 @@ fn help(p: &Paint) -> String {
         (
             "LOOK",
             &[
-                ("ps", "which agents are running, on which account"),
                 ("list", "every account and its state"),
-                ("usage [account]", "limits, pace and reset times"),
+                ("defaults", "the agents' own logins"),
+                ("ps", "which agents are running, on which account"),
+                ("usage [account]", "weekly limits and when they reset"),
                 ("resets", "spare resets and what resets when (view only)"),
                 ("suggest [agent]", "which account to use next, and why"),
             ],
@@ -254,15 +277,16 @@ fn help(p: &Paint) -> String {
         (
             "ACCOUNTS",
             &[
-                ("add <agent> [alias]", "add an account and sign in"),
+                ("add <agent> <name>", "add an account and sign in"),
                 ("login <account>", "sign in again"),
+                ("rename <account> <name>", "give an account another name"),
                 (
-                    "alias <account> [name]",
-                    "name an account, or clear its name",
+                    "alias <account> [names…]",
+                    "extra names an account answers to",
                 ),
                 (
-                    "default <agent> [account]",
-                    "show or set what a bare launch uses",
+                    "use <agent> [account]",
+                    "which account a bare launch starts on",
                 ),
                 ("remove <account>", "delete an account's login"),
             ],
@@ -301,11 +325,11 @@ fn help(p: &Paint) -> String {
     out.push('\n');
     out.push_str(&head("ACCOUNT NAMES"));
     out.push_str(&format!(
-        "  An account is named by its alias ({}), its key ({}), its number within\n  the agent ({}), its email, or {} for the agent's own login.\n",
+        "  Every account has a name ({}). It also answers to its aliases, its key\n  ({}), its number within the agent ({}) and its email. {} is the\n  agent's own login.\n",
         p.info("work"),
         p.info("claude-2"),
         p.info("2"),
-        p.info("native")
+        p.info("default")
     ));
 
     out.push('\n');
@@ -387,6 +411,7 @@ fn run() -> Result<ExitCode> {
             | Cmd::Update { .. }
             | Cmd::Ps { json: true }
             | Cmd::List { json: true }
+            | Cmd::Defaults { json: true }
     );
     let mut ok = true;
     match cmd {
@@ -401,11 +426,17 @@ fn run() -> Result<ExitCode> {
         Cmd::Usage { account, refresh } => cli::usage(account.as_deref(), refresh)?,
         Cmd::Resets => cli::resets()?,
         Cmd::Suggest { agent } => cli::suggest_cmd(agent.as_deref())?,
-        Cmd::Add { agent, alias } => cli::add(&agent, alias.as_deref())?,
+        Cmd::Add { agent, name } => cli::add(&agent, name.as_deref())?,
         Cmd::Login { account } => cli::login(&account)?,
         Cmd::Remove { account, yes } => cli::remove(&account, yes)?,
-        Cmd::Alias { account, name } => cli::alias(&account, name.as_deref())?,
-        Cmd::Default { agent, account } => cli::default(&agent, account.as_deref())?,
+        Cmd::Rename { account, name } => cli::rename(&account, &name)?,
+        Cmd::Alias {
+            account,
+            aliases,
+            clear,
+        } => cli::alias(&account, &aliases, clear)?,
+        Cmd::Use { agent, account } => cli::use_cmd(&agent, account.as_deref())?,
+        Cmd::Defaults { json } => cli::defaults(json)?,
         Cmd::Refresh { account } => cli::refresh_cmd(account.as_deref())?,
         Cmd::Sync {
             account,

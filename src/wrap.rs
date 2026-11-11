@@ -3,8 +3,8 @@
 //! Everything the user types goes to the agent untouched, except two flags
 //! cswap keeps for itself and removes:
 //!
-//! - `--cswap=<account>` picks the account: an id, an alias, an email,
-//!   `native`, or `auto`. A comma-separated list is an order of preference:
+//! - `--cswap=<account>` picks the account: a name, a number, an email,
+//!   `default`, or `auto`. A comma-separated list is an order of preference:
 //!   the first one that can start a session now is used.
 //! - `--cswap-select` opens a picker.
 //!
@@ -201,7 +201,7 @@ pub fn run(h: Harness, args: Vec<String>) -> Result<()> {
         (Some(Selector::Select), _) => (Selector::Select, Via::Picker),
         (Some(s), _) => (s, Via::Flag),
         (None, Some(v)) => (selector(&v), Via::Env),
-        (None, None) => match hs.default.as_str() {
+        (None, None) => match hs.start.as_str() {
             "auto" => (Selector::Auto, Via::Auto),
             other => (Selector::Named(vec![other.to_string()]), Via::Default),
         },
@@ -212,13 +212,14 @@ pub fn run(h: Harness, args: Vec<String>) -> Result<()> {
     let (acc, note) = match resolve(&reg, h, &sel, &settings) {
         Ok(found) => found,
         // A stored default that no longer resolves (the account was removed by
-        // hand) must not lock the user out of the agent: fall back to native.
+        // hand) must not lock the user out of the agent: fall back to its
+        // default login.
         Err(e) if via == Via::Default || via == Via::Env => {
             let native = reg
                 .of(h)
                 .find(|a| a.is_native())
                 .with_context(|| format!("{e:#}"))?;
-            eprintln!("cswap: {e:#}; using the native login");
+            eprintln!("cswap: {e:#}; using {}'s default login", h.spec().bins[0]);
             (native, None)
         }
         Err(e) => return Err(e),
@@ -265,7 +266,7 @@ fn launch(
         let _ = acc.update(|m| m.last_used = Some(Utc::now()));
     }
     // A notice only when a person is watching and cswap chose something other
-    // than the plain native login.
+    // than the agent's default login.
     let quiet = acc.is_native() && matches!(via, Via::Default);
     if hs.announce && !quiet && std::io::stderr().is_terminal() {
         announce(&acc, via, note, settings);
@@ -302,8 +303,8 @@ mod tests {
         assert_eq!(sel, None);
         assert_eq!(rest, s(&["--cswap-auto", "--cswapx=1"]));
         assert_eq!(
-            split_args(s(&["--cswap=work, 3,native"])).0,
-            Some(Selector::Named(s(&["work", "3", "native"])))
+            split_args(s(&["--cswap=work, 3,default"])).0,
+            Some(Selector::Named(s(&["work", "3", "default"])))
         );
     }
 

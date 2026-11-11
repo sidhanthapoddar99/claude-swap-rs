@@ -93,13 +93,19 @@ fn judge(acc: &Account, settings: &Settings, now: DateTime<Utc>) -> (Pick, Optio
 
     if let Some(w) = snap.blocking(now) {
         let back = w.resets_at;
+        // A short window is never named anywhere in cswap: what matters is
+        // that the account is out for now, and when it is back.
+        let what = if crate::view::is_short(w) {
+            "limit reached".to_string()
+        } else {
+            format!("{} limit reached", w.label)
+        };
         let mut text = match back {
             Some(t) => format!(
-                "{} limit reached, back {}",
-                w.label,
+                "{what}, back {}",
                 model::landing(t, now, settings.clock_24h)
             ),
-            None => format!("{} limit reached", w.label),
+            None => what,
         };
         if !grants.is_empty() {
             text.push_str(" (a reset is available)");
@@ -166,9 +172,9 @@ fn judge(acc: &Account, settings: &Settings, now: DateTime<Utc>) -> (Pick, Optio
             let when = s
                 .resets_at
                 .filter(|t| *t > now)
-                .map(|t| format!(", resets in {}", model::span(t - now)))
+                .map(|t| format!(" for the next {}", model::span(t - now)))
                 .unwrap_or_default();
-            let text = format!("{} window at {used:.0}%{when}", s.label);
+            let text = format!("close to being rate limited{when}");
             headline = format!("{headline}; {text}");
             reasons.push(text);
         }
@@ -290,6 +296,32 @@ mod tests {
         let busy = account(&sb, 1, 30.0, 20, 95.0);
         let free = account(&sb, 2, 50.0, 100, 0.0);
         assert_eq!(order(&[&busy, &free]), ["claude-2", "claude-1"]);
+    }
+
+    #[test]
+    fn a_short_window_counts_but_is_never_named() {
+        let sb = Sandbox::new();
+        let nearly = account(&sb, 1, 30.0, 20, 95.0);
+        let full = account(&sb, 2, 30.0, 20, 100.0);
+        let picks = rank(&[&nearly, &full], &Settings::default(), Utc::now());
+        // Nearly full still runs, with a word on why it ranks low.
+        assert!(picks[0].usable && picks[0].key == "claude-1");
+        assert!(
+            picks[0].reasons.iter().any(|r| r.contains("rate limited")),
+            "{:?}",
+            picks[0].reasons
+        );
+        // Full is out until the window comes round.
+        assert!(!picks[1].usable);
+        assert!(
+            picks[1].headline.starts_with("limit reached, back"),
+            "{}",
+            picks[1].headline
+        );
+        for p in &picks {
+            let all = format!("{} {}", p.headline, p.reasons.join(" "));
+            assert!(!all.contains("5h") && !all.contains("window"), "{all}");
+        }
     }
 
     #[test]
