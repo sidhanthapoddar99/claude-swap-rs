@@ -325,7 +325,11 @@ pub fn upcoming(
         }
         let billing = &acc.meta.billing;
         if let Some(date) = billing.next(today).filter(|d| *d >= today) {
-            let cycle = billing.cycle.map(|c| c.label()).unwrap_or("once");
+            // The cycle is named only when it is known.
+            let cycle = billing
+                .cycle
+                .map(|c| format!("{} · ", c.label()))
+                .unwrap_or_default();
             out.push(Event {
                 kind: if billing.cancelled {
                     Kind::PlanEnds
@@ -343,8 +347,8 @@ pub fn upcoming(
                 .to_string(),
                 note: match (billing.cancelled, billing.source) {
                     (true, _) => "cancelled: use it up before then".to_string(),
-                    (false, Source::Api) => format!("{cycle} · from the vendor"),
-                    (false, Source::Manual) => format!("{cycle} · set by hand"),
+                    (false, Source::Api) => format!("{cycle}from the vendor"),
+                    (false, Source::Manual) => format!("{cycle}set by hand"),
                 },
             });
         }
