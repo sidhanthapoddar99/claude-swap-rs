@@ -20,7 +20,7 @@ const NAV_W: u16 = 25;
 /// A gap is left in the menu before each of these pages. First come the
 /// pages about accounts, then the ones about what runs and how it is set up,
 /// then the app itself.
-const NAV_SPLITS: [usize; 2] = [5, 8];
+const NAV_SPLITS: [usize; 3] = [5, 8, 10];
 pub const MIN_W: u16 = 84;
 pub const MIN_H: u16 = 22;
 
@@ -58,6 +58,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let [nav, main] =
         Layout::horizontal([Constraint::Length(NAV_W), Constraint::Min(0)]).areas(body);
 
+    // What the Help page's card holds: the page less its title, its margin,
+    // and the card's border and padding. The keys scroll by it.
+    app.help_view = (
+        main.width.saturating_sub(6) as usize,
+        main.height.saturating_sub(4) as usize,
+    );
     header(f, head, app);
     sidebar(f, nav, app, &mut hits);
     page(f, main, app, &mut hits);
@@ -305,6 +311,7 @@ fn page(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
         Page::Analytics => pages::analytics::draw(f, content, app, hits),
         Page::Health => pages::health::draw(f, content, app, hits),
         Page::Settings => pages::settings::draw(f, content, app, hits),
+        Page::Help => pages::help::draw(f, content, app),
     }
 }
 
@@ -462,7 +469,11 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let fixed = [
         Chip {
             key: "?",
-            label: "keys",
+            label: if app.page == Page::Help {
+                "back"
+            } else {
+                "help"
+            },
             action: Action::Help,
         },
         Chip {

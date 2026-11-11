@@ -6,7 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
-use super::app::{App, Modal};
+use super::app::App;
 use super::theme::{Theme, DOT, RING, STAR};
 use super::widgets::{self, fit};
 use crate::model::{self, Window};
@@ -15,6 +15,7 @@ use crate::store::Account;
 pub mod accounts;
 pub mod analytics;
 pub mod health;
+pub mod help;
 pub mod overview;
 pub mod resets;
 pub mod root;
@@ -428,74 +429,6 @@ pub fn range_note(f: &mut Frame, area: Rect, app: &App, from: usize, to: usize, 
 /// How to launch on this account from a shell.
 pub fn launch_hint(app: &App, acc: &Account) -> String {
     crate::view::launch_hint(acc, app.is_default(acc))
-}
-
-pub fn help() -> Modal {
-    let rows = [
-        ("MOVE", ""),
-        ("1 – 9, 0", "jump to a page"),
-        ("Tab / Shift-Tab", "next / previous page"),
-        ("↑ ↓  j k", "move in the menu or the list"),
-        (
-            "→ Enter",
-            "from the menu into the page; open the selected row",
-        ),
-        ("←", "back to the menu"),
-        (
-            "Esc",
-            "one step back: close a dialog, leave the page, then quit",
-        ),
-        ("mouse", "click anything; the wheel scrolls"),
-        ("", ""),
-        ("EVERYWHERE", ""),
-        ("r", "refresh usage for every signed-in account"),
-        ("a", "add an account"),
-        ("?", "this help"),
-        ("", ""),
-        ("ON AN ACCOUNT", ""),
-        ("Enter", "all actions for the account"),
-        ("o", "open the agent on it (closes the dashboard)"),
-        ("d", "make it the default: where `cswap <agent>` starts"),
-        ("l", "sign in, or sign in again"),
-        ("e  E", "rename · set aliases"),
-        ("p  b", "plan name · renewal date"),
-        ("n", "note a reset the vendor does not report"),
-        ("u", "refresh just this account"),
-        ("x", "remove"),
-        ("", ""),
-        ("ROOT PAGE", ""),
-        ("c", "make an account from the selected login"),
-        ("o  d  u", "open · make it the default · refresh"),
-        ("", ""),
-        ("SYNC PAGE", ""),
-        ("s", "sync every account"),
-        ("Enter", "sync the selected account"),
-        ("R", "move shadowing files aside and relink"),
-        ("", ""),
-        ("SETTINGS PAGE", ""),
-        ("[ ]", "previous / next tab"),
-        (
-            "← → Enter",
-            "change the selected value, or do what the row says",
-        ),
-        (
-            "Space, Enter",
-            "in a list of boxes: tick one, save them all",
-        ),
-    ];
-    Modal::Info {
-        title: "Keys".to_string(),
-        body: rows
-            .iter()
-            .map(|(k, v)| {
-                if v.is_empty() {
-                    k.to_string()
-                } else {
-                    format!("  {}{v}", fit(k, 18))
-                }
-            })
-            .collect(),
-    }
 }
 
 #[cfg(test)]

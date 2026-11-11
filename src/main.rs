@@ -254,15 +254,9 @@ fn help(p: &Paint) -> String {
         ));
     }
     out.push_str("\n  Everything after the agent's name goes to the agent untouched, except:\n");
-    out.push_str(&row(
-        "  --cswap=<account>",
-        "run on this account: a name, a number, root or auto",
-    ));
-    out.push_str(&row(
-        "  --cswap=a,b,c",
-        "the first of these that is free right now",
-    ));
-    out.push_str(&row("  --cswap-select", "pick from a list"));
+    for (flag, what) in wrap::FLAGS {
+        out.push_str(&row(&format!("  {flag}"), what));
+    }
 
     let groups: [(&str, &[(&str, &str)]); 4] = [
         (

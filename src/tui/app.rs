@@ -39,11 +39,12 @@ pub enum Page {
     Analytics,
     Health,
     Settings,
+    Help,
 }
 
 impl Page {
     /// In the order of the menu, which is also the order of the number keys.
-    pub const ALL: [Page; 10] = [
+    pub const ALL: [Page; 11] = [
         Page::Overview,
         Page::Usage,
         Page::Resets,
@@ -54,6 +55,7 @@ impl Page {
         Page::Analytics,
         Page::Health,
         Page::Settings,
+        Page::Help,
     ];
 
     pub fn title(self) -> &'static str {
@@ -68,6 +70,7 @@ impl Page {
             Page::Analytics => "Analytics",
             Page::Health => "Health",
             Page::Settings => "Settings",
+            Page::Help => "Help",
         }
     }
 
@@ -83,11 +86,15 @@ impl Page {
             Page::Analytics => "how fast each account burns through its week",
             Page::Health => "checks for the problems that are otherwise silent",
             Page::Settings => "the dashboard, every agent's options, and the shells that wrap them",
+            Page::Help => "starting an agent on an account, cswap's words, and every key",
         }
     }
 
-    /// The key that jumps to this page: 1 to 9, then 0.
+    /// The key that jumps to this page: 1 to 9, then 0, and `?` for Help.
     pub fn hotkey(self) -> char {
+        if self == Page::Help {
+            return '?';
+        }
         char::from_digit(((self.index() + 1) % 10) as u32, 10).unwrap_or('1')
     }
 
@@ -336,7 +343,12 @@ pub struct App {
     pub page: Page,
     pub focus: Focus,
     /// Selected row per page.
-    pub sel: [usize; 10],
+    pub sel: [usize; 11],
+    /// The page `?` was pressed on, to go back to with a second `?`.
+    pub before_help: Page,
+    /// How wide and how tall the Help page's text was when last drawn, so
+    /// the keys scroll it no further than its end.
+    pub help_view: (usize, usize),
     pub settings_tab: usize,
     pub update: UpdateCheck,
     pub modal: Option<Modal>,
@@ -402,7 +414,9 @@ impl App {
             derived: Derived::default(),
             page: Page::Overview,
             focus: Focus::Nav,
-            sel: [0; 10],
+            sel: [0; 11],
+            before_help: Page::Overview,
+            help_view: (0, 0),
             settings_tab: 0,
             update: UpdateCheck::default(),
             modal: None,
@@ -555,6 +569,12 @@ impl App {
             Page::Resets => pages::resets::rows(self).len(),
             Page::Health => self.derived.checks.len(),
             Page::Settings => pages::settings::rows(self).len(),
+            // A row here is a line the text is scrolled by: one for every
+            // line that does not fit the page.
+            Page::Help => {
+                let (w, h) = self.help_view;
+                pages::help::len(self, w).saturating_sub(h) + 1
+            }
         }
     }
 
@@ -1183,9 +1203,18 @@ impl App {
                         self.dispatch(Action::AccountMenu(k));
                     }
                 }
-                Page::Resets | Page::Sessions => {}
+                Page::Resets | Page::Sessions | Page::Help => {}
             },
-            Action::Help => self.modal = Some(pages::help()),
+            // To the Help page, and from it back to where `?` was pressed.
+            Action::Help => {
+                if self.page == Page::Help {
+                    self.go(self.before_help);
+                } else {
+                    self.before_help = self.page;
+                    self.go(Page::Help);
+                    self.focus = Focus::Main;
+                }
+            }
             Action::RefreshAll => self.refresh_all(),
             Action::Refresh(key) => {
                 if self.derived.logged_in.contains(&key) {

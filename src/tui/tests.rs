@@ -54,7 +54,7 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
     let sb = Sandbox::new();
     sb.demo();
     let (mut app, _rx) = app();
-    let expect: [(Page, &[&str]); 10] = [
+    let expect: [(Page, &[&str]); 11] = [
         (
             Page::Overview,
             &[
@@ -136,6 +136,18 @@ fn every_page_draws_at_both_sizes_and_shows_its_content() {
                 "Harness",
                 "Shell",
                 "Check for updates now",
+            ],
+        ),
+        (
+            Page::Help,
+            &[
+                "STARTING AN AGENT",
+                "claude --cswap ",
+                "pick the account from a list",
+                "claude --cswap=<account>",
+                "cswap claude",
+                "export CSWAP_CLAUDE=work",
+                "WORDS",
             ],
         ),
     ];
@@ -581,9 +593,9 @@ fn keys_move_between_the_menu_and_the_page() {
     assert_eq!(app.row(), 1);
     key(&mut app, KeyCode::Esc);
     assert_eq!(app.focus, Focus::Nav);
-    // Ten pages in the order of the menu: 1 to 9, then 0 for the last.
+    // The pages in the order of the menu: 1 to 9, then 0, and ? for Help.
     let keys: String = Page::ALL.iter().map(|p| p.hotkey()).collect();
-    assert_eq!(keys, "1234567890");
+    assert_eq!(keys, "1234567890?");
     key(&mut app, KeyCode::Char('3'));
     assert_eq!(app.page, Page::Resets);
     key(&mut app, KeyCode::Char('5'));
@@ -592,10 +604,11 @@ fn keys_move_between_the_menu_and_the_page() {
     assert_eq!(app.page, Page::Sessions);
     key(&mut app, KeyCode::Char('0'));
     assert_eq!(app.page, Page::Settings);
+    // ? opens Help from anywhere, and a second ? goes back.
     key(&mut app, KeyCode::Char('?'));
-    assert!(matches!(app.modal, Some(Modal::Info { .. })));
-    key(&mut app, KeyCode::Enter);
-    assert!(app.modal.is_none());
+    assert_eq!((app.page, app.focus), (Page::Help, Focus::Main));
+    key(&mut app, KeyCode::Char('?'));
+    assert_eq!(app.page, Page::Settings);
     // Escape steps back, and from the menu it quits. `q` is not a key.
     key(&mut app, KeyCode::Char('q'));
     assert!(!app.quit);
@@ -640,16 +653,16 @@ fn a_click_lands_on_what_is_drawn_there() {
     let (row, line) = text
         .lines()
         .enumerate()
-        .find(|(_, l)| l.contains("? keys"))
+        .find(|(_, l)| l.contains("? help"))
         .expect("the footer lists the help key");
-    let col = line.split("? keys").next().unwrap().chars().count();
+    let col = line.split("? help").next().unwrap().chars().count();
     app.on_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: col as u16,
         row: row as u16,
         modifiers: KeyModifiers::NONE,
     });
-    assert!(matches!(app.modal, Some(Modal::Info { .. })));
+    assert_eq!(app.page, Page::Help);
 }
 
 #[test]
@@ -1094,4 +1107,32 @@ fn readme_picture() {
     let (mut app, _rx) = app();
     app.dispatch(Action::Go(Page::Overview));
     println!("{}", screen(&mut app, 116, 24));
+}
+
+#[test]
+fn the_help_page_scrolls_to_its_end_and_no_further() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    key(&mut app, KeyCode::Char('?'));
+    let top = screen(&mut app, ui::MIN_W, ui::MIN_H);
+    show("help/top", &top);
+    assert!(top.contains("STARTING AN AGENT"), "{top}");
+    assert!(!top.contains("KEYS · SETTINGS PAGE"), "{top}");
+    // Far more key presses than there are lines: the last line is on screen,
+    // and one step up moves the text at once.
+    for _ in 0..500 {
+        key(&mut app, KeyCode::Down);
+    }
+    let end = screen(&mut app, ui::MIN_W, ui::MIN_H);
+    show("help/end", &end);
+    assert!(end.contains("save them all"), "{end}");
+    key(&mut app, KeyCode::Up);
+    assert_ne!(screen(&mut app, ui::MIN_W, ui::MIN_H), end);
+    // The page tells every flag the command line takes.
+    app.sel[Page::Help.index()] = 0;
+    let text = screen(&mut app, 132, 60);
+    for (flag, what) in crate::wrap::FLAGS {
+        assert!(text.contains(flag) && text.contains(what), "{flag}\n{text}");
+    }
 }

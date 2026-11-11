@@ -1,12 +1,12 @@
 //! The wrapper: `cswap claude …`, `cswap codex …`, and so on.
 //!
-//! Everything the user types goes to the agent untouched, except two flags
+//! Everything the user types goes to the agent untouched, except the flags
 //! cswap keeps for itself and removes:
 //!
+//! - `--cswap` alone opens a picker. `--cswap-select` is the same.
 //! - `--cswap=<account>` picks the account: a name, a number, an email,
 //!   `root`, or `auto`. A comma-separated list is an order of preference:
 //!   the first one that can start a session now is used.
-//! - `--cswap-select` opens a picker.
 //!
 //! Without a flag the account is, in order: `$CSWAP_<HARNESS>` (set for
 //! everything started inside a wrapped session, or by hand for one terminal),
@@ -24,6 +24,18 @@ use crate::harness::Harness;
 use crate::store::{Account, HarnessSettings, Registry, Settings};
 use crate::sync::State;
 use crate::{manage, model, picker, platform, sessions, suggest};
+
+/// cswap's own launch flags and what each does. The command-line help and
+/// the dashboard's Help page both print this list.
+pub const FLAGS: [(&str, &str); 4] = [
+    ("--cswap", "pick the account from a list"),
+    (
+        "--cswap=<account>",
+        "run on this account: a name, an alias, a number, root or auto",
+    ),
+    ("--cswap=a,b,c", "the first of these that is free right now"),
+    ("--cswap-select", "the same as --cswap alone"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Selector {
@@ -59,7 +71,7 @@ pub fn split_args(args: Vec<String>) -> (Option<Selector>, Vec<String>) {
         } else if arg == "--" {
             literal = true;
             rest.push(arg);
-        } else if arg == "--cswap-select" {
+        } else if arg == "--cswap" || arg == "--cswap-select" {
             sel = Some(Selector::Select);
         } else if let Some(value) = arg.strip_prefix("--cswap=") {
             sel = Some(selector(value));
@@ -288,9 +300,14 @@ mod tests {
     #[test]
     fn select_auto_and_preference_lists() {
         assert_eq!(split_args(s(&["--cswap-select"])).0, Some(Selector::Select));
+        // The flag alone asks too, and the rest still goes to the agent.
+        let (sel, rest) = split_args(s(&["--cswap", "-r"]));
+        assert_eq!((sel, rest), (Some(Selector::Select), s(&["-r"])));
+        // After a bare `--` it is the agent's.
+        assert_eq!(split_args(s(&["--", "--cswap"])).0, None);
         assert_eq!(split_args(s(&["--cswap=select"])).0, Some(Selector::Select));
         assert_eq!(split_args(s(&["--cswap=auto"])).0, Some(Selector::Auto));
-        // Only the two documented flags are cswap's. Anything else is the agent's.
+        // Only the documented flags are cswap's. Anything else is the agent's.
         let (sel, rest) = split_args(s(&["--cswap-auto", "--cswapx=1"]));
         assert_eq!(sel, None);
         assert_eq!(rest, s(&["--cswap-auto", "--cswapx=1"]));

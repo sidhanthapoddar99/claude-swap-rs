@@ -10,7 +10,7 @@ One place for the accounts of your coding agents: **Claude Code**, **Codex**, **
 `cswap` is a single Rust binary for Linux, macOS and Windows. Starting an agent through it adds a few milliseconds and no network call. The agent then runs as itself: cswap replaces its own process with the agent's, so signals, exit codes and the terminal are the agent's own.
 
 ```
-  ◆ cswap  v1.0.0                                             updated 3m ago  ·  next in 10m     Thu 12 Nov  01:30
+  ◆ cswap  v1.0.0                                             updated 3m ago  ·  next in 10m     Thu 12 Nov  01:41
 
 ╭───────────────────────╮
 │ ▌ Overview          1 │  Overview   what to use next, and every account at a glance
@@ -23,7 +23,7 @@ One place for the accounts of your coding agents: **Claude Code**, **Codex**, **
 │   Analytics         8 │ │  ● Codex        nothing usable right now · not logged in                              │
 │   Health         2  9 │ ╰───────────────────────────────────────────────────────────────────────────────────────╯
 │   Settings          0 │ ╭ Accounts ─────────────────────────────────────────────────────────────────────────────╮
-│                       │ │    ACCOUNT               PLAN         USED                     RESETS IN STATE        │
+│   Help              ? │ │    ACCOUNT               PLAN         USED                     RESETS IN STATE        │
 │                       │ │ ▌● work                  Ultra        ━━━━━━━━━━━━━━━━━╋  38%  8h 59m    ● ready      │
 │  AGENTS               │ │  ● side                  Pro          ━━━━━━━━━━╋━━━━━━━ 100%  2d        ● limit hit  │
 │  ● Claude Code     2  │ │  ● team                               not signed in · press l            ○ signed out │
@@ -33,7 +33,7 @@ One place for the accounts of your coding agents: **Claude Code**, **Codex**, **
 │                       │ │                                                                                       │
 ╰───────────────────────╯ ╰───────────────────────────────────────────────────────────────────────────────────────╯
 
-  ⏎ actions   o open   d set default   a add account   r refresh                                 ? keys   esc menu
+  ⏎ actions   o open   d set default   a add account   r refresh                                 ? help   esc menu
 ```
 
 ## Install
@@ -161,17 +161,20 @@ Each agent has a short built-in list of names that stay private (logins, identit
 
 ```bash
 cswap claude [args…]            # the default
+cswap claude --cswap            # pick from a list
 cswap claude --cswap=work       # by name or alias
 cswap claude --cswap=2          # by number
 cswap claude --cswap=root       # the agent's root login
 cswap claude --cswap=auto       # the best account right now
 cswap claude --cswap=work,side  # the first of these that is free
-cswap claude --cswap-select     # pick from a list
+cswap claude --cswap-select     # the same as --cswap alone
 cswap start                     # pick the agent, then the account
 cswap start --default           # pick the agent, start on its default
 ```
 
-Everything after the agent's name goes to the agent untouched, `--help` and `-h` included. The only arguments cswap takes out are `--cswap=…` and `--cswap-select`.
+Everything after the agent's name goes to the agent untouched, `--help` and `-h` included. The only arguments cswap takes out are `--cswap`, `--cswap=…` and `--cswap-select`.
+
+With the shell integration, `claude` is `cswap claude`, so every line above also works without the `cswap` in front: `claude --cswap`, `claude --cswap=work`.
 
 Which account a launch uses, first match wins:
 
@@ -185,9 +188,9 @@ An account answers to its name (`work`), its aliases, its key (`claude-2`), its 
 
 ## The dashboard
 
-Run `cswap` with no arguments. Keys: `1`–`9` and `0` or the arrow keys to move, `Enter` to act, `?` for every key. `Esc` steps back: out of a dialog, out of the page, then out of cswap. The mouse works too.
+Run `cswap` with no arguments. Keys: `1`–`9` and `0` or the arrow keys to move, `Enter` to act, `?` for the Help page. `Esc` steps back: out of a dialog, out of the page, then out of cswap. The mouse works too.
 
-The pages are numbered in the order of the menu, so `1` is Overview and `0` is Settings.
+The pages are numbered in the order of the menu, so `1` is Overview and `0` is Settings. `?` opens Help from anywhere, and a second `?` goes back.
 
 | Page | What it shows |
 | --- | --- |
@@ -201,6 +204,7 @@ The pages are numbered in the order of the menu, so `1` is Overview and `0` is S
 | **Analytics** | Burn rate per account over the last week and where it lands at the reset. More is planned. |
 | **Health** | Anything that needs attention: signed-out accounts, two accounts on one login, shadowed files, a missing shell integration. |
 | **Settings** | Three tabs. General: the theme, refresh and updates, with a row that checks for an update now. Harness: every agent's options in one list. Shell: each shell with the agents it wraps, and a list of boxes to wrap or unwrap them. |
+| **Help** | How to start an agent on an account with every flag, what cswap's words mean, and every key. |
 
 Every bar, percent and countdown sits in the same column on every page. A countdown is as short as it can be: `3d` when it is more than two days off, `1d 6h` within two days, `4h 25m` within one. The exact date is on the Usage and Resets pages, always as a date such as `Sat 14 Nov`, with the time of day when it is within two days.
 

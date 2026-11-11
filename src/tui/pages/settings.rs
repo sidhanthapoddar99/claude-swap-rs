@@ -328,7 +328,7 @@ fn shells(app: &App) -> Vec<Row> {
         note(
             "Pick an account once",
             "claude --cswap=work".to_string(),
-            "--cswap=<name or number> picks the account for one launch. --cswap=auto takes the best one, --cswap=root the agent's root login. --cswap-select asks.",
+            "--cswap=<name or number> picks the account for one launch. --cswap=auto takes the best one, --cswap=root the agent's root login. --cswap alone asks.",
         )
         .under("In a terminal", None),
     );
