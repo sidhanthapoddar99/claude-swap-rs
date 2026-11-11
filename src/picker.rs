@@ -1,5 +1,5 @@
 //! The inline picker: a short list drawn under the prompt, for
-//! `--cswap-select` and `cswap start`. It draws on stderr, so whatever the
+//! `--cswap` and `cswap start`. It draws on stderr, so whatever the
 //! agent later prints on stdout stays clean, and it erases itself when done.
 
 use anyhow::{bail, Result};

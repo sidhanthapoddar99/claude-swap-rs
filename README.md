@@ -167,12 +167,11 @@ cswap claude --cswap=2          # by number
 cswap claude --cswap=root       # the agent's root login
 cswap claude --cswap=auto       # the best account right now
 cswap claude --cswap=work,side  # the first of these that is free
-cswap claude --cswap-select     # the same as --cswap alone
 cswap start                     # pick the agent, then the account
 cswap start --default           # pick the agent, start on its default
 ```
 
-Everything after the agent's name goes to the agent untouched, `--help` and `-h` included. The only arguments cswap takes out are `--cswap`, `--cswap=…` and `--cswap-select`.
+Everything after the agent's name goes to the agent untouched, `--help` and `-h` included. The only arguments cswap takes out are `--cswap` and `--cswap=…`.
 
 With the shell integration, `claude` is `cswap claude`, so every line above also works without the `cswap` in front: `claude --cswap`, `claude --cswap=work`.
 

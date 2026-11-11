@@ -648,7 +648,7 @@ fn help_names_every_command_in_groups() {
             "use <agent> [account]",
             "update  ",
             "--cswap=",
-            "--cswap-select",
+            "--cswap  ",
         ] {
             assert!(out.contains(word), "{flag}: help lacks {word:?}\n{out}");
         }

@@ -3,7 +3,7 @@
 //! Everything the user types goes to the agent untouched, except the flags
 //! cswap keeps for itself and removes:
 //!
-//! - `--cswap` alone opens a picker. `--cswap-select` is the same.
+//! - `--cswap` alone opens a picker.
 //! - `--cswap=<account>` picks the account: a name, a number, an email,
 //!   `root`, or `auto`. A comma-separated list is an order of preference:
 //!   the first one that can start a session now is used.
@@ -27,14 +27,13 @@ use crate::{manage, model, picker, platform, sessions, suggest};
 
 /// cswap's own launch flags and what each does. The command-line help and
 /// the dashboard's Help page both print this list.
-pub const FLAGS: [(&str, &str); 4] = [
+pub const FLAGS: [(&str, &str); 3] = [
     ("--cswap", "pick the account from a list"),
     (
         "--cswap=<account>",
         "run on this account: a name, an alias, a number, root or auto",
     ),
     ("--cswap=a,b,c", "the first of these that is free right now"),
-    ("--cswap-select", "the same as --cswap alone"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +70,7 @@ pub fn split_args(args: Vec<String>) -> (Option<Selector>, Vec<String>) {
         } else if arg == "--" {
             literal = true;
             rest.push(arg);
-        } else if arg == "--cswap" || arg == "--cswap-select" {
+        } else if arg == "--cswap" {
             sel = Some(Selector::Select);
         } else if let Some(value) = arg.strip_prefix("--cswap=") {
             sel = Some(selector(value));
@@ -299,8 +298,7 @@ mod tests {
 
     #[test]
     fn select_auto_and_preference_lists() {
-        assert_eq!(split_args(s(&["--cswap-select"])).0, Some(Selector::Select));
-        // The flag alone asks too, and the rest still goes to the agent.
+        // The flag alone asks, and the rest still goes to the agent.
         let (sel, rest) = split_args(s(&["--cswap", "-r"]));
         assert_eq!((sel, rest), (Some(Selector::Select), s(&["-r"])));
         // After a bare `--` it is the agent's.
@@ -310,6 +308,8 @@ mod tests {
         // Only the documented flags are cswap's. Anything else is the agent's.
         let (sel, rest) = split_args(s(&["--cswap-auto", "--cswapx=1"]));
         assert_eq!(sel, None);
+        // The picker's old flag is gone: it goes to the agent like any other.
+        assert_eq!(split_args(s(&["--cswap-select"])).0, None);
         assert_eq!(rest, s(&["--cswap-auto", "--cswapx=1"]));
         assert_eq!(
             split_args(s(&["--cswap=work, 3,default"])).0,
