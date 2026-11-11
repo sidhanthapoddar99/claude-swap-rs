@@ -221,6 +221,17 @@ pub fn command_line(pid: u32) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// One variable of a process's environment, where the system lets cswap
+/// read it.
+pub fn env_of(pid: u32, name: &str) -> Option<String> {
+    let environ = std::fs::read(proc_dir().join(pid.to_string()).join("environ")).ok()?;
+    let prefix = format!("{name}=");
+    environ
+        .split(|b| *b == 0)
+        .find(|v| v.starts_with(prefix.as_bytes()))
+        .map(|v| String::from_utf8_lossy(&v[prefix.len()..]).to_string())
+}
+
 /// The parent of a process, where the system lets cswap read it.
 pub fn parent(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(proc_dir().join(pid.to_string()).join("stat")).ok()?;

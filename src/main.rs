@@ -51,6 +51,12 @@ struct Cli {
 enum HerdrCmd {
     /// Every installed agent with its accounts, as JSON
     Menu,
+    /// Which account each herdr terminal's agent runs on
+    Ls {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// The account the agent in a terminal runs on
     Info {
         /// The terminal: `t7` or its name
@@ -97,7 +103,7 @@ enum Cmd {
 
     /// Agents in herdr terminals: which account, and switch it
     #[command(
-        after_help = "Examples:\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. It refuses in the middle of a turn."
+        after_help = "Examples:\n  cswap herdr ls                  which account each terminal's agent runs on\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. It refuses in the middle of a turn."
     )]
     Herdr {
         #[command(subcommand)]
@@ -462,6 +468,7 @@ fn run() -> Result<ExitCode> {
         Cmd::Ps { json } => cli::ps(json)?,
         Cmd::Herdr { what } => match what {
             HerdrCmd::Menu => herdr::menu_cmd()?,
+            HerdrCmd::Ls { json } => herdr::ls_cmd(json)?,
             HerdrCmd::Info { terminal, json } => herdr::info_cmd(&terminal, json)?,
             HerdrCmd::Switch {
                 terminal,

@@ -720,7 +720,11 @@ fn herdr_terminal(env: &Env, cmdline: &str) -> u32 {
         fs::write(dir.join("environ"), environ).unwrap();
         fs::write(dir.join("cmdline"), cmdline).unwrap();
     };
-    proc_of(h.join("proc").join(old.to_string()), "", cmdline);
+    proc_of(
+        h.join("proc").join(old.to_string()),
+        "HC_TERMINAL_ID=t7\0",
+        cmdline,
+    );
     fs::create_dir_all(h.join("hc")).unwrap();
     fs::write(h.join("hc/pid"), old.to_string()).unwrap();
     fs::write(h.join("hc/next"), next.to_string()).unwrap();
@@ -778,6 +782,10 @@ fn a_herdr_terminal_moves_to_another_account_and_keeps_its_conversation() {
     let h = env.home();
     fs::write(h.join("hc/status"), "working").unwrap();
 
+    let all: Value = serde_json::from_str(&env.ok(&["herdr", "ls", "--json"])).unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 1);
+    assert_eq!(all[0]["terminal"], "t7");
+    assert_eq!(all[0]["name"], "root");
     let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
     assert_eq!(info["account"], "claude-0");
     assert_eq!(info["session"], SESSION);
