@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# cswap installer — https://github.com/sidhanthapoddar99/claude-swap-rs
+# cswap installer for Linux and macOS: https://github.com/sidhanthapoddar99/claude-swap-rs
+# Windows: use install.ps1 from the same place.
 #
 #   curl -fsSL https://raw.githubusercontent.com/sidhanthapoddar99/claude-swap-rs/main/install.sh | bash
 #
@@ -30,7 +31,9 @@ case "$os/$arch" in
   Linux/aarch64)  target="aarch64-unknown-linux-musl" ;;
   Darwin/x86_64)  target="x86_64-apple-darwin" ;;
   Darwin/arm64)   target="aarch64-apple-darwin" ;;
-  *) echo "unsupported platform: $os/$arch" >&2; exit 1 ;;
+  Darwin/aarch64) target="aarch64-apple-darwin" ;;
+  Linux/arm64)    target="aarch64-unknown-linux-musl" ;;
+  *) echo "There is no prebuilt cswap for $os/$arch. Build it with: cargo install --git https://github.com/$REPO" >&2; exit 1 ;;
 esac
 
 # --- download latest release ----------------------------------------------
@@ -51,51 +54,61 @@ else
   actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
 fi
 if [ "$expected" != "$actual" ]; then
-  echo "checksum mismatch — aborting (expected $expected, got $actual)" >&2
+  echo "The download does not match its checksum (expected $expected, got $actual). Nothing was installed." >&2
   exit 1
 fi
 
 mkdir -p "$INSTALL_DIR"
 tar -xzf "$tmp/$asset" -C "$tmp"
 install -m 755 "$tmp/cswap" "$INSTALL_DIR/cswap"
-echo "Installed: $INSTALL_DIR/cswap ($("$INSTALL_DIR/cswap" --version 2>/dev/null || echo 'installed'))"
+echo "Installed $INSTALL_DIR/cswap ($("$INSTALL_DIR/cswap" --version 2>/dev/null || echo 'version unknown'))"
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
-  *) echo "NOTE: $INSTALL_DIR is not on your PATH — add it to your shell rc." ;;
+  *) echo "NOTE: $INSTALL_DIR is not on your PATH. Add it in your shell's rc file." ;;
 esac
 
-# --- shell integration (ask, then append — idempotent) ---------------------
+# --- shell integration (ask, then append; safe to run twice) ---------------
 MARKER="# >>> cswap shell integration >>>"
 
 append_block() { # $1 = rc file, $2 = shell name
-  if [ -f "$1" ] && grep -qF "$MARKER" "$1"; then
+  if [ -f "$1" ] && grep -qF "cswap shell-init" "$1"; then
     echo "  $1: already set up, skipping."
     return
   fi
+  mkdir -p "$(dirname "$1")"
   {
     printf '\n%s\n' "$MARKER"
-    printf 'eval "$(cswap shell-init %s)"\n' "$2"
+    if [ "$2" = "fish" ]; then
+      printf 'cswap shell-init fish | source\n'
+    else
+      printf 'eval "$(cswap shell-init %s)"\n' "$2"
+    fi
     printf '# <<< cswap shell integration <<<\n'
   } >> "$1"
   echo "  $1: added."
 }
 
-# Every rc whose shell exists on this machine gets an offer; the user's own
-# $SHELL rc is offered even if the file doesn't exist yet.
+# A shell gets an offer when its rc file exists, or when it is your $SHELL.
 candidates=""
-[ -f "$HOME/.zshrc" ] || case "${SHELL:-}" in */zsh) : ;; *) false ;; esac && candidates="$candidates zsh:$HOME/.zshrc"
-[ -f "$HOME/.bashrc" ] || case "${SHELL:-}" in */bash) : ;; *) false ;; esac && candidates="$candidates bash:$HOME/.bashrc"
+offer() { # $1 = shell name, $2 = rc file
+  if [ -f "$2" ] || [ "$(basename "${SHELL:-}")" = "$1" ]; then
+    candidates="$candidates $1:$2"
+  fi
+}
+offer zsh "$HOME/.zshrc"
+offer bash "$HOME/.bashrc"
+offer fish "${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
 
 if [ -z "$candidates" ]; then
   MODIFY_RC="no"
 fi
 
 if [ "$MODIFY_RC" = "ask" ]; then
-  # Under `curl | bash` stdin is the pipe; prompt via the terminal directly.
+  # Under `curl | bash` stdin is the pipe, so ask on the terminal itself.
   if [ -r /dev/tty ]; then
-    printf 'Add cswap shell integration (activate + claude wrapper) to:%s? [Y/n] ' \
-      "$(echo "$candidates" | sed 's/[a-z]*:/ /g')"
+    echo "Shell integration makes 'claude', 'codex', 'agy' and 'grok' run through cswap."
+    printf 'Add it to:%s? [Y/n] ' "$(echo "$candidates" | sed 's/[a-z]*:/ /g')"
     read -r reply < /dev/tty || reply=""
     case "$reply" in [Nn]*) MODIFY_RC="no" ;; *) MODIFY_RC="yes" ;; esac
   else
@@ -109,13 +122,21 @@ if [ "$MODIFY_RC" = "yes" ]; then
     shell="${entry%%:*}"; rc="${entry#*:}"
     append_block "$rc" "$shell"
   done
-  echo "Open a new terminal (or 'source' your rc) to pick it up."
+  echo "Open a new terminal to pick it up."
 else
   echo
-  echo "Shell integration not installed. To enable 'cswap activate' and the"
-  echo "claude wrapper, add this to your ~/.zshrc or ~/.bashrc:"
-  echo '  eval "$(cswap shell-init zsh)"   # or: bash'
+  echo "Shell integration was not installed. Without it, start agents with"
+  echo "'cswap claude', 'cswap codex' and so on. To make the plain commands go"
+  echo "through cswap, add one line to your shell's rc file:"
+  echo '  eval "$(cswap shell-init zsh)"        # zsh; use bash for bash'
+  echo '  cswap shell-init fish | source        # fish'
 fi
 
 echo
-echo "Next: create your first profile: cswap login <name>"
+echo "Next:"
+echo "  cswap                   open the dashboard"
+echo "  cswap add claude work   add a second Claude account named work"
+echo "  cswap -h                every command"
+if [ -d "$HOME/.local/share/cswap/profiles" ]; then
+  echo "  cswap migrate           bring your cswap 0.6 profiles over"
+fi

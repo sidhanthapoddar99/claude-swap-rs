@@ -1,6 +1,6 @@
 # Publish binaries to GitHub Releases.
 # Trigger: push a version tag from main, e.g.
-#   git tag v0.1.0 && git push origin v0.1.0
+#   git tag v0.7.0 && git push origin v0.7.0
 name: Release
 
 on:
@@ -23,6 +23,8 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +44,17 @@ jobs:
           fi
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          $zip = "cswap-${{ matrix.target }}.zip"
+          Compress-Archive -Path cswap.exe -DestinationPath $zip
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          Set-Content -Path "$zip.sha256" -Value "$hash  $zip" -NoNewline
       - name: Package
+        if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
           tar czf cswap-${{ matrix.target }}.tar.gz cswap
@@ -54,7 +66,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: cswap-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/cswap-*.tar.gz*
+          path: |
+            target/${{ matrix.target }}/release/cswap-*.tar.gz*
+            target/${{ matrix.target }}/release/cswap-*.zip*
 
   release:
     needs: build
@@ -65,5 +79,7 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: cswap-*.tar.gz*
+          files: |
+            cswap-*.tar.gz*
+            cswap-*.zip*
           generate_release_notes: true

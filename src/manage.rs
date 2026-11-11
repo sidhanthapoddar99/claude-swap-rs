@@ -1,0 +1,366 @@
+//! Creating, signing in, relabelling and removing accounts. The dashboard and
+//! the command line both go through here, so the rules live in one place.
+
+use anyhow::{bail, Context, Result};
+use chrono::Utc;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+use crate::harness::Harness;
+use crate::sessions::Live;
+use crate::store::{self, Account, AccountMeta, HarnessSettings, Registry};
+use crate::sync::{self, Report};
+use crate::{fsx, paths, refresh};
+
+/// The real binary for `h`, honouring a path set in its settings.
+pub fn find_bin(h: Harness, hs: &HarnessSettings) -> Result<PathBuf> {
+    h.binary(hs.binary.as_deref())
+}
+
+/// Is the real binary for `h` installed?
+pub fn installed(h: Harness) -> bool {
+    HarnessSettings::load(h)
+        .ok()
+        .is_some_and(|hs| find_bin(h, &hs).is_ok())
+}
+
+/// Register a new, empty account for `h`. It has a directory and its links,
+/// and no login yet.
+pub fn create(h: Harness, label: Option<&str>) -> Result<Account> {
+    if !h.wrappable() {
+        bail!(
+            "{} cannot be pointed at another config dir, so cswap cannot hold a second account for it",
+            h.name()
+        );
+    }
+    let label = label.map(str::trim).filter(|l| !l.is_empty());
+    fsx::private_dir(&paths::accounts_dir())?;
+    let mut acc = fsx::with_lock(&paths::accounts_dir(), || {
+        let reg = Registry::load()?;
+        if let Some(l) = label {
+            if !store::valid_label(l) {
+                bail!(
+                    "'{l}' cannot be an alias: use letters, digits, '-', '_' or '.', \
+                     not only digits, and not a reserved word"
+                );
+            }
+            if !reg.label_free(h, l, None) {
+                bail!("{} already has an account called '{l}'", h.name());
+            }
+        }
+        let id = reg.next_id(h);
+        let mut acc = Account {
+            harness: h,
+            meta: AccountMeta {
+                harness: h.id().to_string(),
+                id,
+                label: label.unwrap_or_default().to_string(),
+                created_at: Some(Utc::now()),
+                ..AccountMeta::default()
+            },
+        };
+        fsx::private_dir(&acc.dir())?;
+        acc.update(|_| {})?;
+        Ok(acc)
+    })?;
+    let hs = HarnessSettings::load(h)?;
+    prepare(&mut acc, &hs)?;
+    Ok(acc)
+}
+
+/// Make an account's `config_dir` ready for the agent: create it, seed it the
+/// first time, and bring its links in line with the native dir. The links have
+/// to exist before the agent runs, or it creates real directories that then
+/// hide the shared ones.
+pub fn prepare(acc: &mut Account, hs: &HarnessSettings) -> Result<Report> {
+    if acc.is_native() {
+        return Ok(Report::default());
+    }
+    let dir = acc.config_dir();
+    let fresh = !dir.exists();
+    fsx::private_dir(&dir)?;
+    if fresh {
+        acc.harness.seed(&dir)?;
+    }
+    if hs.sync.enabled {
+        sync::sync_account(acc, hs)
+    } else {
+        Ok(sync::check(acc.harness, &dir, &hs.sync.exclude))
+    }
+}
+
+/// Point the agent at this account: the environment, and for an agent moved
+/// by a flag, that flag. Call this BEFORE adding the user's own arguments.
+pub fn apply_env(cmd: &mut Command, acc: &Account) {
+    let spec = acc.harness.spec();
+    let var = format!("CSWAP_{}", acc.harness.id().to_uppercase());
+    // Children of this session stay on the same account.
+    cmd.env(&var, acc.meta.id.to_string());
+    cmd.env("CSWAP_ACCOUNT", acc.key());
+    if acc.is_native() {
+        // Only undo a redirect cswap itself made. A config dir the user set
+        // on purpose is theirs.
+        if let Some(home_env) = spec.home_env {
+            let ours = std::env::var_os(home_env)
+                .is_some_and(|v| PathBuf::from(v).starts_with(paths::root()));
+            if ours {
+                cmd.env_remove(home_env);
+                for (name, _) in acc.harness.launch_env() {
+                    cmd.env_remove(name);
+                }
+            }
+        }
+        return;
+    }
+    // An agent moved by a flag gets it in front of the user's arguments.
+    cmd.args(acc.harness.launch_args(&acc.config_dir()));
+    if let Some(home_env) = spec.home_env {
+        cmd.env(home_env, acc.config_dir());
+    }
+    for (name, value) in acc.harness.launch_env() {
+        cmd.env(name, value);
+    }
+    for name in spec.scrub_env {
+        cmd.env_remove(name);
+    }
+}
+
+/// The command that runs the agent's own sign-in on this account.
+pub fn login_command(acc: &mut Account) -> Result<Command> {
+    let hs = HarnessSettings::load(acc.harness)?;
+    let bin = find_bin(acc.harness, &hs)?;
+    prepare(acc, &hs)?;
+    let mut cmd = Command::new(bin);
+    apply_env(&mut cmd, acc);
+    cmd.args(acc.harness.spec().login_args);
+    Ok(cmd)
+}
+
+/// After the sign-in command exits: did a login arrive? Records who it is.
+pub fn finish_login(acc: &mut Account) -> Result<bool> {
+    let dir = acc.config_dir();
+    acc.harness.harden(&dir);
+    if !acc.harness.logged_in(&dir) {
+        return Ok(false);
+    }
+    refresh::refresh_local(acc)?;
+    // A new login makes any stored "needs the user" state obsolete.
+    acc.update(|m| {
+        m.refresh.needs_user = false;
+        m.refresh.error = None;
+        m.refresh.last_attempt = None;
+    })?;
+    Ok(true)
+}
+
+/// Run the agent's own sign-in on this account, in the foreground. True when
+/// a login was saved.
+pub fn sign_in(acc: &mut Account) -> Result<bool> {
+    let mut cmd = login_command(acc)?;
+    crate::platform::run_foreground(&mut cmd)
+        .with_context(|| format!("cannot start {}", acc.harness.spec().bins[0]))?;
+    finish_login(acc)
+}
+
+/// The two lines said before an agent's sign-in takes over the terminal.
+pub fn sign_in_banner(acc: &Account) -> String {
+    let h = acc.harness;
+    let mut text = format!(
+        "cswap · signing in {} with {}'s own sign-in\n",
+        acc.key(),
+        h.name()
+    );
+    if h.spec().login_args.is_empty() {
+        text.push_str(&format!(
+            "  {} has no sign-in command, so this is the agent itself.\n  Sign in, then quit it to come back.\n",
+            h.name()
+        ));
+    } else {
+        text.push_str("  Ctrl-C cancels.\n");
+    }
+    text
+}
+
+/// Does another cswap account of the same harness already hold this login?
+pub fn duplicate_of<'a>(reg: &'a Registry, acc: &Account) -> Option<&'a Account> {
+    let id = acc.meta.identity.account_id.as_deref();
+    let email = acc.meta.identity.email.as_deref();
+    reg.of(acc.harness)
+        .filter(|o| !o.is_native() && o.meta.id != acc.meta.id)
+        .find(|o| {
+            let same_id = id.is_some() && o.meta.identity.account_id.as_deref() == id;
+            let same_email = email.is_some() && o.meta.identity.email.as_deref() == email;
+            // Two workspaces of one email are different accounts, so an id on
+            // both sides decides; the email is the fallback.
+            match (id, o.meta.identity.account_id.as_deref()) {
+                (Some(_), Some(_)) => same_id,
+                _ => same_email,
+            }
+        })
+}
+
+/// Forget an account: its directory, credentials included. The links inside
+/// are removed without being followed, so the native dir is untouched.
+pub fn remove(acc: &Account, live: &Live) -> Result<()> {
+    if acc.is_native() {
+        bail!(
+            "account 0 is {}'s own login in {}; cswap does not own it and cannot remove it",
+            acc.harness.name(),
+            paths::tilde(&acc.harness.native_dir())
+        );
+    }
+    if let Some(pids) = live.get(&acc.key()).filter(|p| !p.is_empty()) {
+        bail!(
+            "{} has {} running session(s) (pid {}). Close them first",
+            acc.key(),
+            pids.len(),
+            pids.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let dir = acc.dir();
+    if dir.exists() {
+        fs::remove_dir_all(&dir).with_context(|| format!("cannot remove {}", dir.display()))?;
+    }
+    let _ = fs::remove_file(paths::history_file(&acc.key()));
+    // A default that pointed at this account falls back to the native login.
+    let id = acc.meta.id.to_string();
+    let hs = HarnessSettings::load(acc.harness)?;
+    if hs.default == id {
+        HarnessSettings::update(acc.harness, |s| s.default = "native".to_string())?;
+    }
+    Ok(())
+}
+
+/// Set or clear an account's alias.
+pub fn set_label(acc: &mut Account, label: &str) -> Result<()> {
+    let label = label.trim();
+    if !label.is_empty() {
+        if !store::valid_label(label) {
+            bail!(
+                "'{label}' cannot be an alias: use letters, digits, '-', '_' or '.', \
+                 not only digits, and not a reserved word"
+            );
+        }
+        let reg = Registry::load()?;
+        if !reg.label_free(acc.harness, label, Some(acc.meta.id)) {
+            bail!(
+                "{} already has an account called '{label}'",
+                acc.harness.name()
+            );
+        }
+    }
+    if acc.is_native() {
+        fsx::private_dir(&acc.dir())?;
+    }
+    acc.update(|m| m.label = label.to_string())
+}
+
+/// Make `sel` the account a bare launch of `h` uses. `sel` is `native`,
+/// `auto`, or anything that names one account.
+pub fn set_default(h: Harness, sel: &str) -> Result<String> {
+    let value = match sel.trim().to_lowercase().as_str() {
+        "auto" => "auto".to_string(),
+        "native" | "default" | "0" => "native".to_string(),
+        other => {
+            let reg = Registry::load()?;
+            let acc = reg.find(h, other)?;
+            if acc.is_native() {
+                "native".to_string()
+            } else {
+                acc.meta.id.to_string()
+            }
+        }
+    };
+    HarnessSettings::update(h, |s| s.default = value.clone())?;
+    Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::Sandbox;
+
+    #[test]
+    fn create_numbers_accounts_and_links_them() {
+        let sb = Sandbox::new();
+        let native = sb.native(Harness::Claude);
+        fs::write(native.join("settings.json"), "{}").unwrap();
+
+        let a = create(Harness::Claude, Some("work")).unwrap();
+        let b = create(Harness::Claude, None).unwrap();
+        assert_eq!((a.key(), b.key()), ("claude-1".into(), "claude-2".into()));
+        assert!(a.dir().join("settings.json").is_file());
+        assert!(fs::symlink_metadata(a.config_dir().join("settings.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(a.meta.sync.linked, 1);
+
+        // The alias is taken now, within this harness only.
+        assert!(create(Harness::Claude, Some("work")).is_err());
+        assert!(create(Harness::Claude, Some("3")).is_err());
+        sb.native(Harness::Codex);
+        assert!(create(Harness::Codex, Some("work")).is_ok());
+    }
+
+    #[test]
+    fn remove_keeps_the_native_dir_and_resets_a_default_that_pointed_here() {
+        let sb = Sandbox::new();
+        let native = sb.native(Harness::Claude);
+        fs::create_dir_all(native.join("projects")).unwrap();
+        fs::write(native.join("projects/keep.jsonl"), "x").unwrap();
+        let a = create(Harness::Claude, None).unwrap();
+        set_default(Harness::Claude, "1").unwrap();
+
+        remove(&a, &Live::new()).unwrap();
+        assert!(!a.dir().exists());
+        assert!(native.join("projects/keep.jsonl").is_file());
+        assert_eq!(
+            HarnessSettings::load(Harness::Claude).unwrap().default,
+            "native"
+        );
+    }
+
+    #[test]
+    fn a_late_write_does_not_bring_a_removed_account_back() {
+        let sb = Sandbox::new();
+        sb.native(Harness::Claude);
+        let a = create(Harness::Claude, Some("gone")).unwrap();
+        // A fetch that started before the removal still holds the account.
+        let mut in_flight = a.clone();
+        remove(&a, &Live::new()).unwrap();
+        assert!(in_flight
+            .update(|m| m.refresh.error = Some("late".into()))
+            .is_err());
+        assert!(!a.dir().exists());
+        assert!(Registry::load().unwrap().get(&a.key()).is_none());
+    }
+
+    #[test]
+    fn remove_refuses_native_and_live_accounts() {
+        let sb = Sandbox::new();
+        sb.native(Harness::Claude);
+        let a = create(Harness::Claude, None).unwrap();
+        let mut live = Live::new();
+        live.insert(a.key(), vec![42]);
+        assert!(remove(&a, &live).is_err());
+        let reg = Registry::load().unwrap();
+        let native = reg.find(Harness::Claude, "native").unwrap();
+        assert!(remove(native, &Live::new()).is_err());
+    }
+
+    #[test]
+    fn defaults_accept_words_ids_and_aliases() {
+        let sb = Sandbox::new();
+        sb.native(Harness::Claude);
+        create(Harness::Claude, Some("work")).unwrap();
+        assert_eq!(set_default(Harness::Claude, "work").unwrap(), "1");
+        assert_eq!(set_default(Harness::Claude, "AUTO").unwrap(), "auto");
+        assert_eq!(set_default(Harness::Claude, "0").unwrap(), "native");
+        assert!(set_default(Harness::Claude, "nobody").is_err());
+    }
+}
