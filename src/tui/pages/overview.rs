@@ -283,6 +283,8 @@ fn use_next(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits, agents: &[Har
 struct Cols {
     name: usize,
     plan: usize,
+    /// Says which account is its agent's default. Zero leaves it out.
+    default: usize,
     bar: usize,
     status: usize,
 }
@@ -291,12 +293,14 @@ fn cols(w: usize) -> Cols {
     let name = (w / 4).clamp(12, 26);
     let plan = if w >= 72 { 12 } else { 0 };
     let status = if w >= 60 { 12 } else { 0 };
+    let default = if w >= 84 { 7 } else { 0 };
     let gaps = |n: usize| if n > 0 { n + 1 } else { 0 };
     // marker, dot, name, the bar's own cells and the spaces between.
-    let fixed = 3 + name + 1 + gaps(plan) + window_w(0) + gaps(status);
+    let fixed = 3 + name + 1 + gaps(plan) + gaps(default) + window_w(0) + gaps(status);
     Cols {
         name,
         plan,
+        default,
         bar: w.saturating_sub(fixed).clamp(6, 40),
         status,
     }
@@ -316,6 +320,12 @@ fn account_row(
     spans.push(Span::raw(" "));
     if c.plan > 0 {
         spans.push(Span::styled(fit(&plan_text(app, acc), c.plan), t.s_dim()));
+        spans.push(Span::raw(" "));
+    }
+    if c.default > 0 {
+        // A word in its own column; the dot in front stays a dot.
+        let word = if app.is_default(acc) { "default" } else { "" };
+        spans.push(Span::styled(fit(word, c.default), t.s_text()));
         spans.push(Span::raw(" "));
     }
     let signed_in = app.derived.logged_in.contains(&acc.key());
@@ -347,6 +357,9 @@ fn table(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits, now: DateTime<Ut
     let mut header = vec![Span::raw("   "), head(t, "ACCOUNT", c.name + 1)];
     if c.plan > 0 {
         header.push(head(t, "PLAN", c.plan + 1));
+    }
+    if c.default > 0 {
+        header.push(head(t, "DEFAULT", c.default + 1));
     }
     header.push(head(t, "USED", c.bar + 1 + 4 + 2));
     header.push(head(t, "RESETS IN", super::IN_W));

@@ -946,10 +946,27 @@ fn an_account_is_made_the_default_and_wears_a_star_before_its_name() {
         .unwrap_or_default();
     assert!(toast.contains("already the default"), "{toast}");
 
-    // The star is in front of the name on the other pages too, and the
-    // root login gets it back from its own page.
+    // Only the Accounts page has the star. Everywhere else the dot stays a
+    // dot, and the Overview says which account is the default in a column.
+    for page in Page::ALL {
+        if matches!(page, Page::Accounts | Page::Help) {
+            continue;
+        }
+        app.dispatch(Action::Go(page));
+        let text = screen(&mut app, 132, 40);
+        assert!(!text.contains('★'), "{page:?} has a star\n{text}");
+    }
     app.dispatch(Action::Go(Page::Overview));
-    assert!(screen(&mut app, 132, 40).contains("★ side"));
+    let text = screen(&mut app, 132, 40);
+    show("overview/default", &text);
+    assert!(text.contains("DEFAULT"), "{text}");
+    let said = |name: &str| {
+        text.lines()
+            .any(|l| l.contains(&format!("● {name} ")) && l.contains(" default "))
+    };
+    assert!(said("side") && !said("work"), "{text}");
+
+    // The root login gets the default back from its own page.
     app.dispatch(Action::Go(Page::Root));
     app.focus = Focus::Main;
     key(&mut app, KeyCode::Char('d'));
@@ -957,7 +974,7 @@ fn an_account_is_made_the_default_and_wears_a_star_before_its_name() {
     let text = screen(&mut app, 132, 40);
     show("root/default", &text);
     assert!(
-        text.contains("★ Claude Code") && text.contains("The default:"),
+        text.contains("● Claude Code") && text.contains("The default:") && !text.contains('★'),
         "{text}"
     );
 }

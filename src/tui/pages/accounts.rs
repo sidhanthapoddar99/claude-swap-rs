@@ -14,8 +14,8 @@ use ratatui::widgets::{Borders, Paragraph};
 use ratatui::Frame;
 
 use super::{
-    dot, expiry_color, fit_date, head, launch_hint, limit_lines, name_cell, paint_row, plan_text,
-    row_style, scroll_start, status, status_span, LimitCols,
+    dot_or_star, expiry_color, fit_date, head, launch_hint, limit_lines, name_cell, paint_row,
+    plan_text, row_style, scroll_start, status, status_span, LimitCols,
 };
 use crate::harness::Harness;
 use crate::model::{self, Source};
@@ -630,7 +630,7 @@ fn detail(f: &mut Frame, area: Rect, app: &App, acc: &Account) {
     // Who it is, on the border of the first card. A default account has a
     // star in place of its dot.
     let mut title = vec![
-        dot(app, acc),
+        dot_or_star(app, acc),
         Span::styled(
             acc.title(),
             Style::default().fg(t.text()).add_modifier(Modifier::BOLD),

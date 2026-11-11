@@ -176,7 +176,7 @@ fn sections() -> Vec<Section> {
                 ),
                 (
                     "default",
-                    "where a launch that names no account starts: the root login or one account. It has a ★ before its name. Set it with d",
+                    "where a launch that names no account starts: the root login or one account. The Accounts page puts a ★ before its name, the Overview says so in a column. Set it with d",
                 ),
                 (
                     "auto-pick",

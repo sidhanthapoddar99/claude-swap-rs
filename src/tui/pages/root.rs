@@ -17,7 +17,7 @@ use super::{head, main_window, no_data, paint_row, plan_text, row_style, window_
 use crate::manage;
 use crate::store::Account;
 use crate::tui::app::{display_email, Action, App, Focus};
-use crate::tui::theme::{DOT, STAR};
+use crate::tui::theme::DOT;
 use crate::tui::widgets::{card, fit, truncate, Hits};
 
 const AGENT_W: usize = 13;
@@ -54,7 +54,6 @@ fn row(app: &App, acc: &Account, c: &Cols, selected: bool, now: DateTime<Utc>) -
     let (mark, _) = row_style(app, selected);
     let signed_in = app.derived.logged_in.contains(&acc.key());
     let name = acc.harness.name();
-    // A star in place of the dot when this login is the agent's default.
     let mut spans = vec![mark, super::dot(app, acc)];
     spans.push(Span::styled(
         fit(name, AGENT_W),
@@ -130,7 +129,7 @@ fn about(app: &App, acc: &Account, now: DateTime<Utc>) -> Vec<Line<'static>> {
     };
     lines.push(Line::from(vec![
         Span::styled(
-            format!("{STAR} "),
+            format!("{DOT} "),
             if app.is_default(acc) {
                 t.s(t.harness(h))
             } else {

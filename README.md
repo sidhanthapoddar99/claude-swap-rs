@@ -115,7 +115,7 @@ There are two kinds of login, and cswap keeps them apart.
 - An **account** is a login cswap holds for you. Every account has a **name** (`work`); it is asked for when you add the account and cannot be left empty. An account can also have **aliases**, extra names it answers to. Names and aliases are unique within an agent.
 - A **root login** is an agent's own login, the one in `~/.claude` and friends. Each agent has exactly one. It is called `root`, and it is listed on the Root page and by `cswap root`, not among your accounts.
 
-The **default** is a different thing: it is where `cswap <agent>` starts when you name no account. Each agent has one default at most. Out of the box it is the root login. Make an account the default with `d` in the dashboard or `cswap use <agent> <account>`, and it wears a ★ before its name. With auto-pick on (Settings, Harness tab, or `cswap use <agent> auto`) there is no default: cswap takes the best account at every launch.
+The **default** is a different thing: it is where `cswap <agent>` starts when you name no account. Each agent has one default at most. Out of the box it is the root login. Make an account the default with `d` in the dashboard or `cswap use <agent> <account>`, and the Accounts page puts a ★ before its name; the Overview says `default` in a column of its own. With auto-pick on (Settings, Harness tab, or `cswap use <agent> auto`) there is no default: cswap takes the best account at every launch.
 
 One login belongs to one account. If you sign a new account in as someone an account of that agent already holds, cswap says so and adds nothing. The one exception is the root login: an account may hold the same login as its agent's root.
 
@@ -215,7 +215,7 @@ The pages are numbered in the order of the menu, so `1` is Overview; `i` is Inte
 
 Every bar, percent and countdown sits in the same column on every page. A countdown is as short as it can be: `3d` when it is more than two days off, `1d 6h` within two days, `4h 25m` within one. The exact date is on the Usage and Resets pages, always as a date such as `Sat 14 Nov`, with the time of day when it is within two days.
 
-The colour of the dot in front of an account's name tells its agent, so the agent is not written again beside the name. The default account of an agent has a ★ in place of the dot. The `grey` theme has no colours, so there the agent's command follows the name, except on the Usage page, where each agent has its own box.
+The colour of the dot in front of an account's name tells its agent, so the agent is not written again beside the name. The dot stays a dot on every page: the default account of an agent is marked with a ★ on the Accounts page only, and with the word `default` in the Overview's DEFAULT column. The `grey` theme has no colours, so there the agent's command follows the name, except on the Usage page, where each agent has its own box.
 
 The weekly and monthly limits are what every page works with. The agents also have short windows of a few hours; cswap reads them to know when an account is rate limited right now, and lists them on the Usage page only.
 

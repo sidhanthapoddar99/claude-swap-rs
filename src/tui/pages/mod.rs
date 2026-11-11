@@ -59,9 +59,18 @@ pub fn status_span(t: &Theme, s: Status) -> Span<'static> {
     Span::styled(format!("{glyph} {}", s.label()), Style::default().fg(color))
 }
 
-/// `● ` in the agent's colour, in front of an account's name. The default
-/// account of its agent wears a star there instead.
+/// `● ` in the agent's colour, in front of an account's name. It is a dot
+/// for every account: only the Accounts page marks the default with a star.
 pub fn dot(app: &App, acc: &Account) -> Span<'static> {
+    Span::styled(
+        format!("{DOT} "),
+        Style::default().fg(app.theme.harness(acc.harness)),
+    )
+}
+
+/// The Accounts page's own mark: a star for the default account of an agent,
+/// the dot for every other one.
+pub fn dot_or_star(app: &App, acc: &Account) -> Span<'static> {
     let glyph = if app.is_default(acc) { STAR } else { DOT };
     Span::styled(
         format!("{glyph} "),
