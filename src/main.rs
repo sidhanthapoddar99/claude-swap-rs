@@ -10,6 +10,7 @@ use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::process::ExitCode;
 
+mod agent_info;
 mod cli;
 mod fsx;
 mod harness;
@@ -98,6 +99,9 @@ enum HerdrCmd {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// How a coding agent uses cswap: a short guide written for the agent
+    AgentInfo,
+
     /// Open the dashboard (what a bare `cswap` does)
     #[command(visible_alias = "ui")]
     Dashboard,
@@ -284,6 +288,14 @@ fn help(p: &Paint) -> String {
         env!("CARGO_PKG_VERSION")
     ));
 
+    // First, because an agent reads from the top and stops early.
+    out.push_str(&head("FOR AGENTS"));
+    out.push_str(&row(
+        "cswap agent-info",
+        "how an agent uses cswap. If you are one, read it first",
+    ));
+    out.push('\n');
+
     out.push_str(&head("USAGE"));
     out.push_str(&row("cswap", "open the dashboard"));
     out.push_str(&row(
@@ -469,6 +481,7 @@ fn run() -> Result<ExitCode> {
     let quiet = matches!(
         cmd,
         Cmd::ShellInit { .. }
+            | Cmd::AgentInfo
             | Cmd::Start { .. }
             | Cmd::Dashboard
             | Cmd::Update { .. }
@@ -479,6 +492,7 @@ fn run() -> Result<ExitCode> {
     );
     let mut ok = true;
     match cmd {
+        Cmd::AgentInfo => print!("{}", agent_info::text()),
         Cmd::Dashboard => dashboard()?,
         Cmd::Start {
             default,

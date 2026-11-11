@@ -186,7 +186,12 @@ Which account a launch uses, first match wins:
 
 1. `--cswap=<account>` on the command line
 2. `CSWAP_CLAUDE`, `CSWAP_CODEX`, `CSWAP_AGY` or `CSWAP_GROK` in the environment (`export CSWAP_CLAUDE=work` pins one terminal)
-3. the agent's default: its `root` login, an account, or `auto`. Set it with `d` in the dashboard or `cswap use <agent> <account>`
+3. in a herdr terminal that an agent started: the account of the nearest agent of the same kind above it, so a sub-agent stays on its parent's account
+4. the agent's default: its `root` login, an account, or `auto`. Set it with `d` in the dashboard or `cswap use <agent> <account>`
+
+cswap sets the variable of step 2 for the agent it starts, so a child process stays on the same account. herdr starts every terminal in the login environment instead, which is why step 3 looks the parent up. Both need the child to be started as `cswap claude …`: a bare `claude` that no shell wraps, as in `hc run claude "<task>"`, never reaches cswap and runs on the root login.
+
+`cswap agent-info` prints a short guide written for the agents themselves: how to see the account they are on, how to start another agent on it or on another one, and what to leave to you. Point an agent at it, or put the line in its instructions.
 
 An account answers to its name (`work`), its aliases, its key (`claude-2`), its number within the agent (`2`) and its email. `root` is the agent's own login; `default`, its name in earlier versions, still works.
 
@@ -251,6 +256,8 @@ The suggestion follows one idea: use what you would otherwise lose. An account w
 | **Agents list** | The ⇄ icon beside the sort icon shows each agent's account in place of its time and status. Click it again to go back. |
 | **Sidebar** | **cswap**, between Settings and Add machine, opens this dashboard in a popup over the window. |
 
+A sub-agent started through cswap, from the menu or by the agent itself with `hc run … cswap claude "<task>"`, starts on its parent's account unless you pick another.
+
 The picture is a drawing with made-up names. The layout is not part of the binary: it lives in this repository under [`integrations/herdr/`](integrations/herdr), and cswap fetches the files that go with its version.
 
 ```
@@ -308,6 +315,7 @@ migrate                    move cswap 0.6 profiles into ~/.cswap
 shell-init <shell>         print shell integration
 herdr ls|info|switch       agents in herdr terminals: account and switch
 herdr install|status       the cswap layout for herdr
+agent-info                 how a coding agent uses cswap: a guide for the agent
 update                     install the latest release         (--check)
 ```
 

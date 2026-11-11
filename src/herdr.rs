@@ -23,8 +23,8 @@ use serde_json::{json, Value};
 
 use crate::cli::{self, Ctx};
 use crate::harness::Harness;
-use crate::sessions::{self, Talk};
-use crate::store::Account;
+use crate::sessions::{self, Live, Talk};
+use crate::store::{Account, Registry};
 use crate::{manage, platform, view};
 
 /// Programs that leave a prompt behind when the agent they ran ends.
@@ -130,6 +130,8 @@ struct Terminal {
     shell: bool,
     /// Does herdr put a shell in place of the program when it is killed?
     keep: bool,
+    /// The terminal it was started from, when it has one.
+    parent: Option<String>,
 }
 
 impl Terminal {
@@ -151,6 +153,10 @@ impl Terminal {
                 .and_then(|p| u32::try_from(p).ok()),
             shell: SHELLS.contains(&program.as_str()),
             keep: v["keep"] == true,
+            parent: v["parent"]
+                .as_str()
+                .filter(|p| !p.is_empty())
+                .map(str::to_string),
         })
     }
 
@@ -170,17 +176,49 @@ struct Running<'a> {
 /// The account whose agent is `pid`, or a parent of `pid`: a tool the agent
 /// runs can be the program in front for a while.
 fn agent_of(c: &Ctx, pid: u32) -> Option<(&Account, u32)> {
+    agent_in(&c.reg, &c.live, pid)
+}
+
+/// `agent_of` for a caller that has not read everything a command reads.
+fn agent_in<'a>(reg: &'a Registry, live: &Live, pid: u32) -> Option<(&'a Account, u32)> {
     let mut at = pid;
     for _ in 0..8 {
-        let hit = c
-            .live
+        let hit = live
             .iter()
             .find(|(_, pids)| pids.contains(&at))
-            .and_then(|(key, _)| c.reg.get(key));
+            .and_then(|(key, _)| reg.get(key));
         if let Some(acc) = hit {
             return Some((acc, at));
         }
         at = sessions::parent(at)?;
+    }
+    None
+}
+
+/// The account a sub-agent takes from the agent above it.
+///
+/// herdr starts every terminal in the login environment, not in the one of
+/// the agent that asked for it, so the account that agent runs on is not
+/// passed down the way it is outside herdr. This looks it up instead: the
+/// nearest terminal above this one that runs an agent of the same kind.
+/// `None` outside herdr, at the top of a tree, and whenever herdr cannot be
+/// asked: a launch never fails over this.
+pub fn parent_account(reg: &Registry, h: Harness) -> Option<String> {
+    let me = std::env::var("HC_TERMINAL_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty())?;
+    let mut above = Terminal::get(&me).ok()?.parent?;
+    let live = sessions::scan(reg);
+    for _ in 0..6 {
+        let t = Terminal::get(&above).ok()?;
+        let agent = t
+            .front
+            .filter(|_| t.live)
+            .and_then(|pid| agent_in(reg, &live, pid));
+        match agent {
+            Some((acc, _)) if acc.harness == h => return Some(acc.key()),
+            _ => above = t.parent?,
+        }
     }
     None
 }

@@ -633,6 +633,8 @@ fn help_names_every_command_in_groups() {
     for flag in ["-h", "--help"] {
         let out = env.ok(&[flag]);
         for word in [
+            "FOR AGENTS",
+            "cswap agent-info",
             "USAGE",
             "AGENTS",
             "LOOK",
@@ -657,6 +659,11 @@ fn help_names_every_command_in_groups() {
         assert!(
             out.lines().all(|l| l.chars().count() <= 100),
             "a help line is too long\n{out}"
+        );
+        // The guide for agents is named before anything else.
+        assert!(
+            out.find("agent-info").unwrap() < out.find("USAGE").unwrap(),
+            "{flag}: agent-info is not at the top\n{out}"
         );
     }
     assert!(env.ok(&["--version"]).contains(env!("CARGO_PKG_VERSION")));
@@ -1024,5 +1031,127 @@ fn the_herdr_layout_is_installed_from_the_repository() {
         text(&out.stderr).contains("offline"),
         "{}",
         text(&out.stderr)
+    );
+}
+
+/// `cswap agent-info` is a guide an agent can act on: every command it names
+/// is one this binary has.
+#[test]
+fn the_guide_for_agents_names_only_real_commands() {
+    let env = Env::new();
+    let guide = env.ok(&["agent-info"]);
+    for word in [
+        "a guide for agents",
+        env!("CARGO_PKG_VERSION"),
+        "$CSWAP_ACCOUNT",
+        "cswap claude --cswap=work",
+        "hc run --bg --name w1 cswap claude",
+        "Never\nswitch your own terminal",
+        "Leave these to the user",
+    ] {
+        assert!(guide.contains(word), "the guide lacks {word:?}\n{guide}");
+    }
+    // The commands it tells an agent to run all exist and take those flags.
+    for args in [
+        vec!["ps", "--json"],
+        vec!["list", "--json"],
+        vec!["suggest"],
+        vec!["usage"],
+        vec!["herdr", "ls", "-h"],
+        vec!["herdr", "info", "-h"],
+        vec!["herdr", "switch", "-h"],
+        vec!["refresh", "-h"],
+    ] {
+        env.ok(&args);
+    }
+    assert!(env.ok(&["usage", "-h"]).contains("--refresh"));
+}
+
+/// herdr starts a terminal in the login environment, so a sub-agent does not
+/// get its parent's account the way a child process does. cswap looks it up:
+/// the nearest agent of the same kind above the new terminal.
+#[test]
+fn a_sub_agent_in_herdr_starts_on_its_parents_account() {
+    let env = Env::new();
+    env.add_claude("work", "work@example.com");
+    let h = env.home();
+    // t9 is the new terminal. Above it t8 runs Codex, and above that t7 runs
+    // Claude Code on `work`.
+    let hc = h.join("bin/hc");
+    fs::write(
+        &hc,
+        r#"#!/bin/sh
+dir="$HOME/hc"
+[ "$1" = get ] || exit 0
+case "$2" in
+  t9) printf '{"address":"t9","state":"live","parent":"t8","argv":["claude"],"foreground":{"pid":1}}\n' ;;
+  t8) printf '{"address":"t8","state":"live","parent":"t7","argv":["codex"],"foreground":{"pid":%s}}\n' "$(cat "$dir/codex")" ;;
+  t7) printf '{"address":"t7","state":"live","argv":["/bin/zsh"],"foreground":{"pid":%s}}\n' "$(cat "$dir/claude")" ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
+    let (claude, codex) = (orphan(), orphan());
+    let work_dir = env.account_dir("claude-1").join("config_dir");
+    let proc_of = |pid: u32, comm: &str, environ: String| {
+        let dir = h.join("proc").join(pid.to_string());
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("comm"), format!("{comm}\n")).unwrap();
+        fs::write(dir.join("environ"), environ).unwrap();
+        fs::write(dir.join("cmdline"), format!("{comm}\0")).unwrap();
+    };
+    proc_of(
+        claude,
+        "claude",
+        format!("CLAUDE_CONFIG_DIR={}\0", work_dir.display()),
+    );
+    proc_of(codex, "codex", String::new());
+    fs::create_dir_all(h.join("hc")).unwrap();
+    fs::write(h.join("hc/claude"), claude.to_string()).unwrap();
+    fs::write(h.join("hc/codex"), codex.to_string()).unwrap();
+
+    let start = |terminal: Option<&str>, args: &[&str]| {
+        let mut c = env.cmd(args);
+        if let Some(t) = terminal {
+            c.env("HC_TERMINAL_ID", t);
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        env.log()
+    };
+    let on_work = format!("CLAUDE_CONFIG_DIR={}", work_dir.display());
+    // Forget the sign-in that made the account.
+    env.log();
+
+    // Under the Claude agent, past the Codex one in between: `work`.
+    let log = start(Some("t9"), &["claude", "the task"]);
+    assert!(log.contains("arg: the task"), "{log}");
+    assert!(log.contains(&on_work), "{log}");
+    assert!(log.contains("CSWAP_ACCOUNT=claude-1"), "{log}");
+
+    // An account named on the command line still wins.
+    let log = start(Some("t9"), &["claude", "--cswap=root"]);
+    assert!(!log.contains(&on_work), "{log}");
+
+    // A terminal with nothing above it, and one outside herdr, start on the
+    // agent's default as before.
+    for terminal in [Some("t7"), None] {
+        let log = start(terminal, &["claude"]);
+        assert!(!log.contains(&on_work), "{terminal:?}\n{log}");
+    }
+
+    // Codex has no Codex agent above it, so it starts on its own default.
+    let log = start(Some("t9"), &["codex"]);
+    assert!(log.contains("run: codex"), "{log}");
+    assert!(log.contains("CODEX_HOME=\n"), "{log}");
+
+    // herdr not answering never stops a launch.
+    fs::write(&hc, "#!/bin/sh\nexit 1\n").unwrap();
+    let log = start(Some("t9"), &["claude"]);
+    assert!(
+        log.contains("run: claude") && !log.contains(&on_work),
+        "{log}"
     );
 }
