@@ -74,8 +74,10 @@ fn main_loop(
         }
         term.draw(|f| ui::draw(f, app))?;
 
-        // Wake often enough for the spinner while something is being fetched.
-        let wait = Duration::from_millis(if app.busy.is_empty() { 250 } else { 100 });
+        // A key or a click wakes the loop at once. With nothing to do it
+        // wakes once a second for the clock and the countdowns, and often
+        // enough for the spinner while something is being fetched.
+        let wait = Duration::from_millis(if app.busy.is_empty() { 1000 } else { 100 });
         if event::poll(wait)? {
             // Take everything that is waiting before drawing again, so a
             // burst of mouse movement costs one frame.

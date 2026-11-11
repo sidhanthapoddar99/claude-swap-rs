@@ -2,6 +2,11 @@
 //!
 //! Only the open dashboard and the explicit `cswap refresh` call this. A
 //! wrapped launch never does: it reads what was last stored.
+//!
+//! The dashboard asks in rounds, one per refresh interval, and asks each
+//! login once: a root login that an account also holds takes that account's
+//! answer. Two dashboards open at once share the rounds, because a fetch is
+//! claimed on disk before it is made.
 
 use chrono::{DateTime, Duration, Utc};
 use std::time::SystemTime;
@@ -9,8 +14,9 @@ use std::time::SystemTime;
 use crate::harness::Local;
 use crate::history;
 use crate::http::FetchError;
+use crate::manage;
 use crate::model::Source;
-use crate::store::{Account, AccountMeta, Settings};
+use crate::store::{Account, AccountMeta, Registry, Settings};
 
 /// Fold what a login says about itself into the stored account. A field the
 /// login does not report keeps its stored value, and anything entered by hand
@@ -116,6 +122,18 @@ fn cred_mtime(acc: &Account) -> Option<DateTime<Utc>> {
 /// again only once its credentials file has changed, so a dead login is not
 /// polled every ten minutes for ever.
 pub fn due(acc: &Account, settings: &Settings, now: DateTime<Utc>) -> bool {
+    askable(acc, now)
+        && acc
+            .meta
+            .refresh
+            .last_attempt
+            .is_none_or(|last| now - last >= Duration::minutes(settings.refresh_minutes as i64))
+}
+
+/// May this account be fetched at all now, whatever its last fetch was? Not
+/// without a login, not while a dead login waits for the user, and not while
+/// a rate limit asks for quiet.
+fn askable(acc: &Account, now: DateTime<Utc>) -> bool {
     if !acc.harness.logged_in(&acc.config_dir()) {
         return false;
     }
@@ -125,10 +143,109 @@ pub fn due(acc: &Account, settings: &Settings, now: DateTime<Utc>) -> bool {
     if acc.meta.refresh.needs_user {
         return cred_mtime(acc).is_some_and(|m| m > last);
     }
-    if acc.meta.refresh.retry_at.is_some_and(|t| t > now) {
-        return false;
+    !acc.meta.refresh.retry_at.is_some_and(|t| t > now)
+}
+
+/// Half the refresh interval. An account fetched more recently than this is
+/// left alone by a round, and by a second dashboard.
+fn half(settings: &Settings) -> Duration {
+    Duration::seconds(settings.refresh_minutes as i64 * 30)
+}
+
+/// The account whose answer a root login takes instead of asking itself: an
+/// account that holds the same login, signed in and working. One login has
+/// one usage, so asking twice only doubles the requests against it.
+pub fn carrier<'a>(all: &'a [Account], root: &Account) -> Option<&'a Account> {
+    if !root.is_native() {
+        return None;
     }
-    now - last >= Duration::minutes(settings.refresh_minutes as i64)
+    all.iter().find(|o| {
+        !o.is_native()
+            && o.harness == root.harness
+            && same_usage(root, o)
+            && !o.meta.refresh.needs_user
+            && o.harness.logged_in(&o.config_dir())
+    })
+}
+
+fn same_usage(a: &Account, b: &Account) -> bool {
+    let orgs = match (&a.meta.identity.org, &b.meta.identity.org) {
+        (Some(x), Some(y)) => x == y,
+        _ => true,
+    };
+    manage::same_login(a, b) && orgs
+}
+
+/// The accounts the dashboard fetches now. Nothing until one account is due.
+/// Then that one and, with it, every account past half its wait, so accounts
+/// last fetched at different moments fall into step: one round per interval
+/// instead of a trickle of requests. `skip` leaves accounts out: the ones
+/// being fetched already.
+pub fn round(
+    all: &[Account],
+    settings: &Settings,
+    now: DateTime<Utc>,
+    skip: impl Fn(&Account) -> bool,
+) -> Vec<String> {
+    let mine = |a: &&Account| !skip(a) && carrier(all, a).is_none();
+    if !all.iter().filter(mine).any(|a| due(a, settings, now)) {
+        return Vec::new();
+    }
+    let half = half(settings);
+    all.iter()
+        .filter(mine)
+        .filter(|a| askable(a, now))
+        .filter(|a| a.meta.refresh.last_attempt.is_none_or(|t| now - t >= half))
+        .map(Account::key)
+        .collect()
+}
+
+/// Take the fetch of this account for this process. No when another process
+/// fetched it, or is fetching it, within half the interval. Read and written
+/// under the account's lock, so two dashboards cannot both say yes.
+fn claim(acc: &mut Account, settings: &Settings, now: DateTime<Utc>) -> anyhow::Result<bool> {
+    let half = half(settings);
+    let mut mine = false;
+    acc.update(|m| {
+        if m.refresh.last_attempt.is_none_or(|t| now - t >= half) {
+            m.refresh.last_attempt = Some(now);
+            mine = true;
+        }
+    })?;
+    Ok(mine)
+}
+
+/// Fetch the account `key` and store the outcome, also for the root login
+/// that is the same login. With `scheduled`, the fetch is the dashboard's own
+/// and is skipped when another dashboard has just made it. Says whether a
+/// request was made.
+pub fn fetch(key: &str, scheduled: Option<&Settings>) -> Result<bool, String> {
+    let mut reg = Registry::load().map_err(|e| format!("{e:#}"))?;
+    let acc = reg
+        .get_mut(key)
+        .ok_or_else(|| "the account is gone".to_string())?;
+    if let Some(settings) = scheduled {
+        if !claim(acc, settings, Utc::now()).map_err(|e| format!("{e:#}"))? {
+            return Ok(false);
+        }
+    }
+    let result = refresh_account(acc);
+    let done = acc.clone();
+    // A dead login says nothing about the root login's own.
+    if !done.is_native() && !done.meta.refresh.needs_user {
+        let riders = reg
+            .accounts
+            .iter_mut()
+            .filter(|r| r.is_native() && r.harness == done.harness && same_usage(r, &done));
+        for root in riders {
+            let refresh = done.meta.refresh.clone();
+            let _ = root.update(|m| m.refresh = refresh);
+            if let (Ok(()), Some(snap)) = (&result, done.snapshot()) {
+                history::record(&root.key(), snap);
+            }
+        }
+    }
+    result.map(|()| true).map_err(|e| e.text)
 }
 
 /// When the dashboard will next fetch this account, for the header countdown.
@@ -238,5 +355,82 @@ mod tests {
         // Credentials newer than the attempt: ask again.
         a.meta.refresh.last_attempt = Some(Utc::now() - Duration::hours(1));
         assert!(due(&a, &s, Utc::now()));
+    }
+
+    fn fetched(id: u32, minutes_ago: i64, now: DateTime<Utc>) -> Account {
+        let mut a = acc(id);
+        a.meta.refresh.last_attempt = Some(now - Duration::minutes(minutes_ago));
+        a
+    }
+
+    #[test]
+    fn a_round_waits_for_one_due_account_then_takes_the_ones_past_half_their_wait() {
+        let sb = Sandbox::new();
+        let s = Settings::default();
+        assert_eq!(s.refresh_minutes, 10);
+        let now = Utc::now();
+        // Fetched 9, 6 and 2 minutes ago: nobody is due, so nothing is asked.
+        let mut all = vec![fetched(1, 9, now), fetched(2, 6, now), fetched(3, 2, now)];
+        for a in &all {
+            sb.login(a);
+        }
+        assert!(round(&all, &s, now, |_| false).is_empty());
+        // The first comes due. The second is past half its wait and joins, so
+        // the two are in step from now on. The third was asked too recently.
+        all[0].meta.refresh.last_attempt = Some(now - Duration::minutes(10));
+        assert_eq!(round(&all, &s, now, |_| false), ["claude-1", "claude-2"]);
+        // One that is being fetched already is left out.
+        assert_eq!(round(&all, &s, now, |a| a.meta.id == 1), [] as [&str; 0]);
+        // A rate limit keeps an account out of the round it would have joined.
+        all[1].meta.refresh.retry_at = Some(now + Duration::minutes(20));
+        assert_eq!(round(&all, &s, now, |_| false), ["claude-1"]);
+    }
+
+    #[test]
+    fn a_root_login_takes_the_answer_of_the_account_with_the_same_login() {
+        let sb = Sandbox::new();
+        let s = Settings::default();
+        let now = Utc::now();
+        let who = |email: &str| Identity {
+            email: Some(email.into()),
+            ..Identity::default()
+        };
+        let mut root = acc(0);
+        root.meta.identity = who("me@example.com");
+        let mut same = acc(1);
+        same.meta.identity = who("me@example.com");
+        let mut other = acc(2);
+        other.meta.identity = who("you@example.com");
+        for a in [&root, &same, &other] {
+            sb.login(a);
+        }
+        let mut all = vec![root, same, other];
+        // Never fetched: all are due, and the root login is asked through
+        // the account that holds its login.
+        assert_eq!(round(&all, &s, now, |_| false), ["claude-1", "claude-2"]);
+        assert_eq!(
+            carrier(&all, &all[0]).map(Account::key).as_deref(),
+            Some("claude-1")
+        );
+        assert!(carrier(&all, &all[2]).is_none());
+        // That account's login died: the root login asks for itself again.
+        all[1].meta.refresh.needs_user = true;
+        all[1].meta.refresh.last_attempt = Some(now + Duration::seconds(5));
+        assert_eq!(round(&all, &s, now, |_| false), ["claude-0", "claude-2"]);
+    }
+
+    #[test]
+    fn a_fetch_another_dashboard_just_made_is_not_made_again() {
+        let sb = Sandbox::new();
+        sb.demo();
+        let s = Settings::default();
+        let now = Utc::now();
+        let mut reg = Registry::load().unwrap();
+        let acc = reg.accounts.iter_mut().find(|a| !a.is_native()).unwrap();
+        acc.update(|m| m.refresh.last_attempt = Some(now - Duration::minutes(30)))
+            .unwrap();
+        assert!(claim(acc, &s, now).unwrap(), "stale: this process takes it");
+        assert!(!claim(acc, &s, now).unwrap(), "taken a moment ago");
+        assert!(claim(acc, &s, now + Duration::minutes(6)).unwrap());
     }
 }

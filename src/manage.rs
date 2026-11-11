@@ -214,18 +214,21 @@ pub fn sign_in_banner(acc: &Account) -> String {
 pub fn duplicate_of<'a>(reg: &'a Registry, acc: &Account) -> Option<&'a Account> {
     let id = acc.meta.identity.account_id.as_deref();
     let email = acc.meta.identity.email.as_deref();
+    let _ = (id, email);
     reg.of(acc.harness)
         .filter(|o| !o.is_native() && o.meta.id != acc.meta.id)
-        .find(|o| {
-            let same_id = id.is_some() && o.meta.identity.account_id.as_deref() == id;
-            let same_email = email.is_some() && o.meta.identity.email.as_deref() == email;
-            // Two workspaces of one email are different accounts, so an id on
-            // both sides decides; the email is the fallback.
-            match (id, o.meta.identity.account_id.as_deref()) {
-                (Some(_), Some(_)) => same_id,
-                _ => same_email,
-            }
-        })
+        .find(|o| same_login(acc, o))
+}
+
+/// Do two accounts of one agent hold the same login?
+pub fn same_login(a: &Account, b: &Account) -> bool {
+    let (ia, ib) = (&a.meta.identity, &b.meta.identity);
+    // Two workspaces of one email are different accounts, so an id on both
+    // sides decides; the email is the fallback.
+    match (ia.account_id.as_deref(), ib.account_id.as_deref()) {
+        (Some(x), Some(y)) => x == y,
+        _ => ia.email.is_some() && ia.email == ib.email,
+    }
 }
 
 /// Forget an account: its directory, credentials included. The links inside

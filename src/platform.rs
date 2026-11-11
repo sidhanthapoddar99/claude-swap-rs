@@ -150,17 +150,19 @@ pub fn home() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-/// Ask a process to end. Does nothing where there is no such signal.
-pub fn terminate(pid: u32) {
+/// Ask a process to end, or with `hard` end it without asking. Does nothing
+/// where there is no such signal.
+pub fn terminate(pid: u32, hard: bool) {
     #[cfg(unix)]
     {
+        let signal = if hard { libc::SIGKILL } else { libc::SIGTERM };
         // SAFETY: a plain signal to one pid; a pid that is gone is an error
         // the caller finds out by looking.
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        unsafe { libc::kill(pid as libc::pid_t, signal) };
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
+        let _ = (pid, hard);
     }
 }
 

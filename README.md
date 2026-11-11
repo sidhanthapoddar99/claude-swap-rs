@@ -195,9 +195,11 @@ cswap herdr switch t7 work     stop it, start it on `work`, same conversation
 cswap herdr menu               every agent with its accounts, as JSON, for a launch menu
 ```
 
-A switch presses Ctrl+C in the terminal until the agent leaves, then types the launch on the new account at the shell behind it, with the arguments that resume the conversation (`claude --resume <id>`, `codex resume <id>`, `grok --resume <id>`, `agy --conversation <id>`). The terminal, its tab and its place stay as they are. It works because accounts share their conversations and differ only in the login.
+A switch stops the agent, then types the launch on the new account at the shell in its place, with the model and other options it had and the arguments that resume the conversation (`claude --resume <id>`, `codex resume <id>`, `grok --resume <id>`, `agy --conversation <id>`). The terminal, its tab, its place and its sub-agents stay as they are. It works because accounts share their conversations and differ only in the login.
 
-It refuses when the agent is in the middle of a turn, when the terminal has no shell behind the agent, and when it cannot tell which conversation the agent is in. `--fresh` allows the last case and starts a new conversation. Finding the conversation reads `/proc`, so this is Linux only for Codex and Antigravity; the Antigravity part is not yet tested against a running agy.
+An agent that a shell started is stopped with Ctrl+C, and the shell is there again. An agent that is the terminal's own program (`hc run claude …`) has no shell behind it and a clean exit would end the terminal, so cswap turns herdr's keeping on for it and kills the agent: herdr then puts a shell in its place.
+
+It refuses when the agent is in the middle of a turn and when it cannot tell which conversation the agent is in. `--fresh` allows the second case and starts a new conversation. Finding the conversation reads `/proc`, so this is Linux only for Codex and Antigravity; the Antigravity part is not yet tested against a running agy.
 
 ## The dashboard
 
@@ -225,7 +227,7 @@ The colour of the dot in front of an account's name tells its agent, so the agen
 
 The weekly and monthly limits are what every page works with. The agents also have short windows of a few hours; cswap reads them to know when an account is rate limited right now, and lists them on the Usage page only.
 
-Usage is fetched when the dashboard opens and then every 10 minutes while it stays open (change it in Settings). Nothing is fetched in the background when the dashboard is closed, and starting an agent never fetches.
+Usage is fetched when the dashboard opens and then in one round every 10 minutes while it stays open (change it in Settings). Each login is asked once per round: a root login that an account also holds takes that account's answer. Two dashboards open at once share the rounds instead of each asking. After a rate limit an account is left alone for half an hour. Nothing is fetched in the background when the dashboard is closed, and starting an agent never fetches.
 
 **Adding an account**: press `a`, pick the agent, type its name, press `Enter`. cswap steps aside and the agent's own sign-in runs in your terminal. When it finishes you are back in the dashboard with the new account. If the sign-in is abandoned, or another account already holds that login, nothing is added.
 

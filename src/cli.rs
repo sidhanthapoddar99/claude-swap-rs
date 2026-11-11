@@ -306,16 +306,7 @@ fn fetch(keys: &[String]) -> Vec<(String, Option<String>)> {
     std::thread::scope(|s| {
         let jobs: Vec<_> = keys
             .iter()
-            .map(|key| {
-                s.spawn(move || {
-                    let run = || -> Result<(), String> {
-                        let mut reg = Registry::load().map_err(|e| format!("{e:#}"))?;
-                        let acc = reg.get_mut(key).ok_or("the account is gone")?;
-                        refresh::refresh_account(acc).map_err(|e| e.text)
-                    };
-                    (key.clone(), run().err())
-                })
-            })
+            .map(|key| s.spawn(move || (key.clone(), refresh::fetch(key, None).err())))
             .collect();
         jobs.into_iter()
             .map(|j| {
@@ -326,7 +317,8 @@ fn fetch(keys: &[String]) -> Vec<(String, Option<String>)> {
     })
 }
 
-/// The keys to act on: one named account, or every signed-in one.
+/// The keys to act on: one named account, or every signed-in login once. A
+/// root login that an account also holds is answered by that account's fetch.
 fn targets(c: &Ctx, account: Option<&str>) -> Result<Vec<String>> {
     match account {
         Some(sel) => Ok(vec![c.reg.find_any(sel)?.key()]),
@@ -335,6 +327,7 @@ fn targets(c: &Ctx, account: Option<&str>) -> Result<Vec<String>> {
             .accounts
             .iter()
             .filter(|a| c.signed_in(a))
+            .filter(|a| refresh::carrier(&c.reg.accounts, a).is_none())
             .map(|a| a.key())
             .collect()),
     }

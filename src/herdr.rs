@@ -3,10 +3,16 @@
 //! launch menu can offer, and move a running agent to another account without
 //! losing its conversation.
 //!
-//! A switch stops the agent, waits for the shell behind it, and types the
+//! A switch stops the agent, waits for a shell in its place, and types the
 //! launch on the new account with the arguments that resume the conversation.
-//! The terminal, its tab and its place stay as they are. Herdr is driven
-//! through its own command, `hc`.
+//! The terminal, its tab, its place and its sub-agents stay as they are.
+//! Herdr is driven through its own command, `hc`.
+//!
+//! There are two kinds of terminal. In one a shell started the agent, and the
+//! shell is there again when the agent leaves on Ctrl+C. In the other the
+//! agent is the terminal's own program: when it exits, the terminal ends. But
+//! herdr puts a shell in place of a kept terminal's program when that program
+//! is killed, so there cswap turns keeping on and kills the agent.
 
 use std::path::Path;
 use std::process::Command;
@@ -29,13 +35,67 @@ const SHELLS: [&str; 9] = [
 /// Statuses in which an agent is in the middle of a turn.
 const BUSY: [&str; 2] = ["working", "blocked"];
 
-/// Flags of the old launch that the new one keeps. Herdr starts Codex with
-/// `--no-daemon`, because a shared daemon would tie terminals together.
-fn carried(h: Harness) -> &'static [&'static str] {
+/// Options of the old launch that the new one keeps, and whether each takes
+/// a value: the model and the like, so the agent comes back as it was. Herdr
+/// starts Codex with `--no-daemon`, because a shared daemon would tie
+/// terminals together.
+fn carried(h: Harness) -> &'static [(&'static str, bool)] {
     match h {
-        Harness::Codex => &["--no-daemon"],
-        _ => &[],
+        Harness::Claude => &[
+            ("--model", true),
+            ("--effort", true),
+            ("--permission-mode", true),
+            ("--dangerously-skip-permissions", false),
+        ],
+        Harness::Codex => &[
+            ("--no-daemon", false),
+            ("-m", true),
+            ("--model", true),
+            ("-c", true),
+            ("--config", true),
+            ("-p", true),
+            ("--profile", true),
+            ("-s", true),
+            ("--sandbox", true),
+            ("-a", true),
+            ("--ask-for-approval", true),
+            ("--full-auto", false),
+            ("--dangerously-bypass-approvals-and-sandbox", false),
+        ],
+        Harness::Grok => &[("-m", true), ("--model", true)],
+        Harness::Agy => &[
+            ("--model", true),
+            ("--effort", true),
+            ("--mode", true),
+            ("--agent", true),
+        ],
     }
+}
+
+/// The carried options among the arguments of the old launch, in their order.
+/// Only a whole argument counts, so a task that mentions `--model` does not.
+fn kept_options(h: Harness, old_args: &[String]) -> Vec<String> {
+    let known = carried(h);
+    let mut out = Vec::new();
+    let mut args = old_args.iter().skip(1);
+    while let Some(arg) = args.next() {
+        let Some((_, takes_value)) = known
+            .iter()
+            .find(|(flag, v)| arg == flag || (*v && arg.starts_with(&format!("{flag}="))))
+        else {
+            continue;
+        };
+        out.push(arg.clone());
+        if *takes_value && !arg.contains('=') {
+            match args.next() {
+                Some(value) => out.push(value.clone()),
+                None => {
+                    out.pop();
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Run `hc` and return what it printed. `CSWAP_HC` names another program,
@@ -66,8 +126,10 @@ struct Terminal {
     status: Option<String>,
     /// The program in front, which is the agent while one runs.
     front: Option<u32>,
-    /// Does a shell take over when the agent ends?
-    stays: bool,
+    /// Is the terminal's own program a shell, with the agent started in it?
+    shell: bool,
+    /// Does herdr put a shell in place of the program when it is killed?
+    keep: bool,
 }
 
 impl Terminal {
@@ -87,7 +149,8 @@ impl Terminal {
             front: v["foreground"]["pid"]
                 .as_u64()
                 .and_then(|p| u32::try_from(p).ok()),
-            stays: v["keep"] == true || SHELLS.contains(&program.as_str()),
+            shell: SHELLS.contains(&program.as_str()),
+            keep: v["keep"] == true,
         })
     }
 
@@ -148,9 +211,9 @@ fn why_not(r: &Running) -> Option<String> {
         Some(format!(
             "{t} is in the middle of a turn. Switch when it stops."
         ))
-    } else if !r.terminal.stays {
+    } else if !r.terminal.shell && !cfg!(unix) {
         Some(format!(
-            "{t} has no shell behind its agent, so it would end with it."
+            "{t} has no shell behind its agent, and this system cannot put one there."
         ))
     } else {
         None
@@ -227,12 +290,7 @@ fn launch_line(to: &Account, old_args: &[String], resume: &[String]) -> String {
         h.id().to_string(),
         format!("--cswap={}", selector(to)),
     ];
-    words.extend(
-        carried(h)
-            .iter()
-            .filter(|flag| old_args.iter().any(|a| a == *flag))
-            .map(|flag| flag.to_string()),
-    );
+    words.extend(kept_options(h, old_args));
     words.extend(resume.iter().cloned());
     words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ")
 }
@@ -250,10 +308,11 @@ fn gone_within(pid: u32, wait: Duration) -> bool {
     }
 }
 
-/// Stop the agent the way a person would. An agent leaves cleanly on Ctrl+C:
-/// once when it is idle, more with a draft or a dialog open. The presses come
-/// quicker than an agent forgets the one before. A signal is the last resort,
-/// because some agents leave the terminal in their own mode when killed.
+/// Stop an agent that a shell started, the way a person would. An agent
+/// leaves cleanly on Ctrl+C: once when it is idle, more with a draft or a
+/// dialog open. The presses come quicker than an agent forgets the one
+/// before. A signal is the last resort, because some agents leave the
+/// terminal in their own mode when killed.
 fn stop(t: &str, pid: u32) -> Result<()> {
     for _ in 0..6 {
         hc(&["keys", t, "ctrl+c"])?;
@@ -264,11 +323,28 @@ fn stop(t: &str, pid: u32) -> Result<()> {
     if gone_within(pid, Duration::from_secs(2)) {
         return Ok(());
     }
-    platform::terminate(pid);
+    platform::terminate(pid, false);
     if gone_within(pid, Duration::from_secs(3)) {
         return Ok(());
     }
     bail!("the agent in {t} (pid {pid}) did not stop; nothing else was changed")
+}
+
+/// Stop an agent that is the terminal's own program. A clean exit would end
+/// the terminal, and its place in the window with it. Herdr puts a shell in
+/// place of a kept terminal's program only when that program is killed, so
+/// keeping is turned on and the agent is killed. It is idle, and an agent
+/// writes its conversation down as it goes, so nothing said is lost.
+fn replace_with_shell(term: &Terminal, pid: u32) -> Result<()> {
+    let t = &term.address;
+    if !term.keep {
+        hc(&["keep", t])?;
+    }
+    platform::terminate(pid, true);
+    if !gone_within(pid, Duration::from_secs(3)) {
+        bail!("the agent in {t} (pid {pid}) did not stop; nothing else was changed");
+    }
+    Ok(())
 }
 
 /// Wait until `seen` says yes about the terminal, for at most `wait`.
@@ -329,15 +405,22 @@ pub fn switch(c: &Ctx, t: &str, to: &str, fresh: bool) -> Result<Switched> {
     };
     let line = launch_line(target, &sessions::command_line(r.pid), &resume);
 
-    stop(&t, r.pid)?;
-    // The shell takes the front again; herdr notices a moment later.
+    // A shell takes the front; herdr notices a moment later.
     let old = r.pid;
-    let back = wait_for(&t, Duration::from_secs(4), |term| {
-        if !term.live {
-            bail!("{t} ended with its agent. Start it again with: {line}");
-        }
-        Ok(term.front != Some(old))
-    })?;
+    let back = if r.terminal.shell {
+        stop(&t, old)?;
+        wait_for(&t, Duration::from_secs(4), |term| {
+            if !term.live {
+                bail!("{t} ended with its agent. Start it again with: {line}");
+            }
+            Ok(term.front != Some(old))
+        })?
+    } else {
+        replace_with_shell(&r.terminal, old)?;
+        wait_for(&t, Duration::from_secs(6), |term| {
+            Ok(term.live && term.shell && term.front != Some(old))
+        })?
+    };
     if !back {
         bail!("the agent in {t} stopped but no shell came back. Start it again with: {line}");
     }
@@ -482,15 +565,43 @@ mod tests {
         sb.demo();
         let c = Ctx::load().unwrap();
         let codex = c.reg.of(Harness::Codex).find(|a| !a.is_native()).unwrap();
-        let old = ["codex", "--no-daemon", "-m", "some-model"].map(String::from);
+        // The options come along; the old conversation and the task do not.
+        let old = [
+            "codex",
+            "--no-daemon",
+            "-m",
+            "some-model",
+            "-c",
+            "model_reasoning_effort=\"high\"",
+            "resume",
+            "01a1c441-6f3c-7d70-8853-ed8d54d0fb51",
+            "A task that says --model in passing",
+        ]
+        .map(String::from);
         let resume = ["resume", "01a18f0e-3563-7043-886f-5dd31ed516a2"].map(String::from);
         assert_eq!(
             launch_line(codex, &old, &resume),
             format!(
-                "cswap codex --cswap={} --no-daemon resume 01a18f0e-3563-7043-886f-5dd31ed516a2",
+                "cswap codex --cswap={} --no-daemon -m some-model -c 'model_reasoning_effort=\"high\"' resume 01a18f0e-3563-7043-886f-5dd31ed516a2",
                 selector(codex)
             )
         );
+        let claude = [
+            "claude",
+            "--model=opus",
+            "--effort",
+            "high",
+            "--continue",
+            "go",
+        ]
+        .map(String::from);
+        assert_eq!(
+            kept_options(Harness::Claude, &claude),
+            ["--model=opus", "--effort", "high"]
+        );
+        // An option whose value is missing is dropped, not passed half.
+        let cut = ["claude", "--model"].map(String::from);
+        assert!(kept_options(Harness::Claude, &cut).is_empty());
         // A launch that had no such flag gets none, and a fresh start no resume.
         let root = c.reg.of(Harness::Claude).find(|a| a.is_native()).unwrap();
         assert_eq!(

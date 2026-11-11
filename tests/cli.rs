@@ -665,6 +665,8 @@ fn help_names_every_command_in_groups() {
 
 /// A stand-in for herdr's `hc`. The terminal `t7` has the process named in
 /// `hc/pid` in front; Ctrl+C ends it, and a send puts the next agent there.
+/// With `hc/direct` the agent is the terminal's own program until it dies,
+/// and a shell after that, as herdr does for a kept terminal.
 const FAKE_HC: &str = r#"#!/bin/sh
 dir="$HOME/hc"
 old=$(cat "$dir/pid")
@@ -673,10 +675,13 @@ case "$1" in
     if kill -0 "$old" 2>/dev/null; then front=$old
     elif [ -f "$dir/sent" ]; then front=$(cat "$dir/next")
     else front=1; fi
-    printf '{"address":"t7","state":"live","keep":true,"argv":["/bin/zsh"],' 
+    if [ -f "$dir/direct" ] && [ "$front" = "$old" ]; then argv=claude; else argv=/bin/zsh; fi
+    if [ -f "$dir/keep" ]; then keep=true; else keep=false; fi
+    printf '{"address":"t7","state":"live","keep":%s,"argv":["%s"],' "$keep" "$argv"
     printf '"status":{"state":"%s"},"foreground":{"pid":%s}}\n' "$(cat "$dir/status")" "$front"
     ;;
   keys) echo "$*" >> "$dir/log"; kill "$old" ;;
+  keep) echo "$*" >> "$dir/log"; : > "$dir/keep" ;;
   send)
     echo "$*" >> "$dir/log"
     mv "$dir/next-proc" "$HOME/proc/$(cat "$dir/next")"
@@ -695,30 +700,31 @@ fn orphan() -> u32 {
     text(&out.stdout).trim().parse().unwrap()
 }
 
-#[test]
-fn a_herdr_terminal_moves_to_another_account_and_keeps_its_conversation() {
-    const SESSION: &str = "32efd4c2-3347-4240-a60a-61b639bc1ece";
-    let env = Env::new();
+const SESSION: &str = "32efd4c2-3347-4240-a60a-61b639bc1ece";
+
+/// A home with a `work` account beside the root login, herdr's stand-in on
+/// the PATH, and Claude Code running in terminal t7 on the root login with
+/// the command line `cmdline`, in a conversation that has a transcript.
+/// Returns the pid that will be the agent once it runs on `work`.
+fn herdr_terminal(env: &Env, cmdline: &str) -> u32 {
     env.add_claude("work", "work@example.com");
     let h = env.home();
     let hc = h.join("bin/hc");
     fs::write(&hc, FAKE_HC).unwrap();
     fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
 
-    // Claude Code runs in t7 on its root login, in a conversation with a
-    // transcript.
     let (old, next) = (orphan(), orphan());
-    let proc_of = |dir: PathBuf, environ: &str| {
+    let proc_of = |dir: PathBuf, environ: &str, cmdline: &str| {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("comm"), "claude\n").unwrap();
         fs::write(dir.join("environ"), environ).unwrap();
-        fs::write(dir.join("cmdline"), "claude\0").unwrap();
+        fs::write(dir.join("cmdline"), cmdline).unwrap();
     };
-    proc_of(h.join("proc").join(old.to_string()), "");
+    proc_of(h.join("proc").join(old.to_string()), "", cmdline);
     fs::create_dir_all(h.join("hc")).unwrap();
     fs::write(h.join("hc/pid"), old.to_string()).unwrap();
     fs::write(h.join("hc/next"), next.to_string()).unwrap();
-    fs::write(h.join("hc/status"), "working").unwrap();
+    fs::write(h.join("hc/status"), "idle").unwrap();
     fs::create_dir_all(h.join(".claude/sessions")).unwrap();
     fs::write(
         h.join(format!(".claude/sessions/{old}.json")),
@@ -735,7 +741,42 @@ fn a_herdr_terminal_moves_to_another_account_and_keeps_its_conversation() {
     proc_of(
         h.join("hc/next-proc"),
         &format!("CLAUDE_CONFIG_DIR={}\0", work_dir.display()),
+        "claude\0",
     );
+    next
+}
+
+#[test]
+fn an_agent_that_is_its_terminals_own_program_is_switched_without_ending_the_terminal() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0--model\0opus\0--continue\0the task\0");
+    let h = env.home();
+    // No shell started this agent, and herdr is not keeping the terminal.
+    fs::write(h.join("hc/direct"), "").unwrap();
+
+    let done: Value =
+        serde_json::from_str(&env.ok(&["herdr", "switch", "t7", "work", "--json"])).unwrap();
+    assert_eq!(done["resumed"], true);
+    assert_eq!(done["started"], true);
+    // Keeping is turned on first, so herdr puts a shell where the agent was.
+    // No Ctrl+C: a clean exit would end the terminal. The model comes along.
+    let log = fs::read_to_string(h.join("hc/log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        [
+            "keep t7",
+            &format!("send t7 cswap claude --cswap=work --model opus --resume {SESSION}"),
+        ]
+    );
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
+#[test]
+fn a_herdr_terminal_moves_to_another_account_and_keeps_its_conversation() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0");
+    let h = env.home();
+    fs::write(h.join("hc/status"), "working").unwrap();
 
     let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
     assert_eq!(info["account"], "claude-0");

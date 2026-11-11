@@ -631,33 +631,32 @@ impl App {
 
     // ------------------------------------------------------------ refreshes
 
-    fn spawn_refresh(&mut self, key: &str) {
+    /// Fetch one account on its own thread. `scheduled` marks the dashboard's
+    /// own round, which steps aside when another dashboard just fetched.
+    fn spawn_refresh(&mut self, key: &str, scheduled: bool) {
         if !self.busy.insert(key.to_string()) {
             return;
         }
         let tx = self.tx.clone();
         let key = key.to_string();
+        let settings = scheduled.then(|| self.settings.clone());
         self.workers.retain(|w| !w.is_finished());
         let worker = std::thread::spawn(move || {
-            let run = || -> Result<(), String> {
-                let mut reg = Registry::load().map_err(|e| format!("{e:#}"))?;
-                let acc = reg
-                    .get_mut(&key)
-                    .ok_or_else(|| "the account is gone".to_string())?;
-                refresh::refresh_account(acc).map_err(|e| e.text)
-            };
-            let error = run().err();
+            let error = refresh::fetch(&key, settings.as_ref()).err();
             let _ = tx.send(Msg::Refreshed { key, error });
         });
         self.workers.push(worker);
     }
 
+    /// Every signed-in login, once: a root login that an account also holds
+    /// is answered by that account's fetch.
     fn refresh_all(&mut self) {
         let keys: Vec<String> = self
-            .reg
+            .all
             .accounts
             .iter()
             .filter(|a| self.derived.logged_in.contains(&a.key()))
+            .filter(|a| refresh::carrier(&self.all.accounts, a).is_none())
             .map(|a| a.key())
             .collect();
         if keys.is_empty() {
@@ -665,7 +664,7 @@ impl App {
             return;
         }
         for key in &keys {
-            self.spawn_refresh(key);
+            self.spawn_refresh(key, false);
         }
     }
 
@@ -698,22 +697,12 @@ impl App {
         {
             return;
         }
-        let utc = Utc::now();
-        let due: Vec<String> = self
-            .all
-            .accounts
-            .iter()
-            .filter(|a| !self.busy.contains(&a.key()))
-            .filter(|a| {
-                if a.meta.refresh.last_attempt.is_none() && !self.settings.refresh_on_open {
-                    return false;
-                }
-                refresh::due(a, &self.settings, utc)
-            })
-            .map(|a| a.key())
-            .collect();
+        let on_open = self.settings.refresh_on_open;
+        let due = refresh::round(&self.all.accounts, &self.settings, Utc::now(), |a| {
+            self.busy.contains(&a.key()) || (a.meta.refresh.last_attempt.is_none() && !on_open)
+        });
         for key in due {
-            self.spawn_refresh(&key);
+            self.spawn_refresh(&key, true);
         }
     }
 
@@ -1219,7 +1208,7 @@ impl App {
             Action::Refresh(key) => {
                 if self.derived.logged_in.contains(&key) {
                     self.modal = None;
-                    self.spawn_refresh(&key);
+                    self.spawn_refresh(&key, false);
                 } else {
                     self.say(Tone::Warn, format!("{key} is not signed in."));
                 }
@@ -2027,7 +2016,7 @@ impl App {
                 if let Some(i) = self.account_keys().iter().position(|k| k == key) {
                     self.sel[Page::Accounts.index()] = i;
                 }
-                self.spawn_refresh(key);
+                self.spawn_refresh(key, false);
             }
             Ok(false) if created => {
                 if let Some(acc) = self.all.get(key) {
