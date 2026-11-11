@@ -293,7 +293,8 @@ fn cols(w: usize) -> Cols {
     let name = (w / 4).clamp(12, 26);
     let plan = if w >= 72 { 12 } else { 0 };
     let status = if w >= 60 { 12 } else { 0 };
-    let default = if w >= 84 { 7 } else { 0 };
+    // The word and room after it, so it does not run into the bar.
+    let default = if w >= 84 { 10 } else { 0 };
     let gaps = |n: usize| if n > 0 { n + 1 } else { 0 };
     // marker, dot, name, the bar's own cells and the spaces between.
     let fixed = 3 + name + 1 + gaps(plan) + gaps(default) + window_w(0) + gaps(status);
