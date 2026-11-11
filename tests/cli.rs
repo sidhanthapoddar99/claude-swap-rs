@@ -647,6 +647,7 @@ fn help_names_every_command_in_groups() {
             "rename <account> <name>",
             "use <agent> [account]",
             "update  ",
+            "herdr switch",
             "--cswap=",
             "--cswap  ",
         ] {
@@ -660,6 +661,120 @@ fn help_names_every_command_in_groups() {
     assert!(env.ok(&["--version"]).contains(env!("CARGO_PKG_VERSION")));
     // A mistyped command is an error, not a silent dashboard.
     env.fails(&["nonsense"]);
+}
+
+/// A stand-in for herdr's `hc`. The terminal `t7` has the process named in
+/// `hc/pid` in front; Ctrl+C ends it, and a send puts the next agent there.
+const FAKE_HC: &str = r#"#!/bin/sh
+dir="$HOME/hc"
+old=$(cat "$dir/pid")
+case "$1" in
+  get)
+    if kill -0 "$old" 2>/dev/null; then front=$old
+    elif [ -f "$dir/sent" ]; then front=$(cat "$dir/next")
+    else front=1; fi
+    printf '{"address":"t7","state":"live","keep":true,"argv":["/bin/zsh"],' 
+    printf '"status":{"state":"%s"},"foreground":{"pid":%s}}\n' "$(cat "$dir/status")" "$front"
+    ;;
+  keys) echo "$*" >> "$dir/log"; kill "$old" ;;
+  send)
+    echo "$*" >> "$dir/log"
+    mv "$dir/next-proc" "$HOME/proc/$(cat "$dir/next")"
+    : > "$dir/sent"
+    ;;
+esac
+"#;
+
+/// A process that lives until it is killed and belongs to nobody, so that it
+/// is gone the moment it ends. Returns its pid.
+fn orphan() -> u32 {
+    let out = Command::new("sh")
+        .args(["-c", "sleep 300 >/dev/null 2>&1 & echo $!"])
+        .output()
+        .unwrap();
+    text(&out.stdout).trim().parse().unwrap()
+}
+
+#[test]
+fn a_herdr_terminal_moves_to_another_account_and_keeps_its_conversation() {
+    const SESSION: &str = "32efd4c2-3347-4240-a60a-61b639bc1ece";
+    let env = Env::new();
+    env.add_claude("work", "work@example.com");
+    let h = env.home();
+    let hc = h.join("bin/hc");
+    fs::write(&hc, FAKE_HC).unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Claude Code runs in t7 on its root login, in a conversation with a
+    // transcript.
+    let (old, next) = (orphan(), orphan());
+    let proc_of = |dir: PathBuf, environ: &str| {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("comm"), "claude\n").unwrap();
+        fs::write(dir.join("environ"), environ).unwrap();
+        fs::write(dir.join("cmdline"), "claude\0").unwrap();
+    };
+    proc_of(h.join("proc").join(old.to_string()), "");
+    fs::create_dir_all(h.join("hc")).unwrap();
+    fs::write(h.join("hc/pid"), old.to_string()).unwrap();
+    fs::write(h.join("hc/next"), next.to_string()).unwrap();
+    fs::write(h.join("hc/status"), "working").unwrap();
+    fs::create_dir_all(h.join(".claude/sessions")).unwrap();
+    fs::write(
+        h.join(format!(".claude/sessions/{old}.json")),
+        format!(r#"{{"pid":{old},"sessionId":"{SESSION}"}}"#),
+    )
+    .unwrap();
+    fs::write(
+        h.join(format!(".claude/projects/proj-a/{SESSION}.jsonl")),
+        "{}\n",
+    )
+    .unwrap();
+    // What the agent will look like once it runs on `work`.
+    let work_dir = env.account_dir("claude-1").join("config_dir");
+    proc_of(
+        h.join("hc/next-proc"),
+        &format!("CLAUDE_CONFIG_DIR={}\0", work_dir.display()),
+    );
+
+    let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
+    assert_eq!(info["account"], "claude-0");
+    assert_eq!(info["session"], SESSION);
+    let current: Vec<&Value> = info["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["current"] == true)
+        .collect();
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0]["name"], "root");
+
+    // Not in the middle of a turn, and not onto the account it is on.
+    let err = env.fails(&["herdr", "switch", "t7", "work"]);
+    assert!(err.contains("middle of a turn"), "{err}");
+    fs::write(h.join("hc/status"), "idle").unwrap();
+    let err = env.fails(&["herdr", "switch", "t7", "root"]);
+    assert!(err.contains("already runs on root"), "{err}");
+    assert!(!h.join("hc/log").exists(), "a refusal touched the terminal");
+
+    let done: Value =
+        serde_json::from_str(&env.ok(&["herdr", "switch", "t7", "work", "--json"])).unwrap();
+    assert_eq!(done["from"], "root");
+    assert_eq!(done["to"], "work");
+    assert_eq!(done["resumed"], true);
+    assert_eq!(done["started"], true);
+    let log = fs::read_to_string(h.join("hc/log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        [
+            "keys t7 ctrl+c",
+            &format!("send t7 cswap claude --cswap=work --resume {SESSION}"),
+        ]
+    );
+    let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
+    assert_eq!(info["account"], "claude-1");
+
+    let _ = Command::new("kill").arg(next.to_string()).status();
 }
 
 #[test]

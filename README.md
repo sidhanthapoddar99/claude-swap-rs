@@ -185,6 +185,20 @@ An account answers to its name (`work`), its aliases, its key (`claude-2`), its 
 
 `cswap ps` lists the agents that are running and which account each is on.
 
+### Moving a running agent to another account (herdr)
+
+herdr keeps agents in terminals that stay alive. cswap can move the agent in one of them to another account without losing its conversation:
+
+```
+cswap herdr info t7            the account the agent in terminal t7 runs on
+cswap herdr switch t7 work     stop it, start it on `work`, same conversation
+cswap herdr menu               every agent with its accounts, as JSON, for a launch menu
+```
+
+A switch presses Ctrl+C in the terminal until the agent leaves, then types the launch on the new account at the shell behind it, with the arguments that resume the conversation (`claude --resume <id>`, `codex resume <id>`, `grok --resume <id>`, `agy --conversation <id>`). The terminal, its tab and its place stay as they are. It works because accounts share their conversations and differ only in the login.
+
+It refuses when the agent is in the middle of a turn, when the terminal has no shell behind the agent, and when it cannot tell which conversation the agent is in. `--fresh` allows the last case and starts a new conversation. Finding the conversation reads `/proc`, so this is Linux only for Codex and Antigravity; the Antigravity part is not yet tested against a running agy.
+
 ## The dashboard
 
 Run `cswap` with no arguments. Keys: `1`–`9` and `0` or the arrow keys to move, `Enter` to act, `?` for the Help page. `Esc` steps back: out of a dialog, out of the page, then out of cswap. The mouse works too.
@@ -253,6 +267,7 @@ sync [account]             bring links up to date             (--check, --repair
 doctor                     check for problems
 migrate                    move cswap 0.6 profiles into ~/.cswap
 shell-init <shell>         print shell integration
+herdr info|switch|menu     agents in herdr terminals: account and switch
 update                     install the latest release         (--check)
 ```
 

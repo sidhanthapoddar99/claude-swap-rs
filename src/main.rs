@@ -14,6 +14,7 @@ mod cli;
 mod fsx;
 mod harness;
 mod health;
+mod herdr;
 mod history;
 mod http;
 mod manage;
@@ -47,6 +48,33 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum HerdrCmd {
+    /// Every installed agent with its accounts, as JSON
+    Menu,
+    /// The account the agent in a terminal runs on
+    Info {
+        /// The terminal: `t7` or its name
+        terminal: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move the agent in a terminal to another account, same conversation
+    Switch {
+        /// The terminal: `t7` or its name
+        terminal: String,
+        /// The account to move to: a name, an alias or `root`
+        account: String,
+        /// Start a new conversation when the running one cannot be told
+        #[arg(long)]
+        fresh: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Cmd {
     /// Open the dashboard (what a bare `cswap` does)
     #[command(visible_alias = "ui")]
@@ -65,6 +93,15 @@ enum Cmd {
         /// Arguments for the agent, after `--`
         #[arg(last = true)]
         args: Vec<String>,
+    },
+
+    /// Agents in herdr terminals: which account, and switch it
+    #[command(
+        after_help = "Examples:\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. It refuses in the middle of a turn."
+    )]
+    Herdr {
+        #[command(subcommand)]
+        what: HerdrCmd,
     },
 
     /// Which agents are running, and on which account
@@ -307,6 +344,10 @@ fn help(p: &Paint) -> String {
                     "print shell integration: bash, zsh, fish, powershell",
                 ),
                 ("update", "install the latest release (--check only looks)"),
+                (
+                    "herdr switch <t> <account>",
+                    "move a herdr terminal's agent to another account",
+                ),
             ],
         ),
     ];
@@ -408,6 +449,7 @@ fn run() -> Result<ExitCode> {
             | Cmd::Ps { json: true }
             | Cmd::List { json: true }
             | Cmd::Root { json: true }
+            | Cmd::Herdr { .. }
     );
     let mut ok = true;
     match cmd {
@@ -418,6 +460,16 @@ fn run() -> Result<ExitCode> {
             args,
         } => cli::start(default, agent.as_deref(), args)?,
         Cmd::Ps { json } => cli::ps(json)?,
+        Cmd::Herdr { what } => match what {
+            HerdrCmd::Menu => herdr::menu_cmd()?,
+            HerdrCmd::Info { terminal, json } => herdr::info_cmd(&terminal, json)?,
+            HerdrCmd::Switch {
+                terminal,
+                account,
+                fresh,
+                json,
+            } => herdr::switch_cmd(&terminal, &account, fresh, json)?,
+        },
         Cmd::List { json } => cli::list(json)?,
         Cmd::Usage { account, refresh } => cli::usage(account.as_deref(), refresh)?,
         Cmd::Resets => cli::resets()?,

@@ -50,11 +50,11 @@ impl Ctx {
         })
     }
 
-    fn signed_in(&self, acc: &Account) -> bool {
+    pub fn signed_in(&self, acc: &Account) -> bool {
         self.logged_in.contains(&acc.key())
     }
 
-    fn is_default(&self, acc: &Account) -> bool {
+    pub fn is_default(&self, acc: &Account) -> bool {
         view::is_default(acc, &self.hs[&acc.harness])
     }
 
@@ -133,7 +133,7 @@ fn id_text(acc: &Account) -> String {
 
 // ----------------------------------------------------------------------- list
 
-fn account_json(c: &Ctx, acc: &Account) -> serde_json::Value {
+pub fn account_json(c: &Ctx, acc: &Account) -> serde_json::Value {
     let snap = acc.snapshot();
     json!({
         "key": acc.key(),

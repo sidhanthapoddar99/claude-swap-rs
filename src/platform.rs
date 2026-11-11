@@ -150,8 +150,21 @@ pub fn home() -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// Ask a process to end. Does nothing where there is no such signal.
+pub fn terminate(pid: u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: a plain signal to one pid; a pid that is gone is an error
+        // the caller finds out by looking.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
 /// Is a process with this id running?
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 pub fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
