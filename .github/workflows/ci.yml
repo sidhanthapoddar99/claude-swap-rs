@@ -23,3 +23,40 @@ jobs:
         run: cargo test
       - name: Installer syntax check
         run: bash -n install.sh
+
+  # The tests use shell scripts as stand-in agents and a fabricated /proc, so
+  # they run on Linux. macOS and Windows are built, and the binary is asked
+  # for its help.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build
+      - name: Smoke test
+        run: |
+          ./target/debug/cswap --version
+          ./target/debug/cswap --help
+          ./target/debug/cswap shell-init zsh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build
+      - name: Smoke test
+        run: |
+          ./target/debug/cswap.exe --version
+          ./target/debug/cswap.exe --help
+          ./target/debug/cswap.exe shell-init powershell
+      - name: Installer syntax check
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }

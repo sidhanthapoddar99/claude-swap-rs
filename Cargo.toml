@@ -1,8 +1,9 @@
 [package]
 name = "claude-swap-rs"
-version = "0.6.3"
+version = "1.0.0"
 edition = "2021"
-description = "Fast multi-profile switcher for Claude Code: independent named profiles, per-terminal activation, shared history"
+rust-version = "1.89"
+description = "Account dashboard and launcher for coding agents (Claude Code, Codex, Antigravity, Grok): one terminal UI for usage, weekly resets and renewals, and a wrapper that picks the right account"
 license = "MIT"
 repository = "https://github.com/sidhanthapoddar99/claude-swap-rs"
 
@@ -12,14 +13,16 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-ureq = { version = "2", features = ["json"] }
-chrono = "0.4"
 sha2 = "0.10"
-dialoguer = "0.11"
+toml = "0.8"
+unicode-width = "0.2"
+ureq = { version = "2", features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -27,3 +30,6 @@ tempfile = "3"
 [profile.release]
 strip = true
 lto = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1,0 +1,1149 @@
+//! The dashboard drawn into a text buffer: every page has to fit its frame
+//! and show what it is for, at the smallest size and at a roomy one.
+
+use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::Terminal;
+use std::sync::mpsc;
+
+use super::app::{Action, App, Focus, Modal, Msg, Page, Session, Suspend, UpdateCheck};
+use super::ui;
+use crate::harness::Harness;
+use crate::store::Registry;
+use crate::testutil::Sandbox;
+
+fn app() -> (App, mpsc::Receiver<Msg>) {
+    let (tx, rx) = mpsc::channel();
+    (App::new(tx).unwrap(), rx)
+}
+
+fn screen(app: &mut App, w: u16, h: u16) -> String {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| ui::draw(f, app)).unwrap();
+    let buf = term.backend().buffer().clone();
+    let mut out = String::new();
+    for y in 0..h {
+        for x in 0..w {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn key(app: &mut App, code: KeyCode) {
+    app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+}
+
+fn type_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+        key(app, KeyCode::Char(c));
+    }
+}
+
+/// Print every page when `CSWAP_SHOW=1`, to look at the layout by eye:
+/// `CSWAP_SHOW=1 cargo test every_page -- --nocapture`.
+fn show(name: &str, text: &str) {
+    if std::env::var_os("CSWAP_SHOW").is_some() {
+        println!("──── {name}\n{text}");
+    }
+}
+
+#[test]
+fn every_page_draws_at_both_sizes_and_shows_its_content() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    let expect: [(Page, &[&str]); 11] = [
+        (
+            Page::Overview,
+            &[
+                "Use next",
+                "work",
+                "Next reset",
+                "Spare resets",
+                "Attention",
+                "RESETS IN",
+            ],
+        ),
+        (
+            Page::Usage,
+            &[
+                "Claude Code",
+                "Codex",
+                "LIMIT",
+                "USED",
+                "DATE",
+                "Ultra",
+                "week",
+                "Opus",
+                "5h",
+                "extra",
+                "$12.40 of $50.00",
+            ],
+        ),
+        (
+            Page::Accounts,
+            &[
+                "Add account",
+                "Aliases",
+                "Login",
+                "Renewal",
+                "Sign-in",
+                "Launch",
+                "Usage",
+                "Resets",
+                "Details",
+            ],
+        ),
+        (
+            Page::Root,
+            &[
+                "AGENT",
+                "LOGIN",
+                "dev@example.com",
+                "Max",
+                "SuperGrok",
+                "root login",
+            ],
+        ),
+        (Page::Sessions, &["Nothing is running"]),
+        (
+            Page::Resets,
+            &[
+                "Spare resets",
+                "Weekly resets",
+                "Renewals",
+                "COUNT",
+                "RESET",
+                "EXPIRES",
+                "DATE",
+                "USED",
+                "PLAN",
+            ],
+        ),
+        (Page::Sync, &["work", "linked", "private", "settings.json"]),
+        (Page::Analytics, &["Burn rate", "PER DAY", "AT RESET"]),
+        (Page::Health, &["Checks"]),
+        (
+            Page::Settings,
+            &[
+                "Theme",
+                "violet",
+                "Refresh every",
+                "10 min",
+                "General",
+                "Harness",
+                "Shell",
+                "Check for updates now",
+            ],
+        ),
+        (
+            Page::Help,
+            &[
+                "STARTING AN AGENT",
+                "claude --cswap ",
+                "pick the account from a list",
+                "claude --cswap=<account>",
+                "cswap claude",
+                "export CSWAP_CLAUDE=work",
+                "WORDS",
+            ],
+        ),
+    ];
+    for (w, h) in [(ui::MIN_W, ui::MIN_H), (132, 40)] {
+        for (page, words) in expect {
+            app.dispatch(Action::Go(page));
+            let text = screen(&mut app, w, h);
+            show(&format!("{page:?} {w}x{h}"), &text);
+            assert!(
+                text.contains(page.title()),
+                "{page:?} at {w}x{h} has no title"
+            );
+            // The agent's own login is its "root", never "native". The short
+            // windows are listed on the Usage page and in an account's own
+            // Usage card, and nowhere else.
+            let short = if matches!(page, Page::Usage | Page::Accounts) {
+                "5-hour"
+            } else {
+                "  5h "
+            };
+            for word in ["native", "Native", "5h window", "5-hour", short] {
+                assert!(
+                    !text.contains(word),
+                    "{page:?} at {w}x{h} says '{word}'\n{text}"
+                );
+            }
+            if w > ui::MIN_W {
+                for word in words {
+                    assert!(
+                        text.contains(word),
+                        "{page:?} at {w}x{h} lacks '{word}'\n{text}"
+                    );
+                }
+            }
+        }
+    }
+    // Too small: say so instead of drawing a broken frame.
+    let text = screen(&mut app, 60, 12);
+    assert!(text.contains("more room"), "{text}");
+}
+
+#[test]
+fn the_root_logins_are_on_their_own_page_and_nowhere_else() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    // Only cswap's accounts are rows; an agent's own login is not an account.
+    assert_eq!(app.account_keys(), ["claude-1", "claude-2", "codex-1"]);
+    assert_eq!(app.root_keys(), ["claude-0", "codex-0", "agy-0", "grok-0"]);
+    // What only the root logins have: a login and a plan of their own.
+    for page in [
+        Page::Overview,
+        Page::Usage,
+        Page::Accounts,
+        Page::Resets,
+        Page::Sync,
+        Page::Analytics,
+    ] {
+        app.dispatch(Action::Go(page));
+        let text = screen(&mut app, 132, 40);
+        for word in ["dev@example.com", "SuperGrok"] {
+            assert!(!text.contains(word), "{page:?} shows '{word}'\n{text}");
+        }
+    }
+    app.dispatch(Action::Go(Page::Root));
+    let text = screen(&mut app, 132, 40);
+    show("root", &text);
+    for word in ["Claude Code", "Codex", "Antigravity", "Grok", "47%"] {
+        assert!(text.contains(word), "missing '{word}'\n{text}");
+    }
+}
+
+#[test]
+fn every_page_holds_a_frame_with_no_accounts_at_all() {
+    let sb = Sandbox::new();
+    sb.fake_agents();
+    for h in Harness::ALL {
+        sb.native(h);
+    }
+    let (mut app, _rx) = app();
+    assert!(app.account_keys().is_empty());
+    for page in Page::ALL {
+        app.dispatch(Action::Go(page));
+        for (w, h) in [(ui::MIN_W, ui::MIN_H), (132, 40)] {
+            let text = screen(&mut app, w, h);
+            assert!(text.contains(page.title()), "{page:?}\n{text}");
+        }
+    }
+    // Every page of accounts says how to get the first one.
+    for page in [
+        Page::Overview,
+        Page::Usage,
+        Page::Accounts,
+        Page::Resets,
+        Page::Analytics,
+    ] {
+        app.dispatch(Action::Go(page));
+        let text = screen(&mut app, 132, 40);
+        show(&format!("{page:?}/empty"), &text);
+        assert!(
+            text.contains("No accounts yet") && text.contains("Press a to add one"),
+            "{page:?}\n{text}"
+        );
+    }
+}
+
+#[test]
+fn the_account_selected_on_the_accounts_page_is_spelled_out() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Accounts));
+    let keys = app.account_keys();
+    let work = keys
+        .iter()
+        .position(|k| k == "claude-1")
+        .unwrap_or_else(|| panic!("{keys:?}"));
+    app.sel[Page::Accounts.index()] = work;
+    let text = screen(&mut app, 132, 40);
+    show("accounts/work", &text);
+    for word in [
+        "dev@corp.example",
+        "Ultra",
+        "claude --cswap=work",
+        "accounts/claude-1",
+        // Every limit it has, the short one too, and its credits.
+        "╭ Usage",
+        "LIMIT",
+        "week",
+        "Opus",
+        "5h",
+        "$12.40 of $50.00 spent",
+        // The resets it holds, in a part of their own.
+        "1 to spend",
+        "COUNT",
+        "weekly",
+        // The wordy part comes last.
+        "Details",
+        "monthly · set by hand",
+        "Access token lasts",
+    ] {
+        assert!(text.contains(word), "missing '{word}'\n{text}");
+    }
+    // The facts stay a line each: the renewal is a date and a count of days.
+    let renewal = text
+        .lines()
+        .find(|l| l.contains("Renewal") && l.contains("in 12 days"))
+        .unwrap_or_else(|| panic!("no renewal line\n{text}"));
+    assert!(
+        !renewal.contains("monthly") && !renewal.contains("press"),
+        "{renewal}"
+    );
+    // The four parts, in order, with the add button on the last line of the list.
+    let at = |word: &str| {
+        text.find(word)
+            .unwrap_or_else(|| panic!("no '{word}'\n{text}"))
+    };
+    assert!(at("Login") < at("╭ Usage") && at("╭ Usage") < at("╭ Resets"));
+    assert!(at("╭ Resets") < at("╭ Details"));
+    let rows: Vec<&str> = text.lines().collect();
+    let add = rows
+        .iter()
+        .position(|l| l.contains("+ Add account"))
+        .unwrap();
+    assert!(rows[add + 1].contains('╰'), "{text}");
+}
+
+#[test]
+fn an_account_is_renamed_and_given_aliases_from_its_page() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Accounts));
+    assert_eq!(app.selected_key().as_deref(), Some("claude-1"));
+
+    // e renames. The name cannot be emptied, and cannot be another's.
+    key(&mut app, KeyCode::Char('e'));
+    for _ in 0..4 {
+        key(&mut app, KeyCode::Backspace);
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        &app.modal,
+        Some(Modal::Input { error: Some(_), .. })
+    ));
+    type_text(&mut app, "side");
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        &app.modal,
+        Some(Modal::Input { error: Some(_), .. })
+    ));
+    for _ in 0..4 {
+        key(&mut app, KeyCode::Backspace);
+    }
+    type_text(&mut app, "office");
+    key(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none());
+
+    // E sets the extra names.
+    key(&mut app, KeyCode::Char('E'));
+    type_text(&mut app, "w, corp");
+    key(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none(), "{:?}", app.modal);
+    let reg = Registry::load().unwrap();
+    let acc = reg.get("claude-1").unwrap();
+    assert_eq!(acc.meta.label, "office");
+    assert_eq!(acc.meta.aliases, ["w", "corp"]);
+    for name in ["office", "w", "corp", "1"] {
+        assert_eq!(reg.find(Harness::Claude, name).unwrap().key(), "claude-1");
+    }
+    let text = screen(&mut app, 132, 40);
+    show("accounts/renamed", &text);
+    assert!(
+        text.contains("office") && text.contains("w, corp"),
+        "{text}"
+    );
+}
+
+#[test]
+fn adding_an_account_asks_for_the_agent_then_a_name_then_hands_over() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    key(&mut app, KeyCode::Char('a'));
+    let text = screen(&mut app, 132, 40);
+    show("add: agent", &text);
+    assert!(
+        text.contains("Add an account") && text.contains("Claude Code"),
+        "{text}"
+    );
+
+    // Codex is the second row.
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+    let text = screen(&mut app, 132, 40);
+    show("add: name", &text);
+    assert!(
+        text.contains("New Codex account") && text.contains("Name"),
+        "{text}"
+    );
+
+    // No name is no account: every account has one.
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        &app.modal,
+        Some(Modal::Input { error: Some(_), .. })
+    ));
+    assert!(app.suspend.is_none());
+    // A name that is taken is refused in place.
+    type_text(&mut app, "team");
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(
+        &app.modal,
+        Some(Modal::Input { error: Some(_), .. })
+    ));
+    for _ in 0..4 {
+        key(&mut app, KeyCode::Backspace);
+    }
+    type_text(&mut app, "night");
+    key(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none());
+    let Some(Suspend::Login {
+        key: new_key,
+        created: true,
+    }) = app.suspend.take()
+    else {
+        panic!("the sign-in hand-off was not asked for");
+    };
+    let reg = Registry::load().unwrap();
+    assert_eq!(reg.find(Harness::Codex, "night").unwrap().key(), new_key);
+
+    // The sign-in was abandoned: the empty account is taken away again.
+    app.after_login(&new_key, true, Ok(false));
+    assert!(Registry::load().unwrap().get(&new_key).is_none());
+    assert!(app
+        .toast
+        .as_ref()
+        .is_some_and(|t| t.text.contains("Nothing was added")));
+}
+
+/// Press `c` on the Claude row of the Defaults page, accept the name on
+/// offer, and let the fake agent sign in. Returns the new account's key.
+fn account_from_root(app: &mut App) -> String {
+    app.dispatch(Action::Go(Page::Root));
+    assert_eq!(app.selected_key().as_deref(), Some("claude-0"));
+    key(app, KeyCode::Char('c'));
+    key(app, KeyCode::Enter);
+    let Some(Suspend::Login {
+        key: new_key,
+        created: true,
+    }) = app.suspend.take()
+    else {
+        panic!("no hand-off: {:?}", app.modal);
+    };
+    let mut reg = Registry::load().unwrap();
+    let done = crate::manage::sign_in(reg.get_mut(&new_key).unwrap());
+    app.after_login(&new_key, true, done);
+    new_key
+}
+
+#[test]
+fn a_root_login_becomes_an_account_by_naming_it_and_signing_in_again() {
+    let sb = Sandbox::new();
+    sb.demo();
+    sb.fake_agents();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Root));
+    key(&mut app, KeyCode::Char('c'));
+    let text = screen(&mut app, 132, 40);
+    show("root: make account", &text);
+    // The name on offer comes from the login's email, and nothing is copied.
+    assert!(
+        text.contains("root login") && text.contains("never copies a login"),
+        "{text}"
+    );
+    assert!(
+        matches!(&app.modal, Some(Modal::Input { value, .. }) if value == "dev"),
+        "{:?}",
+        app.modal
+    );
+    key(&mut app, KeyCode::Esc);
+
+    let new_key = account_from_root(&mut app);
+    let reg = Registry::load().unwrap();
+    let acc = reg.get(&new_key).unwrap();
+    assert_eq!(acc.meta.label, "dev");
+    assert_eq!(acc.email(), "new@example.com");
+    // Its login is its own: nothing of the root's was copied into it.
+    assert!(!acc.is_native());
+    assert_eq!(app.page, Page::Accounts);
+    assert_eq!(app.selected_key().as_deref(), Some(new_key.as_str()));
+}
+
+#[test]
+fn a_login_can_be_held_by_one_account_only() {
+    let sb = Sandbox::new();
+    sb.demo();
+    sb.fake_agents();
+    let (mut app, _rx) = app();
+    // The fake agent always signs in as the same person.
+    let first = account_from_root(&mut app);
+    assert!(Registry::load().unwrap().get(&first).is_some());
+
+    key(&mut app, KeyCode::Char('a'));
+    key(&mut app, KeyCode::Enter); // Claude Code
+    type_text(&mut app, "again");
+    key(&mut app, KeyCode::Enter);
+    let Some(Suspend::Login {
+        key: second,
+        created: true,
+    }) = app.suspend.take()
+    else {
+        panic!("no hand-off");
+    };
+    let mut reg = Registry::load().unwrap();
+    let done = crate::manage::sign_in(reg.get_mut(&second).unwrap());
+    app.after_login(&second, true, done);
+
+    let reg = Registry::load().unwrap();
+    assert!(reg.get(&first).is_some());
+    assert!(reg.get(&second).is_none(), "the second account was kept");
+    assert!(
+        app.toast
+            .as_ref()
+            .is_some_and(|t| t.text.contains("already holds that login")),
+        "{:?}",
+        app.toast.as_ref().map(|t| &t.text)
+    );
+}
+
+#[test]
+fn the_sessions_page_lists_what_is_running_and_where() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    let now = chrono::Utc::now();
+    app.sessions = vec![
+        Session {
+            key: "claude-1".into(),
+            pid: 4242,
+            cwd: Some("/srv/api".into()),
+            started: Some(now - chrono::Duration::hours(2)),
+        },
+        Session {
+            key: "codex-0".into(),
+            pid: 77,
+            cwd: None,
+            started: None,
+        },
+    ];
+    app.dispatch(Action::Go(Page::Sessions));
+    // Going to the page looks again; put the made-up sessions back.
+    let made_up = app.sessions.is_empty();
+    assert!(made_up || app.sessions.len() == 2);
+    app.sessions = vec![
+        Session {
+            key: "claude-1".into(),
+            pid: 4242,
+            cwd: Some("/srv/api".into()),
+            started: Some(now - chrono::Duration::hours(2)),
+        },
+        Session {
+            key: "codex-0".into(),
+            pid: 77,
+            cwd: None,
+            started: None,
+        },
+    ];
+    let text = screen(&mut app, 132, 40);
+    show("sessions", &text);
+    for word in [
+        "2 running",
+        "work",
+        "4242",
+        "2h",
+        "/srv/api",
+        "Codex",
+        "root",
+        "77",
+    ] {
+        assert!(text.contains(word), "missing '{word}'\n{text}");
+    }
+    // Nothing about sessions leaks onto the other pages.
+    app.dispatch(Action::Go(Page::Overview));
+    let text = screen(&mut app, 132, 40);
+    assert!(
+        !text.contains("Running now") && !text.contains("4242"),
+        "{text}"
+    );
+}
+
+#[test]
+fn keys_move_between_the_menu_and_the_page() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    assert_eq!((app.page, app.focus), (Page::Overview, Focus::Nav));
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.page, Page::Usage);
+    key(&mut app, KeyCode::Char('4'));
+    assert_eq!((app.page, app.focus), (Page::Accounts, Focus::Main));
+    key(&mut app, KeyCode::Down);
+    assert_eq!(app.row(), 1);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Nav);
+    // The pages in the order of the menu: 1 to 9, then 0, and ? for Help.
+    let keys: String = Page::ALL.iter().map(|p| p.hotkey()).collect();
+    assert_eq!(keys, "1234567890?");
+    key(&mut app, KeyCode::Char('3'));
+    assert_eq!(app.page, Page::Resets);
+    key(&mut app, KeyCode::Char('5'));
+    assert_eq!(app.page, Page::Root);
+    key(&mut app, KeyCode::Char('7'));
+    assert_eq!(app.page, Page::Sessions);
+    key(&mut app, KeyCode::Char('0'));
+    assert_eq!(app.page, Page::Settings);
+    // ? opens Help from anywhere, and a second ? goes back.
+    key(&mut app, KeyCode::Char('?'));
+    assert_eq!((app.page, app.focus), (Page::Help, Focus::Main));
+    key(&mut app, KeyCode::Char('?'));
+    assert_eq!(app.page, Page::Settings);
+    // Escape steps back, and from the menu it quits. `q` is not a key.
+    key(&mut app, KeyCode::Char('q'));
+    assert!(!app.quit);
+    key(&mut app, KeyCode::Char('3'));
+    key(&mut app, KeyCode::Esc);
+    assert_eq!((app.focus, app.quit), (Focus::Nav, false));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.quit);
+}
+
+#[test]
+fn a_click_lands_on_what_is_drawn_there() {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    let text = screen(&mut app, 132, 40);
+    // Find the "Usage" entry of the side menu and click it.
+    let (row, line) = text
+        .lines()
+        .enumerate()
+        .find(|(_, l)| l.chars().take(26).collect::<String>().contains("Usage"))
+        .expect("the menu lists Usage");
+    let col = line.chars().take_while(|c| *c != 'U').count();
+    app.on_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col as u16,
+        row: row as u16,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!((app.page, app.focus), (Page::Usage, Focus::Main));
+    // The wheel moves the selection.
+    app.on_mouse(MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 60,
+        row: 10,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.row(), 1);
+    // The key hints at the bottom are clickable too.
+    let text = screen(&mut app, 132, 40);
+    let (row, line) = text
+        .lines()
+        .enumerate()
+        .find(|(_, l)| l.contains("? help"))
+        .expect("the footer lists the help key");
+    let col = line.split("? help").next().unwrap().chars().count();
+    app.on_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col as u16,
+        row: row as u16,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.page, Page::Help);
+}
+
+#[test]
+fn settings_change_on_disk() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    key(&mut app, KeyCode::Char('0'));
+    key(&mut app, KeyCode::Down); // past the theme
+    key(&mut app, KeyCode::Right); // refresh every: 10 -> 15
+    assert_eq!(crate::store::Settings::load().unwrap().refresh_minutes, 15);
+
+    // One tab holds every agent's options, a group each, after the ones
+    // they share. Where a launch starts is not set here.
+    key(&mut app, KeyCode::Char(']'));
+    let text = screen(&mut app, 132, 60);
+    show("settings/harness", &text);
+    // The keys that change tab are written beside the tabs: t and T, and
+    // the brackets do the same.
+    assert!(text.contains("t next tab · T previous"), "{text}");
+    key(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.settings_tab, 2);
+    key(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.settings_tab, 0);
+    key(&mut app, KeyCode::Char('T'));
+    assert_eq!(app.settings_tab, 2);
+    key(&mut app, KeyCode::Char('['));
+    assert_eq!(app.settings_tab, 1);
+    for word in [
+        "ALL AGENTS",
+        "Auto-pick skips above",
+        "CLAUDE CODE",
+        "CODEX",
+        "ANTIGRAVITY",
+        "GROK BUILD",
+        "Auto-pick the account",
+        "Read spare resets",
+    ] {
+        assert!(text.contains(word), "missing '{word}'\n{text}");
+    }
+    assert!(
+        !text.contains("starts on") && !text.contains("Wrap `"),
+        "{text}"
+    );
+
+    // Auto-pick is a switch: on stores `auto`, off goes back to the root login.
+    let rows = crate::tui::pages::settings::rows(&app);
+    let at = rows
+        .iter()
+        .position(|r| r.label == "Auto-pick the account")
+        .unwrap();
+    app.sel[Page::Settings.index()] = at;
+    let start = || {
+        crate::store::HarnessSettings::load(Harness::Claude)
+            .unwrap()
+            .start
+    };
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(start(), "auto");
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(start(), "root");
+
+    // The list is longer than a short screen: the selection stays in view.
+    app.sel[Page::Settings.index()] = rows.len() - 1;
+    let text = screen(&mut app, ui::MIN_W, ui::MIN_H);
+    assert!(text.contains("GROK BUILD"), "{text}");
+}
+
+#[test]
+fn an_update_check_can_be_asked_for_and_says_what_it_found() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, rx) = app();
+    key(&mut app, KeyCode::Char('0'));
+    let rows = crate::tui::pages::settings::rows(&app);
+    let at = rows
+        .iter()
+        .position(|r| r.label == "Check for updates now")
+        .unwrap();
+    app.sel[Page::Settings.index()] = at;
+    let have = env!("CARGO_PKG_VERSION");
+    assert!(screen(&mut app, 132, 40).contains(&format!("you have {have}")));
+
+    // The tests run offline: the check says it could not tell, and never
+    // that this is the newest.
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.update, UpdateCheck::Checking);
+    let msg = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the check never answered");
+    app.on_msg(msg);
+    assert!(
+        matches!(app.update, UpdateCheck::Failed(_)),
+        "{:?}",
+        app.update
+    );
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("could not check"), "{text}");
+    assert!(text.contains("offline"), "{text}");
+
+    // What the two answers look like.
+    app.on_msg(Msg::UpdateChecked(Ok(None)));
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains(&format!("{have} is the newest")), "{text}");
+    app.on_msg(Msg::UpdateChecked(Ok(Some("99.0.0".into()))));
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("99.0.0 is out"), "{text}");
+    assert!(text.contains("cswap update"), "{text}");
+}
+
+#[test]
+fn the_shell_tab_lists_shells_and_a_dialog_wraps_agents_in_one() {
+    let sb = Sandbox::new();
+    sb.demo();
+    sb.fake_agents();
+    let (mut app, _rx) = app();
+    key(&mut app, KeyCode::Char('0'));
+    key(&mut app, KeyCode::Char(']'));
+    key(&mut app, KeyCode::Char(']'));
+    let text = screen(&mut app, 132, 40);
+    show("settings/shell", &text);
+    for word in [
+        "INTEGRATION",
+        "SHELL",
+        "INTEGRATED",
+        "NOT INTEGRATED",
+        "zsh",
+        "yours",
+    ] {
+        assert!(text.contains(word), "missing '{word}'\n{text}");
+    }
+    // The rc file does not load cswap yet, so zsh wraps nothing.
+    let zsh = app
+        .derived
+        .shells
+        .iter()
+        .position(|s| s.name == "zsh")
+        .unwrap();
+    assert_eq!(app.derived.shells[zsh].loaded, Some(false));
+    assert!(!app.derived.shells[zsh].wraps(Harness::Claude));
+    let rc = crate::shell::rc_file("zsh").unwrap();
+    assert!(!rc.exists());
+
+    // Enter opens the boxes. Nothing is ticked, and escape changes nothing.
+    app.sel[Page::Settings.index()] = zsh;
+    key(&mut app, KeyCode::Enter);
+    let text = screen(&mut app, 132, 40);
+    show("settings/shell dialog", &text);
+    assert!(text.contains("Agents wrapped in zsh"), "{text}");
+    assert!(text.contains("saving adds one line to ~/.zshrc"), "{text}");
+    assert!(
+        text.contains("[ ] claude") && text.contains("[ ] codex"),
+        "{text}"
+    );
+    key(&mut app, KeyCode::Char(' '));
+    let text = screen(&mut app, 132, 40);
+    assert!(
+        text.contains("[x] claude") && text.contains("not saved"),
+        "{text}"
+    );
+    key(&mut app, KeyCode::Esc);
+    assert!(app.modal.is_none() && !rc.exists());
+    assert!(crate::store::Settings::load().unwrap().shells.is_empty());
+
+    // Tick two and save: the list is stored and the line is added once.
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Char(' ')); // claude
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Char(' ')); // codex
+    key(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none(), "{:?}", app.modal);
+    let saved = crate::store::Settings::load().unwrap();
+    assert_eq!(saved.shells["zsh"], ["claude", "codex"]);
+    let text = std::fs::read_to_string(&rc).unwrap();
+    assert_eq!(text.matches("cswap shell-init zsh").count(), 1, "{text}");
+    let toast = app
+        .toast
+        .as_ref()
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    assert!(
+        toast.contains("zsh now wraps claude, codex") && toast.contains("~/.zshrc"),
+        "{toast}"
+    );
+    assert!(app.derived.shells[zsh].wraps(Harness::Claude));
+    assert!(!app.derived.shells[zsh].wraps(Harness::Grok));
+
+    // Opened again, what is saved is ticked. Unticking one and saving
+    // unwraps it, and the rc file is left as it is.
+    key(&mut app, KeyCode::Enter);
+    let dialog = screen(&mut app, 132, 40);
+    assert!(
+        dialog.contains("[x] claude") && dialog.contains("[x] codex"),
+        "{dialog}"
+    );
+    assert!(dialog.contains("~/.zshrc loads cswap"), "{dialog}");
+    key(&mut app, KeyCode::Char(' ')); // claude off
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        crate::store::Settings::load().unwrap().shells["zsh"],
+        ["codex"]
+    );
+    assert_eq!(std::fs::read_to_string(&rc).unwrap(), text);
+    // What `cswap shell-init zsh` prints follows the list.
+    let agents = crate::shell::chosen(&crate::store::Settings::load().unwrap(), "zsh", |_| true);
+    assert_eq!(agents, [Harness::Codex]);
+}
+
+#[test]
+fn an_account_is_made_the_default_and_wears_a_star_before_its_name() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Accounts));
+    app.focus = Focus::Main;
+    let text = screen(&mut app, 132, 40);
+    // Nothing is starred while the root login is the default; the section says so.
+    assert!(!text.contains('★'), "{text}");
+    assert!(text.contains("default: root"), "{text}");
+
+    // The actions come in groups, and one of them sets the default.
+    key(&mut app, KeyCode::Enter);
+    let menu = screen(&mut app, 132, 40);
+    show("accounts/menu", &menu);
+    for word in [
+        "LAUNCH",
+        "USAGE",
+        "ACCOUNT",
+        "Set as default",
+        "what `cswap claude` starts on",
+    ] {
+        assert!(menu.contains(word), "missing '{word}'\n{menu}");
+    }
+    assert!(!menu.contains("Start a bare"), "{menu}");
+    let at = |word: &str| menu.find(word).unwrap();
+    assert!(at("LAUNCH") < at("Set as default") && at("Set as default") < at("USAGE"));
+    assert!(at("ACCOUNT") < at("Rename") && at("Rename") < at("Remove account"));
+    // On a screen too short for the titles, every action is still there.
+    let short = screen(&mut app, ui::MIN_W, ui::MIN_H);
+    assert!(short.contains("Remove account"), "{short}");
+
+    key(&mut app, KeyCode::Char('d'));
+    assert!(app.modal.is_none());
+    let start = |h| crate::store::HarnessSettings::load(h).unwrap().start;
+    assert_eq!(start(Harness::Claude), "1");
+    assert_eq!(start(Harness::Codex), "root");
+    let text = screen(&mut app, 132, 40);
+    show("accounts/default", &text);
+    assert!(text.contains("★ work"), "{text}");
+    assert_eq!(text.matches("default: root").count(), 1, "{text}");
+    assert!(text.contains("★ `cswap claude` starts here."), "{text}");
+
+    // One default per agent: making another the default moves the star.
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Char('d'));
+    assert_eq!(start(Harness::Claude), "2");
+    let text = screen(&mut app, 132, 40);
+    assert!(
+        text.contains("★ side") && !text.contains("★ work"),
+        "{text}"
+    );
+    // Asking again says so and changes nothing.
+    key(&mut app, KeyCode::Char('d'));
+    let toast = app
+        .toast
+        .as_ref()
+        .map(|t| t.text.clone())
+        .unwrap_or_default();
+    assert!(toast.contains("already the default"), "{toast}");
+
+    // The star is in front of the name on the other pages too, and the
+    // root login gets it back from its own page.
+    app.dispatch(Action::Go(Page::Overview));
+    assert!(screen(&mut app, 132, 40).contains("★ side"));
+    app.dispatch(Action::Go(Page::Root));
+    app.focus = Focus::Main;
+    key(&mut app, KeyCode::Char('d'));
+    assert_eq!(start(Harness::Claude), "root");
+    let text = screen(&mut app, 132, 40);
+    show("root/default", &text);
+    assert!(
+        text.contains("★ Claude Code") && text.contains("The default:"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_theme_is_switched_in_settings_and_every_theme_draws_every_page() {
+    use super::theme::Scheme;
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    assert_eq!(app.theme.scheme(), Scheme::Violet);
+    key(&mut app, KeyCode::Char('0'));
+    // The theme is the first row. Left of the first theme is the last one.
+    key(&mut app, KeyCode::Left);
+    assert_eq!(app.theme.scheme(), Scheme::Terminal);
+    assert_eq!(crate::store::Settings::load().unwrap().theme, "terminal");
+    for expected in Scheme::ALL {
+        key(&mut app, KeyCode::Right);
+        assert_eq!(app.theme.scheme(), expected);
+        assert_eq!(
+            crate::store::Settings::load().unwrap().theme,
+            expected.name()
+        );
+        let text = screen(&mut app, 132, 40);
+        assert!(text.contains(expected.name()), "{text}");
+        for page in Page::ALL {
+            app.dispatch(Action::Go(page));
+            let text = screen(&mut app, ui::MIN_W, ui::MIN_H);
+            assert!(text.contains(page.title()), "{expected:?} {page:?}");
+        }
+        app.dispatch(Action::Go(Page::Settings));
+    }
+    // A name nobody knows, typed into the file by hand, is the first theme.
+    crate::store::Settings::update(|s| s.theme = "plaid".into()).unwrap();
+    app.reload();
+    assert_eq!(app.theme.scheme(), Scheme::Violet);
+}
+
+#[test]
+fn the_resets_page_has_three_parts_and_one_weekly_figure_per_account() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Resets));
+    for (w, h) in [(ui::MIN_W, ui::MIN_H), (132, 40)] {
+        let text = screen(&mut app, w, h);
+        // No combined list, no type column, and a weekly reset is called
+        // that, whatever model limits reset with it.
+        for word in ["Coming up", "TYPE", "week +", "Opus", "Fable"] {
+            assert!(!text.contains(word), "{w}x{h} says '{word}'\n{text}");
+        }
+        // A date is a date.
+        let lower = text.to_lowercase();
+        for word in ["tomorrow", "tmrw", "today"] {
+            assert!(!lower.contains(word), "{w}x{h} says '{word}'\n{text}");
+        }
+        for word in [
+            "Spare resets",
+            "Weekly resets",
+            "Renewals",
+            "weekly",
+            "USED",
+        ] {
+            assert!(text.contains(word), "{w}x{h} lacks '{word}'\n{text}");
+        }
+        // The week's own figure for `work`, on its spare reset and on its
+        // weekly reset; the model limits beside it are not shown.
+        assert_eq!(text.matches(" 38%").count(), 2, "{text}");
+    }
+}
+
+#[test]
+fn selecting_a_reset_softly_marks_the_accounts_other_rows() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Resets));
+    app.focus = Focus::Main;
+    // The colour of the marker in front of each row of an account.
+    let marks = |app: &mut App, name: &str| {
+        let mut term = Terminal::new(TestBackend::new(132, 40)).unwrap();
+        term.draw(|f| ui::draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let mut out = Vec::new();
+        for y in 0..40 {
+            let row: String = (0..132).map(|x| buf[(x, y)].symbol()).collect();
+            if let Some(at) = row.find(&format!("▌● {name}")) {
+                let x = row[..at].chars().count() as u16;
+                out.push(buf[(x, y)].fg);
+            }
+        }
+        out
+    };
+    let (strong, faint) = (app.theme.accent(), app.theme.faint());
+
+    // The rows, top to bottom: work's spare reset, the weekly resets of work
+    // and side, then the renewals of side and work.
+    app.sel[Page::Resets.index()] = 0;
+    assert_eq!(marks(&mut app, "work"), [strong, faint, faint]);
+    assert!(marks(&mut app, "side").is_empty());
+
+    app.sel[Page::Resets.index()] = 2;
+    assert_eq!(marks(&mut app, "side"), [strong, faint]);
+    assert!(marks(&mut app, "work").is_empty());
+
+    // Nothing is marked while the menu has the keys.
+    app.focus = Focus::Nav;
+    assert!(marks(&mut app, "work").is_empty() && marks(&mut app, "side").is_empty());
+}
+
+#[test]
+fn the_usage_page_boxes_accounts_by_agent_and_lists_every_limit() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Usage));
+    for (w, h) in [(ui::MIN_W, ui::MIN_H), (132, 40)] {
+        let text = screen(&mut app, w, h);
+        let at = |word: &str| {
+            text.find(word)
+                .unwrap_or_else(|| panic!("no '{word}' at {w}x{h}\n{text}"))
+        };
+        // One box per agent, each holding its own accounts.
+        assert!(at("╭ Claude Code") < at("● work") && at("● side") < at("╭ Codex"));
+        assert!(at("╭ Codex") < at("● team"));
+        // The plan sits under the name, beside the second limit.
+        let rows: Vec<&str> = text.lines().collect();
+        let work = rows.iter().position(|l| l.contains("● work")).unwrap();
+        assert!(rows[work].contains("week") && rows[work].contains("38%"));
+        assert!(rows[work + 1].contains("Ultra") && rows[work + 1].contains("Opus"));
+        // The short window is listed on this page, after the weekly limits.
+        assert!(rows[work + 2].contains(" 5h ") && rows[work + 2].contains("12%"));
+    }
+    // A wide screen has the date each limit resets as well.
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("DATE") && text.contains(" · "), "{text}");
+    assert!(!screen(&mut app, ui::MIN_W, ui::MIN_H).contains("DATE"));
+}
+
+#[test]
+fn the_dot_tells_the_agent_so_its_name_is_written_only_without_colour() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    // The Usage page boxes its accounts by agent, so it never needs the tag.
+    let pages = [Page::Overview, Page::Resets, Page::Analytics];
+    for page in pages.into_iter().chain([Page::Usage]) {
+        app.dispatch(Action::Go(page));
+        let text = screen(&mut app, 132, 40);
+        for tag in ["work claude", "side claude", "team codex"] {
+            assert!(!text.contains(tag), "{page:?} says '{tag}'\n{text}");
+        }
+    }
+    // Greyscale has no colour to tell the agents apart, so there it is said.
+    crate::store::Settings::update(|s| s.theme = "grey".into()).unwrap();
+    app.reload();
+    for page in pages {
+        app.dispatch(Action::Go(page));
+        let text = screen(&mut app, 132, 40);
+        assert!(text.contains("work claude"), "{page:?}\n{text}");
+    }
+}
+
+/// `cargo test readme_picture -- --ignored --nocapture` prints the Overview
+/// at the size of the picture at the top of the README.
+#[test]
+#[ignore = "prints the README's picture"]
+fn readme_picture() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    app.dispatch(Action::Go(Page::Overview));
+    println!("{}", screen(&mut app, 116, 24));
+}
+
+#[test]
+fn the_help_page_scrolls_to_its_end_and_no_further() {
+    let sb = Sandbox::new();
+    sb.demo();
+    let (mut app, _rx) = app();
+    key(&mut app, KeyCode::Char('?'));
+    let top = screen(&mut app, ui::MIN_W, ui::MIN_H);
+    show("help/top", &top);
+    assert!(top.contains("STARTING AN AGENT"), "{top}");
+    assert!(!top.contains("KEYS · SETTINGS PAGE"), "{top}");
+    // Far more key presses than there are lines: the last line is on screen,
+    // and one step up moves the text at once.
+    for _ in 0..500 {
+        key(&mut app, KeyCode::Down);
+    }
+    let end = screen(&mut app, ui::MIN_W, ui::MIN_H);
+    show("help/end", &end);
+    assert!(end.contains("save them all"), "{end}");
+    key(&mut app, KeyCode::Up);
+    assert_ne!(screen(&mut app, ui::MIN_W, ui::MIN_H), end);
+    // The page tells every flag the command line takes.
+    app.sel[Page::Help.index()] = 0;
+    let text = screen(&mut app, 132, 60);
+    for (flag, what) in crate::wrap::FLAGS {
+        assert!(text.contains(flag) && text.contains(what), "{flag}\n{text}");
+    }
+}

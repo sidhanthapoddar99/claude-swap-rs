@@ -1,356 +1,519 @@
-mod cmds;
-mod codex;
-mod config;
-mod interactive;
-mod oauth;
-mod paths;
-mod profile;
-mod ui;
-mod update_check;
+//! cswap: accounts, usage and resets for coding agents, in one place.
+//!
+//! - `cswap` opens the dashboard.
+//! - `cswap <agent> [args…]` runs an agent on the right account. Everything
+//!   after the agent's name is the agent's, so it never goes through the
+//!   argument parser below.
+//! - `cswap <command>` is one of the plain commands.
 
-use clap::{Parser, Subcommand};
+use anyhow::Result;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use std::process::ExitCode;
+
+mod cli;
+mod fsx;
+mod harness;
+mod health;
+mod herdr;
+mod history;
+mod http;
+mod manage;
+mod migrate;
+mod model;
+mod paths;
+mod picker;
+mod platform;
+mod refresh;
+mod sessions;
+mod shell;
+mod store;
+mod suggest;
+mod sync;
+#[cfg(test)]
+mod testutil;
+mod text;
+mod tui;
+mod update;
+mod view;
+mod wrap;
+
+use harness::Harness;
+use text::Paint;
 
 #[derive(Parser)]
-#[command(
-    name = "cswap",
-    version,
-    about = "Fast multi-profile switcher for Claude Code",
-    long_about = "Fast multi-profile switcher for Claude Code.\n\n\
-A PROFILE is a whole entity: its own directory, its own login, its own\n\
-tokens. It IS an account — one profile per account, keyed by email, with\n\
-aliases as the labels you type.\n\n\
-`default` is the live ~/.claude — a separate entity that does not know cswap\n\
-exists. cswap only READS it, never writes it, and it is the ONE thing that\n\
-may hold the same account as a profile. All cswap state lives in\n\
-~/.config/cswap and ~/.local/share/cswap.",
-    arg_required_else_help = true,
-    // clap 4 can't group subcommands into sections, so the command list is
-    // hand-written here instead of via {subcommands}. Keep these one-liners
-    // in sync with each variant's doc comment (what `cswap help <cmd>` shows).
-    help_template = "\
-{about-with-newline}
-{usage-heading} {usage}
-
-Setup:
-  shell-init  Print shell integration (bash|zsh) — eval it from your rc file
-  login       Create a profile by logging into it: cswap login <email>
-  upgrade     Self-update from GitHub Releases
-
-Profiles:
-  list        Table of the default and every profile: status, account, usage
-  alias       Manage aliases: list, create, remove
-  default     Show who the live ~/.claude is (read-only)
-  remove      Forget a profile (menu when no argument; always confirms)
-
-Session:
-  activate    Set the profile for THIS terminal (menu when no argument)
-  run         Run claude as a profile: cswap run [PROFILE] [CLAUDE_ARGS]...
-
-Limits:
-  usage       Detailed per-profile usage with bars and reset times
-  watch       Live usage dashboard (redraws every INTERVAL seconds)
-
-Maintenance:
-  doctor      Check profiles for silent breakage (--repair to fix)
-  migrate     Rewrite a pre-0.6.1 config.toml
-
-Options:
-{options}
-{after-help}",
-    after_help = "\
-QUICK START:
-  1. eval \"$(cswap shell-init zsh)\"   # add to ~/.zshrc (or bash), once
-  2. cswap login you@corp.com --alias work   # log into a profile
-  3. cswap login you@gmail.com --alias home  # ...and another
-
-  cswap activate work       use that profile in THIS terminal
-  cswap activate default    back to the live ~/.claude
-  cswap list                see everything at a glance
-  cswap usage               see the full picture
-
-`default` is your existing ~/.claude, untouched. cswap never writes there, so
-changing it means logging in with claude itself.
-
-Run `cswap help <command>` for details and examples of each command."
-)]
+#[command(name = "cswap", version, disable_help_subcommand = true)]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    command: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum HerdrCmd {
+    /// Every installed agent with its accounts, as JSON
+    Menu,
+    /// The account the agent in a terminal runs on
+    Info {
+        /// The terminal: `t7` or its name
+        terminal: String,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move the agent in a terminal to another account, same conversation
+    Switch {
+        /// The terminal: `t7` or its name
+        terminal: String,
+        /// The account to move to: a name, an alias or `root`
+        account: String,
+        /// Start a new conversation when the running one cannot be told
+        #[arg(long)]
+        fresh: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    // ---------------------------------------------------------------- Setup
-    /// Print shell integration (bash|zsh) — eval it from your rc file
-    #[command(
-        name = "shell-init",
-        long_about = "Print the shell integration snippet.\n\n\
-Defines two functions:\n  \
-cswap()   intercepts `cswap activate` so the export lands in this shell\n  \
-claude()  routes bare `claude` through cswap (active/default account)\n\n\
-`command claude` always bypasses both.\n\n\
-SETUP (once, in ~/.zshrc or ~/.bashrc):\n  eval \"$(cswap shell-init zsh)\""
-    )]
-    ShellInit { shell: String },
+    /// Open the dashboard (what a bare `cswap` does)
+    #[command(visible_alias = "ui")]
+    Dashboard,
 
-    /// Create a profile by logging into it: cswap login <email>
+    /// Pick an agent and an account, then run it
     #[command(
-        long_about = "Build the profile directory, then launch claude inside it with\n\
-no credentials so claude walks its own login. Exit claude (/exit) and cswap\n\
-checks that the account which arrived is the one you asked for.\n\n\
-You name the account up front because it keys the directory, and that\n\
-directory has to exist and be linked BEFORE claude runs. One profile per\n\
-account: `default` may hold the same account, nothing else may.\n\n\
-Every profile logs in for itself. cswap never copies credentials out of\n\
-~/.claude or between profiles — one account with two copies of its\n\
-refresh-token family means whichever side ran last leaves the other holding\n\
-a dead ancestor.\n\n\
-Naming an existing profile (by email or alias) logs it in again, after a\n\
-confirmation: its current tokens are discarded first, or claude would see a\n\
-live session and never offer the login.\n\n\
-EXAMPLES:\n  cswap login you@corp.com                # new profile\n  \
-cswap login you@corp.com --alias work   # ...and label it immediately\n  \
-cswap login work                        # re-login an existing profile"
+        after_help = "Examples:\n  cswap start                 ask for the agent, then the account\n  cswap start --default       ask for the agent, start on its default account\n  cswap start codex           ask only for the account\n  cswap start -- --resume     pass --resume to the agent"
     )]
+    Start {
+        /// Only ask for the agent; start it on its default account
+        #[arg(long)]
+        default: bool,
+        /// The agent, to skip the first question: claude, codex, agy or grok
+        agent: Option<String>,
+        /// Arguments for the agent, after `--`
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+
+    /// Agents in herdr terminals: which account, and switch it
+    #[command(
+        after_help = "Examples:\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. It refuses in the middle of a turn."
+    )]
+    Herdr {
+        #[command(subcommand)]
+        what: HerdrCmd,
+    },
+
+    /// Which agents are running, and on which account
+    Ps {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Every account and its state
+    #[command(visible_alias = "ls")]
+    List {
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Limits, pace and reset times
+    Usage {
+        /// One account; all of them when left out
+        account: Option<String>,
+        /// Fetch from the vendor first
+        #[arg(short, long)]
+        refresh: bool,
+    },
+
+    /// Spare resets and what resets when (view only)
+    Resets,
+
+    /// Which account to use next, and why
+    Suggest {
+        /// One agent; all of them when left out
+        agent: Option<String>,
+    },
+
+    /// Add an account and sign in
+    #[command(
+        after_help = "Examples:\n  cswap add claude work       a Claude Code account called work\n  cswap add codex             asks for the name\n\nThe agent's own sign-in runs next. The account is kept only if it completes,\nand only if no other account already holds that login."
+    )]
+    Add {
+        /// claude, codex, agy or grok
+        agent: String,
+        /// The account's name, used as --cswap=<name>
+        name: Option<String>,
+    },
+
+    /// Sign in to an account again
     Login {
-        /// Account email, or an existing profile (asked for when omitted)
-        key: Option<String>,
-        /// Alias to attach to the profile
-        #[arg(long)]
-        alias: Option<String>,
-        /// Skip the confirmation when re-logging in an existing profile
-        #[arg(long)]
+        /// An alias, a key such as claude-2, or an email
+        account: String,
+    },
+
+    /// Delete an account's login
+    #[command(visible_alias = "rm")]
+    Remove {
+        /// An alias, a key such as claude-2, or an email
+        account: String,
+        /// Do not ask
+        #[arg(short, long)]
         yes: bool,
     },
 
-    /// Self-update from GitHub Releases
-    #[command(
-        long_about = "Download the latest release for this platform, verify its\n\
-SHA-256 checksum, and atomically replace this binary. `cswap list` also\n\
-nudges (at most once per 24h) when a newer version exists; set\n\
-CSWAP_NO_UPDATE_CHECK=1 to disable that check."
-    )]
-    Upgrade,
-
-    // ------------------------------------------------------------- Accounts
-    /// Table of the default and every profile: status, account, usage
-    #[command(
-        long_about = "The default on its own line, then one borderless row per\n\
-profile — which is active, the account behind it, its aliases, and the 5h/7d\n\
-gates. Percentages are colored <70 green, <90 yellow, else red.\n\n\
-For bars, per-model windows and reset times, use `cswap usage`.\n\n\
-EXAMPLES:\n  cswap list             # with usage (one API call per profile)\n  \
-cswap list --quick     # instant, no network"
-    )]
-    List {
-        /// Skip the usage API calls
-        #[arg(short, long)]
-        quick: bool,
+    /// Give an account another name
+    Rename {
+        /// A name, a key such as claude-2, or an email
+        account: String,
+        /// The new name
+        name: String,
     },
 
-    /// Manage aliases: list, create, remove (interactive when args omitted)
+    /// Show or set the extra names an account answers to
     #[command(
-        long_about = "A profile IS its account, keyed by email; an alias is a shorter\n\
-Aliases resolve everywhere a profile is referenced. `default` is a reserved\n\
-word, not a profile, so it has no aliases.\n\n\
-EXAMPLES:\n  cswap alias list\n  cswap alias create            # pick profile, type alias\n  \
-cswap alias create work w     # scripted\n  cswap alias remove            # pick from a menu\n  \
-cswap alias remove w"
+        after_help = "Examples:\n  cswap alias work              show them\n  cswap alias work w office     set them\n  cswap alias work --clear      remove them"
     )]
     Alias {
-        #[command(subcommand)]
-        action: AliasCmd,
+        /// A name, a key such as claude-2, or an email
+        account: String,
+        /// The aliases; they replace the ones it has
+        aliases: Vec<String>,
+        /// Remove every alias
+        #[arg(long, conflicts_with = "aliases")]
+        clear: bool,
     },
 
-    /// Show who the live ~/.claude is (read-only)
+    /// Show or set an agent's default: where `cswap <agent>` starts
     #[command(
-        long_about = "Report which account is logged into the live ~/.claude, and\n\
-which profiles happen to hold that same account independently.\n\n\
-`default` is its own entity. It is not a pointer at a profile, no profile is\n\
-a pointer at it, and cswap only ever READS it. There is nothing to swap here:\n\
-to change who ~/.claude is, log in with claude itself.\n\n\
-EXAMPLES:\n  cswap default             # who is the live ~/.claude?\n  \
-cswap activate work       # use a profile in this terminal instead"
+        alias = "default",
+        after_help = "Examples:\n  cswap use claude            show it\n  cswap use claude work       always start on work\n  cswap use claude auto       let cswap pick at every launch\n  cswap use claude root       the agent's own login"
     )]
-    Default {
-        /// Accepted only to explain that swapping is gone
-        #[arg(hide = true)]
-        key: Option<String>,
+    Use {
+        /// claude, codex, agy or grok
+        agent: String,
+        /// An account, `root` or `auto`
+        account: Option<String>,
     },
 
-    /// Forget a profile (menu when no argument; always confirms)
-    #[command(
-        long_about = "Remove a profile: its config entry and its directory — after a\n\
-confirmation (skip with --yes). That directory holds the profile's only\n\
-credentials, so you would have to log in again.\n\n\
-The directory is mostly symlinks into ~/.claude and they are removed without\n\
-being followed, so your real Claude data (history, settings, plugins) is\n\
-never touched. `default` cannot be removed: cswap owns no state for it."
-    )]
-    Remove {
-        /// Account or alias (interactive menu when omitted)
-        key: Option<String>,
-        /// Skip the confirmation prompt
+    /// The agents' own logins
+    #[command(alias = "defaults")]
+    Root {
+        /// Machine-readable output
         #[arg(long)]
-        yes: bool,
+        json: bool,
     },
 
-    // -------------------------------------------------------------- Session
-    /// Set the profile for THIS terminal (menu when no argument)
-    #[command(
-        long_about = "Set the active profile for THIS terminal only. With no\n\
-argument, an interactive menu lists `default` and every profile. Requires the\n\
-shell integration (eval \"$(cswap shell-init zsh)\"). Other terminals are\n\
-unaffected; new terminals start on the default.\n\n\
-EXAMPLES:\n  cswap activate            # interactive picker\n  \
-cswap activate you@corp.com  # by account\n  cswap activate w          # by alias\n  \
-cswap activate default    # back to the live ~/.claude"
-    )]
-    Activate {
-        /// Account, alias, or `default` (menu when omitted)
-        key: Option<String>,
-        /// Emit the export line for the shell wrapper to eval
-        #[arg(long, hide = true)]
-        print: bool,
+    /// Fetch usage now
+    Refresh {
+        /// One account; every signed-in one when left out
+        account: Option<String>,
     },
 
-    /// Run claude as a profile: cswap run [NAME] [CLAUDE_ARGS]...
-    #[command(
-        long_about = "Run claude once as a specific profile, ignoring what this\n\
-terminal activated. The first argument is treated as a target only when it\n\
-matches an account, an alias, or `default`; everything else passes to\n\
-claude verbatim. With no arguments on a terminal, a picker asks.\n\
-cswap exec()s the real claude binary — signals and exit codes are native.\n\n\
-`default` runs against ~/.claude itself, with no CLAUDE_CONFIG_DIR, so cswap\n\
-never touches its tokens. A profile always runs from its own directory — even\n\
-when it holds the same account as the default.\n\n\
-EXAMPLES:\n  cswap run                      # interactive picker\n  \
-cswap run work -r              # resume picker, work pays\n  \
-cswap run default              # explicitly the live ~/.claude\n  \
-cswap run -- --model opus      # active profile, flags pass through"
-    )]
-    Run {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    // --------------------------------------------------------------- Limits
-    /// Detailed per-profile usage with bars and reset times
-    #[command(
-        long_about = "A card for the default and one per profile: every window (5h,\n\
-7d, per-model weekly) with a bar, percentage and reset countdown. Same source\n\
-as `cswap list`, which shows only the 5h/7d numbers on one line.\n\n\
-EXAMPLES:\n  cswap usage          # everything\n  \
-cswap usage work     # just one profile\n  \
-cswap usage default  # just the live ~/.claude"
-    )]
-    Usage {
-        /// Account, alias, or `default` (everything when omitted)
-        key: Option<String>,
-    },
-
-    /// Live usage dashboard (redraws every INTERVAL seconds)
-    #[command(
-        long_about = "`cswap usage`, redrawn on an interval (default 300s, minimum\n\
-60 — the usage API budgets ~20-30 requests/hour per account token, so don't\n\
-go much lower).\n\n\
-KEYS:\n  r   refresh now\n  q / Esc / Ctrl-C   quit\n\n\
-EXAMPLES:\n  cswap watch\n  cswap watch -i 120"
-    )]
-    Watch {
-        #[arg(short, long, default_value_t = 300)]
-        interval: u64,
-    },
-
-    // ------------------------------------------------------------ Maintenance
-    /// Check every profile for the failures that are otherwise silent
-    #[command(
-        long_about = "Report what is wrong with each profile, and fix what is safely\n\
-fixable.\n\n\
-The failure that matters: a REAL file or directory sitting where a share link\n\
-belongs. Claude writes into it and the data is invisible to ~/.claude and to\n\
-every other profile — no error, nothing in the logs, until a transcript you\n\
-expected is not there. cswap refuses to clobber such a file (the copy inside\n\
-may be the only one), so reporting it is the whole job.\n\n\
---repair moves the shadowing entry into ~/.local/share/cswap/shadowed/ and\n\
-restores the link. It never merges into ~/.claude and never deletes anything;\n\
-it prints where it parked the files so you can merge them yourself. It refuses\n\
-to touch a profile that has a claude session running.\n\n\
-EXAMPLES:\n  cswap doctor\n  cswap doctor --repair"
-    )]
-    Doctor {
-        /// Park shadowing files in cswap's own space and restore the links
+    /// Bring an account's shared links up to date
+    Sync {
+        /// One account; all of them when left out
+        account: Option<String>,
+        /// Move files that hide a link to ~/.cswap/parked/ and relink
         #[arg(long)]
         repair: bool,
+        /// Only report; change nothing
+        #[arg(long, conflicts_with = "repair")]
+        check: bool,
     },
 
-    /// Rewrite a pre-0.6.1 config.toml to the current format
-    #[command(long_about = "Convert an old config in place: `[[account]]` becomes\n\
-`[[profile]]`, a 0.6.0 `name` folds into the alias list, and the old\n\
-accounts/ credential store moves aside (nothing is copied out of it — two\n\
-copies of one refresh-token family is what kills an account).\n\n\
-Nothing migrates automatically. Until 0.6.2 this ran before the arguments were\n\
-parsed, so `cswap --version` rewrote the config and renamed directories,\n\
-including under live claude sessions.\n\n\
-EXAMPLES:\n  cswap migrate\n  cswap migrate --yes")]
-    Migrate {
-        /// Skip the confirmation
+    /// Check for problems
+    Doctor,
+
+    /// Move the profiles of cswap 0.6 into ~/.cswap
+    Migrate,
+
+    /// Print shell integration for bash, zsh, fish or powershell
+    #[command(
+        after_help = "Add one line to your shell's rc file:\n  bash, zsh    eval \"$(cswap shell-init zsh)\"\n  fish         cswap shell-init fish | source\n  powershell   Invoke-Expression (& cswap shell-init powershell | Out-String)\n\nAfter that, `claude`, `codex`, `agy` and `grok` run through cswap."
+    )]
+    ShellInit {
+        /// bash, zsh, fish or powershell
+        shell: String,
+    },
+
+    /// Install the latest release
+    #[command(visible_alias = "upgrade")]
+    Update {
+        /// Only say whether a newer release exists
         #[arg(long)]
-        yes: bool,
-    },
-
-    /// Internal: what the claude() shell wrapper calls
-    #[command(name = "_claude", hide = true)]
-    ClaudeShim {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        check: bool,
     },
 }
 
-#[derive(Subcommand)]
-enum AliasCmd {
-    /// List every profile and its aliases
-    List,
-    /// Add an alias: cswap alias create [PROFILE] [ALIAS]
-    Create {
-        profile: Option<String>,
-        alias: Option<String>,
-    },
-    /// Remove an alias: cswap alias remove [ALIAS]
-    Remove { alias: Option<String> },
-}
+/// The top-level help, written by hand so the commands sit in groups.
+fn help(p: &Paint) -> String {
+    const W: usize = 26;
+    let head = |s: &str| format!("{}\n", p.bold(s));
+    // One row: the command padded to a fixed column, then what it does.
+    let row = |cmd: &str, what: &str| format!("  {}{what}\n", p.info(&text::fit(cmd, W)));
+    let mut out = String::new();
 
-fn main() {
-    // Parse FIRST. Nothing mutates state before clap has seen the arguments —
-    // `cswap --version` used to run the config migration, which rewrote
-    // config.toml and renamed profile directories as a side effect of asking
-    // for a version number. Migration is now `cswap migrate`, and nothing else.
-    let cli = Cli::parse();
-    if !matches!(cli.cmd, Cmd::Migrate { .. }) && config::needs_migration() {
-        eprintln!("cswap: config.toml uses a pre-0.6.1 shape. Run `cswap migrate` to update it.");
+    out.push_str(&format!(
+        "{} {}\nAccounts, usage and resets for your coding agents.\n\n",
+        p.bold("cswap"),
+        env!("CARGO_PKG_VERSION")
+    ));
+
+    out.push_str(&head("USAGE"));
+    out.push_str(&row("cswap", "open the dashboard"));
+    out.push_str(&row(
+        "cswap <agent> [args…]",
+        "run an agent on the account it starts on",
+    ));
+    out.push_str(&row(
+        "cswap start [--default]",
+        "pick an agent and an account, then run it",
+    ));
+    out.push_str(&row(
+        "cswap <command> [options]",
+        "one of the commands below",
+    ));
+
+    out.push('\n');
+    out.push_str(&head("AGENTS"));
+    for a in Harness::ALL {
+        let note = if a.spec().experimental {
+            "  (experimental)"
+        } else {
+            ""
+        };
+        out.push_str(&row(
+            a.spec().bins[0],
+            &format!("{}{}", a.name(), p.dim(note)),
+        ));
     }
-    let result = match cli.cmd {
-        Cmd::Login { key, alias, yes } => cmds::login::run(key, alias, yes),
-        Cmd::Activate { key, print } => cmds::activate::run(key, print),
-        Cmd::List { quick } => cmds::list::run(quick),
-        Cmd::Default { key } => cmds::default_cmd::run(key),
-        Cmd::Run { args } => cmds::run::run(args),
-        Cmd::Usage { key } => cmds::usage::run(key),
-        Cmd::Watch { interval } => cmds::watch::run(interval),
-        Cmd::ShellInit { shell } => cmds::shell_init::run(&shell),
-        Cmd::Upgrade => cmds::upgrade::run(),
-        Cmd::Alias { action } => match action {
-            AliasCmd::List => cmds::alias::list(),
-            AliasCmd::Create { profile, alias } => cmds::alias::create(profile, alias),
-            AliasCmd::Remove { alias } => cmds::alias::remove(alias),
-        },
-        Cmd::Remove { key, yes } => cmds::remove::run(key, yes),
-        Cmd::Doctor { repair } => cmds::doctor::run(repair),
-        Cmd::Migrate { yes } => cmds::migrate::run(yes),
-        Cmd::ClaudeShim { args } => cmds::run::shim(args),
+    out.push_str("\n  Everything after the agent's name goes to the agent untouched, except:\n");
+    for (flag, what) in wrap::FLAGS {
+        out.push_str(&row(&format!("  {flag}"), what));
+    }
+
+    let groups: [(&str, &[(&str, &str)]); 4] = [
+        (
+            "LOOK",
+            &[
+                ("list", "every account and its state"),
+                ("root", "the agents' own logins"),
+                ("ps", "which agents are running, on which account"),
+                ("usage [account]", "weekly limits and when they reset"),
+                ("resets", "spare resets and what resets when (view only)"),
+                ("suggest [agent]", "which account to use next, and why"),
+            ],
+        ),
+        (
+            "ACCOUNTS",
+            &[
+                ("add <agent> <name>", "add an account and sign in"),
+                ("login <account>", "sign in again"),
+                ("rename <account> <name>", "give an account another name"),
+                (
+                    "alias <account> [names…]",
+                    "extra names an account answers to",
+                ),
+                (
+                    "use <agent> [account]",
+                    "the agent's default: where it starts",
+                ),
+                ("remove <account>", "delete an account's login"),
+            ],
+        ),
+        (
+            "UPKEEP",
+            &[
+                ("refresh [account]", "fetch usage now"),
+                (
+                    "sync [account]",
+                    "bring shared links up to date (--check, --repair)",
+                ),
+                ("doctor", "check for problems"),
+                ("migrate", "move the profiles of cswap 0.6 into ~/.cswap"),
+            ],
+        ),
+        (
+            "SETUP",
+            &[
+                (
+                    "shell-init <shell>",
+                    "print shell integration: bash, zsh, fish, powershell",
+                ),
+                ("update", "install the latest release (--check only looks)"),
+                (
+                    "herdr switch <t> <acct>",
+                    "move a herdr terminal's agent to another account",
+                ),
+            ],
+        ),
+    ];
+    for (title, rows) in groups {
+        out.push('\n');
+        out.push_str(&head(title));
+        for (cmd, what) in rows {
+            out.push_str(&row(cmd, what));
+        }
+    }
+
+    out.push('\n');
+    out.push_str(&head("ACCOUNT NAMES"));
+    out.push_str(&format!(
+        "  Every account has a name ({}). It also answers to its aliases, its key\n  ({}), its number within the agent ({}) and its email. {} is the\n  agent's own login.\n",
+        p.info("work"),
+        p.info("claude-2"),
+        p.info("2"),
+        p.info("root")
+    ));
+
+    out.push('\n');
+    out.push_str(&head("EXAMPLES"));
+    out.push_str(&format!(
+        "  claude --cswap=work                     {}\n",
+        p.dim("with shell integration")
+    ));
+    out.push_str("  cswap codex --cswap=auto exec \"fix it\"\n");
+    out.push_str("  cswap add claude work\n");
+    out.push_str("  cswap start\n");
+
+    out.push('\n');
+    out.push_str(&format!(
+        "  {}\n",
+        p.dim("cswap <command> -h    more on one command")
+    ));
+    out.push_str(&format!(
+        "  {}\n",
+        p.dim("files: ~/.cswap  ·  https://github.com/sidhanthapoddar99/claude-swap-rs")
+    ));
+    out
+}
+
+fn dashboard() -> Result<()> {
+    // The check runs beside the dashboard and is read from its cache there.
+    let settings = store::Settings::load()?;
+    if update::enabled(&settings) {
+        std::thread::spawn(update::check_if_due);
+    }
+    match tui::run()? {
+        Some(tui::app::Exit::Launch { key }) => {
+            let (h, _) =
+                store::parse_key(&key).ok_or_else(|| anyhow::anyhow!("bad account key {key}"))?;
+            wrap::run(h, vec![format!("--cswap={key}")])
+        }
+        None => {
+            if let Some(v) = update::known_newer().filter(|_| update::enabled(&settings)) {
+                eprintln!(
+                    "{}",
+                    Paint::stderr()
+                        .dim(&format!("cswap {v} is out. Install it with: cswap update"))
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run() -> Result<ExitCode> {
+    let args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    // An agent's name first: the rest belongs to the agent, word for word.
+    if let Some(h) = args.first().and_then(|a| Harness::from_id(a)) {
+        wrap::run(h, args[1..].to_vec())?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.is_empty() {
+        dashboard()?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let command = Cli::command().override_help(help(&Paint::stdout()));
+    let cli = Cli::from_arg_matches(&command.get_matches())?;
+    let Some(cmd) = cli.command else {
+        dashboard()?;
+        return Ok(ExitCode::SUCCESS);
     };
-    if let Err(e) = result {
-        eprintln!("cswap: {e:#}");
-        std::process::exit(1);
+    // Commands whose output is read by a program, or that start an agent,
+    // stay silent about updates.
+    let quiet = matches!(
+        cmd,
+        Cmd::ShellInit { .. }
+            | Cmd::Start { .. }
+            | Cmd::Dashboard
+            | Cmd::Update { .. }
+            | Cmd::Ps { json: true }
+            | Cmd::List { json: true }
+            | Cmd::Root { json: true }
+            | Cmd::Herdr { .. }
+    );
+    let mut ok = true;
+    match cmd {
+        Cmd::Dashboard => dashboard()?,
+        Cmd::Start {
+            default,
+            agent,
+            args,
+        } => cli::start(default, agent.as_deref(), args)?,
+        Cmd::Ps { json } => cli::ps(json)?,
+        Cmd::Herdr { what } => match what {
+            HerdrCmd::Menu => herdr::menu_cmd()?,
+            HerdrCmd::Info { terminal, json } => herdr::info_cmd(&terminal, json)?,
+            HerdrCmd::Switch {
+                terminal,
+                account,
+                fresh,
+                json,
+            } => herdr::switch_cmd(&terminal, &account, fresh, json)?,
+        },
+        Cmd::List { json } => cli::list(json)?,
+        Cmd::Usage { account, refresh } => cli::usage(account.as_deref(), refresh)?,
+        Cmd::Resets => cli::resets()?,
+        Cmd::Suggest { agent } => cli::suggest_cmd(agent.as_deref())?,
+        Cmd::Add { agent, name } => cli::add(&agent, name.as_deref())?,
+        Cmd::Login { account } => cli::login(&account)?,
+        Cmd::Remove { account, yes } => cli::remove(&account, yes)?,
+        Cmd::Rename { account, name } => cli::rename(&account, &name)?,
+        Cmd::Alias {
+            account,
+            aliases,
+            clear,
+        } => cli::alias(&account, &aliases, clear)?,
+        Cmd::Use { agent, account } => cli::use_cmd(&agent, account.as_deref())?,
+        Cmd::Root { json } => cli::root(json)?,
+        Cmd::Refresh { account } => cli::refresh_cmd(account.as_deref())?,
+        Cmd::Sync {
+            account,
+            repair,
+            check,
+        } => cli::sync_cmd(account.as_deref(), repair, check)?,
+        Cmd::Doctor => ok = cli::doctor()?,
+        Cmd::Migrate => migrate::run()?,
+        Cmd::ShellInit { shell } => cli::shell_init(&shell)?,
+        Cmd::Update { check } => update::run(check)?,
+    }
+    if !quiet {
+        if let Ok(settings) = store::Settings::load() {
+            update::nudge(&settings);
+        }
+    }
+    Ok(if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("{} {e:#}", Paint::stderr().bad("cswap:"));
+            ExitCode::FAILURE
+        }
     }
 }

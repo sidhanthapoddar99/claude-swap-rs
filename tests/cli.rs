@@ -1,1208 +1,924 @@
-//! End-to-end tests against the real binary, inside a fabricated $HOME.
+//! End-to-end tests of the real binary, inside a fabricated `$HOME`.
 //!
-//! Nothing here touches the developer's actual ~/.claude: every invocation
-//! gets HOME/XDG_* pointed at a TempDir, and credentials carry a far-future
-//! expiresAt so no code path ever reaches the network. All runs are
-//! non-interactive (no tty), so interactive pickers are never entered —
-//! commands take the argument/fallback paths.
-//!
-//! The model under test: one profile per account, keyed by email; `default` is
-//! the live ~/.claude, which cswap only reads and which is the one thing
-//! allowed to hold the same account as a profile.
+//! Nothing here touches the developer's own logins: every run gets `HOME` and
+//! `CSWAP_HOME` pointed at a temp dir, the agents are shell scripts that log
+//! what they were started with, and `CSWAP_OFFLINE` keeps every code path off
+//! the network. No run has a terminal, so no picker is ever entered.
+#![cfg(unix)]
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_cswap");
 
-/// Who is logged into the fabricated live ~/.claude.
-const LIVE_EMAIL: &str = "live@x.com";
-const LIVE_TOKEN: &str = "tok-live";
+/// A stand-in for `claude`, `codex`, `agy` and `grok`. It logs its arguments
+/// one per line, so a test can tell `a b` from `a` `b`, and its sign-in
+/// commands write a login the way the real ones do.
+const FAKE_AGENT: &str = r#"#!/bin/sh
+name=$(basename "$0")
+{
+  echo "run: $name"
+  for a in "$@"; do echo "arg: $a"; done
+  echo "CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}"
+  echo "CODEX_HOME=${CODEX_HOME:-}"
+  echo "CSWAP_ACCOUNT=${CSWAP_ACCOUNT:-}"
+} >> "$CSWAP_FAKE_LOG"
+case "$name $*" in
+  "claude auth login")
+    printf '%s' '{"claudeAiOauth":{"accessToken":"tok-new","refreshToken":"r","expiresAt":4102444800000}}' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+    printf '{"oauthAccount":{"emailAddress":"%s"}}' "${CSWAP_FAKE_EMAIL:-new@example.com}" > "$CLAUDE_CONFIG_DIR/.claude.json" ;;
+  "codex login")
+    if [ -n "${CSWAP_FAKE_FAIL:-}" ]; then echo "login cancelled"; exit 1; fi
+    printf '{"tokens":{"access_token":"a.b.c","account_id":"%s"}}' "${CSWAP_FAKE_ACCT:-acct-new}" > "$CODEX_HOME/auth.json" ;;
+  *) echo "$name ran" ;;
+esac
+exit "${CSWAP_FAKE_EXIT:-0}"
+"#;
 
 struct Env {
     home: TempDir,
 }
 
 impl Env {
-    /// Fake $HOME with a live-looking ~/.claude + ~/.claude.json.
+    /// A home where Claude Code and Codex are installed and signed in, with a
+    /// few shared files in each agent's own config dir.
     fn new() -> Env {
         let home = TempDir::new().unwrap();
         let h = home.path();
+
+        let bin = h.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        for name in ["claude", "codex"] {
+            let path = bin.join(name);
+            fs::write(&path, FAKE_AGENT).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::create_dir_all(h.join("proc")).unwrap();
+
         let claude = h.join(".claude");
         fs::create_dir_all(claude.join("projects/proj-a")).unwrap();
-        fs::create_dir_all(claude.join("plugins/repos")).unwrap();
-        fs::create_dir_all(claude.join("agents")).unwrap();
+        fs::create_dir_all(claude.join("skills")).unwrap();
         fs::write(claude.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
         fs::write(claude.join("CLAUDE.md"), "# rules\n").unwrap();
-        fs::write(claude.join("history.jsonl"), "{\"display\":\"hi\"}\n").unwrap();
-        fs::write(claude.join("projects/proj-a/s1.jsonl"), "{}\n").unwrap();
-        // Denylisted names: a version-controlled ~/.claude and its
-        // .claude.json backup snapshots. Neither may ever be linked.
-        fs::create_dir_all(claude.join(".git/refs")).unwrap();
-        fs::create_dir_all(claude.join("backups")).unwrap();
-        fs::write(claude.join("backups/.claude.json.backup.1"), "{}\n").unwrap();
         fs::write(
             claude.join(".credentials.json"),
-            Self::creds(LIVE_TOKEN).to_string(),
+            r#"{"claudeAiOauth":{"accessToken":"tok-own","refreshToken":"r","expiresAt":4102444800000}}"#,
         )
         .unwrap();
         fs::write(
             h.join(".claude.json"),
-            json!({
-                "oauthAccount": {"emailAddress": LIVE_EMAIL, "accountUuid": "u-live"},
-                "theme": "dark",
-                "mcpServers": {"srv": {"command": "x"}},
-                "projects": {"/tmp/repo": {"hasTrustDialogAccepted": true}},
-            })
-            .to_string(),
+            r#"{"oauthAccount":{"emailAddress":"own@example.com"}}"#,
+        )
+        .unwrap();
+
+        let codex = h.join(".codex");
+        fs::create_dir_all(codex.join("sessions")).unwrap();
+        fs::write(codex.join("config.toml"), "model = \"gpt\"\n").unwrap();
+        fs::write(
+            codex.join("auth.json"),
+            r#"{"tokens":{"access_token":"a.b.c","account_id":"acct-own"}}"#,
         )
         .unwrap();
         Env { home }
     }
 
-    fn creds(token: &str) -> Value {
-        json!({"claudeAiOauth": {
-            "accessToken": token,
-            "refreshToken": format!("r-{token}"),
-            // Far future: refresh_if_needed never fires, so never any network.
-            "expiresAt": 9_999_999_999_999i64,
-            "scopes": ["user:inference"],
-        }})
+    fn home(&self) -> &Path {
+        self.home.path()
     }
 
-    fn cswap(&self, args: &[&str]) -> Output {
-        self.cswap_env(args, &[])
+    fn cswap_home(&self) -> PathBuf {
+        self.home().join(".cswap")
     }
 
-    fn cswap_env(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
-        let mut cmd = Command::new(BIN);
-        cmd.args(args)
+    fn log_path(&self) -> PathBuf {
+        self.home().join("agents.log")
+    }
+
+    fn cmd(&self, args: &[&str]) -> Command {
+        let mut c = Command::new(BIN);
+        c.args(args)
             .env_clear()
-            .env("HOME", self.home.path())
-            .env("PATH", std::env::var("PATH").unwrap());
-        for (k, v) in extra {
-            cmd.env(k, v);
+            .env("HOME", self.home())
+            .env("CSWAP_HOME", self.cswap_home())
+            .env("CSWAP_PROC", self.home().join("proc"))
+            .env("CSWAP_OFFLINE", "1")
+            .env("CSWAP_NO_UPDATE_CHECK", "1")
+            .env("CSWAP_FAKE_LOG", self.log_path())
+            .env("SHELL", "/bin/bash")
+            .env_remove("ZDOTDIR")
+            .env_remove("XDG_CONFIG_HOME")
+            .env("NO_COLOR", "1")
+            // Only the fake agents and the system's own tools.
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.home().join("bin").display()),
+            )
+            .stdin(std::process::Stdio::null());
+        c
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.cmd(args).output().unwrap()
+    }
+
+    /// Run and expect success. Returns stdout.
+    fn ok(&self, args: &[&str]) -> String {
+        let out = self.run(args);
+        assert!(
+            out.status.success(),
+            "cswap {args:?} failed\nstdout: {}\nstderr: {}",
+            text(&out.stdout),
+            text(&out.stderr)
+        );
+        text(&out.stdout)
+    }
+
+    /// Run and expect failure. Returns stderr.
+    fn fails(&self, args: &[&str]) -> String {
+        let out = self.run(args);
+        assert!(
+            !out.status.success(),
+            "cswap {args:?} should have failed\nstdout: {}",
+            text(&out.stdout)
+        );
+        text(&out.stderr)
+    }
+
+    /// What the agents logged since the last call, and forget it.
+    fn log(&self) -> String {
+        let text = fs::read_to_string(self.log_path()).unwrap_or_default();
+        let _ = fs::remove_file(self.log_path());
+        text
+    }
+
+    fn account_dir(&self, key: &str) -> PathBuf {
+        self.cswap_home().join("accounts").join(key)
+    }
+
+    /// The accounts cswap holds. The agents' own logins are not among them.
+    fn list(&self) -> Vec<Value> {
+        serde_json::from_str(&self.ok(&["list", "--json"])).unwrap()
+    }
+
+    /// The agents' own logins.
+    fn roots(&self) -> Vec<Value> {
+        serde_json::from_str(&self.ok(&["root", "--json"])).unwrap()
+    }
+
+    fn account(&self, key: &str) -> Value {
+        self.list()
+            .into_iter()
+            .chain(self.roots())
+            .find(|a| a["key"] == key)
+            .unwrap_or_else(|| panic!("no account {key}"))
+    }
+
+    /// Add a Claude Code account that signs in as `email`.
+    fn add_claude(&self, name: &str, email: &str) {
+        let out = self
+            .cmd(&["add", "claude", name])
+            .env("CSWAP_FAKE_EMAIL", email)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+    }
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// The arguments one logged run was started with.
+fn args_of(log: &str) -> Vec<&str> {
+    log.lines()
+        .filter_map(|l| l.strip_prefix("arg: "))
+        .collect()
+}
+
+/// Every path under `dir` with what it is, so two listings can be compared.
+fn tree(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in fs::read_dir(&d).unwrap().flatten() {
+            let path = e.path();
+            let md = fs::symlink_metadata(&path).unwrap();
+            let rel = path.strip_prefix(dir).unwrap().display().to_string();
+            if md.is_dir() {
+                out.push(format!("{rel}/"));
+                todo.push(path);
+            } else {
+                out.push(format!(
+                    "{rel} {}",
+                    fs::read(&path).map(|b| b.len()).unwrap_or(0)
+                ));
+            }
         }
-        cmd.output().unwrap()
     }
-
-    fn data(&self) -> PathBuf {
-        self.home.path().join(".local/share/cswap")
-    }
-
-    fn config_path(&self) -> PathBuf {
-        self.home.path().join(".config/cswap/config.toml")
-    }
-
-    fn config_text(&self) -> String {
-        fs::read_to_string(self.config_path()).unwrap_or_default()
-    }
-
-    fn profile(&self, email: &str) -> PathBuf {
-        self.data().join("profiles").join(email)
-    }
-
-    fn live(&self) -> PathBuf {
-        self.home.path().join(".claude")
-    }
-
-    fn token_of(&self, path: PathBuf) -> String {
-        let v: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        v["claudeAiOauth"]["accessToken"].as_str().unwrap().into()
-    }
-
-    fn live_token(&self) -> String {
-        self.token_of(self.live().join(".credentials.json"))
-    }
-
-    fn profile_token(&self, email: &str) -> String {
-        self.token_of(self.profile(email).join(".credentials.json"))
-    }
-
-    /// A fake `claude` that performs a login inside $CLAUDE_CONFIG_DIR: writes
-    /// credentials, and adds `oauthAccount` to whatever .claude.json cswap
-    /// seeded (preserving the seeded keys, like the real claude does).
-    fn fake_login(&self, email: &str, token: &str) -> PathBuf {
-        self.write_script(
-            &format!("fake-login-{token}.sh"),
-            &format!(
-                r#"#!/bin/sh
-set -e
-CFG="$CLAUDE_CONFIG_DIR"
-cat > "$CFG/.credentials.json" <<'CREDS'
-{creds}
-CREDS
-if [ -s "$CFG/.claude.json" ]; then
-  head -n -1 "$CFG/.claude.json" > "$CFG/.claude.json.tmp"
-  printf ',\n  "oauthAccount": {{"emailAddress": "{email}", "accountUuid": "u-{token}"}}\n}}\n' \
-    >> "$CFG/.claude.json.tmp"
-  mv "$CFG/.claude.json.tmp" "$CFG/.claude.json"
-else
-  printf '{{"oauthAccount": {{"emailAddress": "{email}"}}}}\n' > "$CFG/.claude.json"
-fi
-"#,
-                creds = Self::creds(token),
-            ),
-        )
-    }
-
-    /// A login that also writes into the shared directories, the way a real
-    /// claude session does. Used to prove the share links exist BEFORE claude
-    /// runs, so its writes land in ~/.claude instead of forking the profile.
-    fn fake_login_that_writes_shared(&self, email: &str, token: &str) -> PathBuf {
-        let base = fs::read_to_string(self.fake_login(email, token)).unwrap();
-        self.write_script(
-            "fake-login-shared.sh",
-            &format!(
-                "{base}\nmkdir -p \"$CFG/plugins/newmarket\"\n\
-                 echo probe > \"$CFG/projects/probe.txt\"\n"
-            ),
-        )
-    }
-
-    /// A fake `claude` that prints its CLAUDE_CONFIG_DIR and args, then exits.
-    fn fake_claude(&self) -> PathBuf {
-        self.write_script(
-            "fake-claude.sh",
-            "#!/bin/sh\necho \"CFG=$CLAUDE_CONFIG_DIR\"\necho \"ARGS=$*\"\n\
-             echo \"KEY=${ANTHROPIC_API_KEY:-scrubbed}\"\n",
-        )
-    }
-
-    fn write_script(&self, name: &str, body: &str) -> PathBuf {
-        let path = self.home.path().join(name);
-        fs::write(&path, body).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
-
-    /// `cswap login <key>` driven by a fake claude that logs in as `arrives_as`.
-    fn login_as(&self, key: &str, arrives_as: &str, token: &str) -> Output {
-        let fake = self.fake_login(arrives_as, token);
-        self.cswap_env(
-            &["login", key, "--yes"],
-            &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
-        )
-    }
-
-    /// The ordinary case: log in as the account you asked for.
-    fn login(&self, email: &str, token: &str) -> Output {
-        self.login_as(email, email, token)
-    }
-
-    /// `cswap run` with a fake claude that just reports its config dir.
-    fn run_cmd(&self, args: &[&str], extra: &[(&str, &str)]) -> Output {
-        let fake = self.fake_claude();
-        let mut all = vec![("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())];
-        all.extend_from_slice(extra);
-        self.cswap_env(args, &all)
-    }
+    out.sort();
+    out
 }
 
-fn stdout(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stdout).to_string()
-}
-fn stderr(o: &Output) -> String {
-    String::from_utf8_lossy(&o.stderr).to_string()
-}
-fn assert_ok(o: &Output) {
-    assert!(
-        o.status.success(),
-        "stdout: {}\nstderr: {}",
-        stdout(o),
-        stderr(o)
-    );
-}
-
-fn is_link_to(link: &Path, target: &Path) -> bool {
-    fs::symlink_metadata(link)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
-        && fs::read_link(link).map(|t| t == target).unwrap_or(false)
-}
-
-fn is_symlink(p: &Path) -> bool {
-    fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
-}
-
-// ---------------------------------------------------------------------- login
+// ------------------------------------------------------------------- wrapper
 
 #[test]
-fn login_creates_a_profile_keyed_by_account_with_its_own_identity_files() {
+fn an_agents_arguments_reach_it_untouched() {
     let env = Env::new();
-    let o = env.login("work@x.com", "tok-work");
-    assert_ok(&o);
-    assert!(
-        stdout(&o).contains("Created profile for work@x.com"),
-        "{}",
-        stdout(&o)
-    );
-
-    // Config is email-keyed, with no separate name key.
-    let cfg = env.config_text();
-    assert!(cfg.contains("[[profile]]"), "{cfg}");
-    assert!(cfg.contains("email = \"work@x.com\""), "{cfg}");
-    assert!(!cfg.contains("name ="), "{cfg}");
-    assert!(!cfg.contains("[[account]]"), "{cfg}");
-
-    // The directory is named for the account.
-    let profile = env.profile("work@x.com");
-    assert!(profile.is_dir(), "profiles/work@x.com must exist");
-
-    // Identity: real files, private perms — claude's umask does not decide.
-    use std::os::unix::fs::PermissionsExt;
-    for f in [".credentials.json", ".claude.json"] {
-        let p = profile.join(f);
-        let md = fs::symlink_metadata(&p).unwrap();
-        assert!(md.file_type().is_file(), "{f} must be a real file");
-        assert_eq!(md.permissions().mode() & 0o777, 0o600, "{f} must be 0600");
-    }
-
-    // Seeded .claude.json survived the login: onboarding skip + carried keys.
-    let cj: Value =
-        serde_json::from_str(&fs::read_to_string(profile.join(".claude.json")).unwrap()).unwrap();
-    assert_eq!(cj["hasCompletedOnboarding"], json!(true));
-    assert_eq!(cj["theme"], json!("dark"));
-    assert!(cj["mcpServers"]["srv"].is_object(), "mcp carried over");
+    let out = env.ok(&[
+        "claude",
+        "-p",
+        "two words",
+        "--model",
+        "opus",
+        "--help",
+        "-h",
+        "--version",
+        "--",
+        "--cswapish",
+        "",
+    ]);
+    assert!(out.contains("claude ran"), "{out}");
+    let log = env.log();
     assert_eq!(
-        cj["projects"]["/tmp/repo"]["hasTrustDialogAccepted"],
-        json!(true)
+        args_of(&log),
+        [
+            "-p",
+            "two words",
+            "--model",
+            "opus",
+            "--help",
+            "-h",
+            "--version",
+            "--",
+            "--cswapish",
+            ""
+        ],
+        "{log}"
     );
-    // The login itself recorded the identity — cswap never wrote one in.
-    assert_eq!(cj["oauthAccount"]["emailAddress"], json!("work@x.com"));
+    // The agent's own login: nothing is redirected.
+    assert!(log.contains("CLAUDE_CONFIG_DIR=\n"), "{log}");
+    assert!(log.contains("CSWAP_ACCOUNT=claude-0\n"), "{log}");
+}
 
-    // Everything else: symlinks into ~/.claude (share-all-except-denylist).
-    let src = env.live();
-    for item in [
-        "settings.json",
-        "CLAUDE.md",
-        "projects",
-        "history.jsonl",
-        "plugins",
-        "agents",
+#[test]
+fn the_cswap_flag_picks_the_account_and_is_removed() {
+    let env = Env::new();
+    env.ok(&["add", "claude", "work"]);
+    env.log();
+    let dir = env.account_dir("claude-1").join("config_dir");
+
+    for selector in [
+        "--cswap=work",
+        "--cswap=1",
+        "--cswap=claude-1",
+        "--cswap=new@example.com",
     ] {
+        env.ok(&["claude", "--resume", selector, "fix the bug"]);
+        let log = env.log();
+        assert_eq!(
+            args_of(&log),
+            ["--resume", "fix the bug"],
+            "{selector}: {log}"
+        );
         assert!(
-            is_link_to(&profile.join(item), &src.join(item)),
-            "{item} should be a symlink into ~/.claude"
+            log.contains(&format!("CLAUDE_CONFIG_DIR={}\n", dir.display())),
+            "{selector}: {log}"
+        );
+        assert!(
+            log.contains("CSWAP_ACCOUNT=claude-1\n"),
+            "{selector}: {log}"
         );
     }
-    // Denylist: never linked, however tempting the scan makes it look.
-    for item in [".credentials.json", "backups", ".git"] {
-        assert!(
-            !is_symlink(&profile.join(item)),
-            "{item} is denylisted and must never be a symlink into ~/.claude"
-        );
+
+    // The agent's own login is asked for as `root`. `default` was its name
+    // in earlier builds and still works.
+    for selector in ["root", "default"] {
+        env.ok(&["claude", &format!("--cswap={selector}")]);
+        assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"), "{selector}");
     }
 }
 
-/// The bug this design was built around: claude used to be launched in a bare
-/// staging directory, so it created real `plugins/`, `projects/` and
-/// `sessions/` that then shadowed the share links forever.
 #[test]
-fn login_links_the_directory_before_claude_writes_to_it() {
+fn an_unknown_account_starts_nothing() {
     let env = Env::new();
-    let fake = env.fake_login_that_writes_shared("work@x.com", "tok-work");
-    assert_ok(&env.cswap_env(
-        &["login", "work@x.com"],
-        &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())],
-    ));
-
-    let profile = env.profile("work@x.com");
-    for item in ["plugins", "projects"] {
-        assert!(
-            is_link_to(&profile.join(item), &env.live().join(item)),
-            "{item} must still be a share link after the login session"
-        );
-    }
-    // And the login's writes landed in the shared directory, not a fork.
-    assert!(
-        env.live().join("plugins/newmarket").is_dir(),
-        "a plugin installed during login belongs to ~/.claude"
-    );
-    assert!(
-        env.live().join("projects/probe.txt").is_file(),
-        "the login session's transcript belongs to ~/.claude"
-    );
-    assert!(
-        !env.data().join("staging-login").exists(),
-        "there is no staging directory in this model"
-    );
+    let err = env.fails(&["claude", "--cswap=nope", "-p", "hi"]);
+    assert!(err.contains("nope"), "{err}");
+    assert_eq!(env.log(), "", "the agent must not have been started");
 }
 
 #[test]
-fn login_never_reads_writes_or_copies_the_live_login() {
+fn the_agents_exit_code_is_cswaps_exit_code() {
     let env = Env::new();
-    let live_before = fs::read_to_string(env.home.path().join(".claude.json")).unwrap();
-    assert_ok(&env.login("work@x.com", "tok-work"));
-
-    assert_eq!(env.live_token(), LIVE_TOKEN);
-    assert_eq!(
-        fs::read_to_string(env.home.path().join(".claude.json")).unwrap(),
-        live_before,
-        "cswap must not write ~/.claude.json"
-    );
-    assert_eq!(env.profile_token("work@x.com"), "tok-work");
-    assert!(
-        !env.data().join("accounts").exists(),
-        "a second credential copy is exactly what this model removes"
-    );
-}
-
-/// One profile per account. The only thing allowed to double up is `default`.
-#[test]
-fn a_second_profile_for_the_same_account_is_refused() {
-    let env = Env::new();
-    assert_ok(&env.login("same@x.com", "tok-a"));
-    assert_ok(&env.cswap(&["alias", "create", "same@x.com", "work"]));
-
-    // Naming the same account again is a RE-LOGIN of the existing profile,
-    // never a second profile.
-    let o = env.login("same@x.com", "tok-b");
-    assert_ok(&o);
-    assert!(
-        stdout(&o).contains("Logged same@x.com in again"),
-        "{}",
-        stdout(&o)
-    );
-    assert_eq!(env.config_text().matches("[[profile]]").count(), 1);
-    assert_eq!(env.profile_token("same@x.com"), "tok-b");
-    assert!(env.config_text().contains("work"), "alias survived");
-
-    // And logging a DIFFERENT profile into an account that is already taken is
-    // caught rather than filed under the wrong directory.
-    let o = env.login_as("other@x.com", "same@x.com", "tok-c");
-    assert!(!o.status.success());
-    assert!(
-        stderr(&o).contains("you logged in as same@x.com"),
-        "{}",
-        stderr(&o)
-    );
-    assert!(
-        !env.profile("other@x.com").exists(),
-        "the half-built profile is cleaned up"
-    );
-    assert_eq!(env.profile_token("same@x.com"), "tok-b", "untouched");
-}
-
-/// `default` is the exception: it may hold an account a profile also holds.
-#[test]
-fn a_profile_may_hold_the_same_account_as_the_default() {
-    let env = Env::new();
-    let o = env.login(LIVE_EMAIL, "tok-mine");
-    assert_ok(&o);
-    assert!(
-        stdout(&o).contains("also the default"),
-        "the overlap is stated, not prevented: {}",
-        stdout(&o)
-    );
-
-    // It runs from its own directory with its own tokens — the old model
-    // silently fell back to passthrough here.
-    let o = env.run_cmd(&["run", LIVE_EMAIL], &[]);
-    assert_ok(&o);
-    assert!(
-        stdout(&o).contains(&format!("CFG={}", env.profile(LIVE_EMAIL).display())),
-        "must NOT fall back to passthrough: {}",
-        stdout(&o)
-    );
-    assert_eq!(env.profile_token(LIVE_EMAIL), "tok-mine");
-    assert_eq!(env.live_token(), LIVE_TOKEN);
-}
-
-#[test]
-fn login_rejects_a_key_that_is_neither_an_account_nor_a_profile() {
-    let env = Env::new();
-    for bad in ["work", "default", "off", "has space@x.com", "a/b@x.com"] {
-        let o = env.login_as(bad, "who@x.com", "tok-a");
-        assert!(!o.status.success(), "'{bad}' must be rejected");
-        assert!(
-            stderr(&o).contains("not an account email"),
-            "'{bad}': {}",
-            stderr(&o)
-        );
-    }
-    assert!(!env.config_path().exists() || !env.config_text().contains("[[profile]]"));
-}
-
-#[test]
-fn login_without_a_key_is_an_error_off_a_terminal() {
-    let env = Env::new();
-    let fake = env.fake_login("a@x.com", "tok-a");
-    let o = env.cswap_env(&["login"], &[("CSWAP_CLAUDE_BIN", fake.to_str().unwrap())]);
-    assert!(!o.status.success());
-    assert!(stderr(&o).contains("pass the email"), "{}", stderr(&o));
-}
-
-#[test]
-fn login_by_alias_relogs_in_the_existing_profile() {
-    let env = Env::new();
-    assert_ok(&env.login("work@x.com", "tok-1"));
-    assert_ok(&env.cswap(&["alias", "create", "work@x.com", "w"]));
-
-    let o = env.login_as("w", "work@x.com", "tok-2");
-    assert_ok(&o);
-    assert!(
-        stdout(&o).contains("Logged work@x.com in again"),
-        "{}",
-        stdout(&o)
-    );
-    assert_eq!(env.profile_token("work@x.com"), "tok-2");
-    assert_eq!(env.config_text().matches("[[profile]]").count(), 1);
-}
-
-// -------------------------------------------------------------------- running
-
-#[test]
-fn default_runs_passthrough_with_no_config_dir() {
-    let env = Env::new();
-    assert_ok(&env.login("work@x.com", "tok-work"));
-
-    let o = env.run_cmd(&["run"], &[]);
-    assert_ok(&o);
-    assert!(stdout(&o).contains("CFG=\n"), "passthrough: {}", stdout(&o));
-
-    let o = env.run_cmd(&["run", "default"], &[]);
-    assert_ok(&o);
-    assert!(stdout(&o).contains("CFG=\n"), "{}", stdout(&o));
-    assert!(stderr(&o).contains("live ~/.claude"), "{}", stderr(&o));
-
-    // A preset CLAUDE_CONFIG_DIR can't redirect what "the live ~/.claude" means.
-    let o = env.run_cmd(&["run", "default"], &[("CLAUDE_CONFIG_DIR", "/tmp/hijack")]);
-    assert_ok(&o);
-    assert!(
-        stdout(&o).contains("CFG=\n"),
-        "must be scrubbed: {}",
-        stdout(&o)
-    );
-}
-
-#[test]
-fn run_resolves_explicit_then_active_then_default() {
-    let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    assert_ok(&env.login("two@x.com", "tok-two"));
-    assert_ok(&env.cswap(&["alias", "create", "one@x.com", "one"]));
-
-    let one = format!("CFG={}", env.profile("one@x.com").display());
-    let two = format!("CFG={}", env.profile("two@x.com").display());
-
-    // CSWAP_ACTIVE picks a profile, by email or alias; explicit overrides it.
-    for key in ["one@x.com", "one"] {
-        let o = env.run_cmd(&["run"], &[("CSWAP_ACTIVE", key)]);
-        assert!(stdout(&o).contains(&one), "{key}: {}", stdout(&o));
-    }
-    let o = env.run_cmd(&["run", "two@x.com"], &[("CSWAP_ACTIVE", "one@x.com")]);
-    assert!(stdout(&o).contains(&two), "{}", stdout(&o));
-    // `default` overrides an active profile too.
-    let o = env.run_cmd(&["run", "default"], &[("CSWAP_ACTIVE", "one@x.com")]);
-    assert!(stdout(&o).contains("CFG=\n"), "{}", stdout(&o));
-    // CSWAP_ACTIVE=default means default, not a missing profile.
-    let o = env.run_cmd(&["run"], &[("CSWAP_ACTIVE", "default")]);
-    assert_ok(&o);
-    assert!(stdout(&o).contains("CFG=\n"), "{}", stdout(&o));
-    // A stale CSWAP_ACTIVE is an error, not a silent fallback.
-    let o = env.run_cmd(&["run"], &[("CSWAP_ACTIVE", "ghost")]);
-    assert!(!o.status.success());
-    assert!(
-        stderr(&o).contains("does not match any profile"),
-        "{}",
-        stderr(&o)
-    );
-
-    // Flags pass through; API keys are scrubbed.
-    let o = env.run_cmd(
-        &["run", "one", "--resume", "--model", "opus"],
-        &[("ANTHROPIC_API_KEY", "sk-should-be-scrubbed")],
-    );
-    assert_ok(&o);
-    assert!(
-        stdout(&o).contains("ARGS=--resume --model opus"),
-        "{}",
-        stdout(&o)
-    );
-    assert!(stdout(&o).contains("KEY=scrubbed"), "{}", stdout(&o));
-
-    // `run <flag>` with no target match passes the flag through.
-    let o = env.run_cmd(&["run", "--version"], &[]);
-    assert_ok(&o);
-    assert!(stdout(&o).contains("ARGS=--version"));
-
-    // The _claude shim never eats a leading target-shaped word.
-    let o = env.run_cmd(&["_claude", "one", "-r"], &[]);
-    assert_ok(&o);
-    assert!(stdout(&o).contains("ARGS=one -r"), "{}", stdout(&o));
-}
-
-#[test]
-fn run_on_a_profile_that_never_logged_in_says_what_to_do() {
-    let env = Env::new();
-    assert_ok(&env.login("work@x.com", "tok-work"));
-    // Simulate the migration's output: a registered profile with no tokens.
-    fs::remove_file(env.profile("work@x.com").join(".credentials.json")).unwrap();
-
-    let o = env.run_cmd(&["run", "work@x.com"], &[]);
-    assert!(!o.status.success());
-    assert!(
-        stderr(&o).contains("not logged in") && stderr(&o).contains("cswap login work@x.com"),
-        "{}",
-        stderr(&o)
-    );
-    assert!(
-        !stderr(&o).contains("os error"),
-        "the errno is not the useful half of 'not logged in': {}",
-        stderr(&o)
-    );
-}
-
-// -------------------------------------------------------------------- default
-
-#[test]
-fn default_is_read_only_and_refuses_to_swap() {
-    let env = Env::new();
-    assert_ok(&env.login("work@x.com", "tok-work"));
-
-    let o = env.cswap(&["default"]);
-    assert_ok(&o);
-    assert!(stdout(&o).contains(LIVE_EMAIL), "{}", stdout(&o));
-    assert!(stdout(&o).contains("only reads it"), "{}", stdout(&o));
-
-    let o = env.cswap(&["default", "work@x.com"]);
-    assert!(!o.status.success());
-    assert!(stderr(&o).contains("no longer swaps"), "{}", stderr(&o));
-    assert_eq!(env.live_token(), LIVE_TOKEN);
-    assert_eq!(env.profile_token("work@x.com"), "tok-work");
-}
-
-// ------------------------------------------------------------------- activate
-
-#[test]
-fn activate_exports_the_account_and_unsets_for_default() {
-    let env = Env::new();
-    assert_ok(&env.login("work@x.com", "tok-work"));
-    assert_ok(&env.cswap(&["alias", "create", "work@x.com", "w"]));
-
-    // By email or alias, the export carries the stable key: the email.
-    for key in ["work@x.com", "w"] {
-        let o = env.cswap(&["activate", "--print", key]);
-        assert_ok(&o);
-        assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='work@x.com'");
-    }
-    for key in ["default", "off"] {
-        let o = env.cswap(&["activate", "--print", key]);
-        assert_ok(&o);
-        assert_eq!(stdout(&o).trim(), "unset CSWAP_ACTIVE");
-    }
-    // A bare non-interactive activate means default, not "profile ''".
-    let o = env.cswap(&["activate", "--print"]);
-    assert_ok(&o);
-    assert_eq!(stdout(&o).trim(), "unset CSWAP_ACTIVE");
-    // Pre-0.5.1 wrappers passed an empty string; same meaning.
-    let o = env.cswap(&["activate", "--print", ""]);
-    assert_ok(&o);
-    assert_eq!(stdout(&o).trim(), "unset CSWAP_ACTIVE");
-    assert!(!env
-        .cswap(&["activate", "--print", "ghost"])
-        .status
-        .success());
-
-    // Without --print it explains the shell integration instead of guessing.
-    let o = env.cswap(&["activate", "work@x.com"]);
-    assert_ok(&o);
-    assert!(stdout(&o).is_empty(), "nothing to eval: {}", stdout(&o));
-    assert!(stderr(&o).contains("shell integration"), "{}", stderr(&o));
-}
-
-// ---------------------------------------------------------------------- alias
-
-#[test]
-fn alias_subcommands_create_list_remove() {
-    let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-
-    assert_ok(&env.cswap(&["alias", "create", "one@x.com", "o1"]));
-    let o = env.cswap(&["alias", "list"]);
-    assert_ok(&o);
-    assert!(
-        stdout(&o).contains("one@x.com") && stdout(&o).contains("o1"),
-        "{}",
-        stdout(&o)
-    );
-
-    let o = env.cswap(&["activate", "--print", "o1"]);
-    assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='one@x.com'");
-
-    // An email or alias can't be reused, and `default` is not a profile.
-    assert!(!env
-        .cswap(&["alias", "create", "one@x.com", "o1"])
-        .status
-        .success());
-    assert!(!env
-        .cswap(&["alias", "create", "one@x.com", "one@x.com"])
-        .status
-        .success());
-    let o = env.cswap(&["alias", "create", "default", "d"]);
-    assert!(!o.status.success());
-    assert!(stderr(&o).contains("not a profile"), "{}", stderr(&o));
-
-    assert_ok(&env.cswap(&["alias", "remove", "o1"]));
-    assert!(!env.cswap(&["activate", "--print", "o1"]).status.success());
-    assert!(!env.cswap(&["alias", "remove", "ghost"]).status.success());
-}
-
-// --------------------------------------------------------------------- remove
-
-#[test]
-fn remove_deletes_the_profile_and_spares_the_shared_data() {
-    let env = Env::new();
-    assert_ok(&env.login("work@x.com", "tok-work"));
-    let profile = env.profile("work@x.com");
-    assert!(profile.is_dir());
-
-    // Non-interactive without --yes: refuse rather than silently clobber.
-    let o = env.cswap(&["remove", "work@x.com"]);
-    assert!(!o.status.success(), "must not remove: {}", stdout(&o));
-    assert!(profile.is_dir(), "still there");
-
-    assert_ok(&env.cswap(&["remove", "work@x.com", "--yes"]));
-    assert!(!profile.exists(), "profile dir gone");
-    assert!(!env.config_text().contains("[[profile]]"), "entry gone");
-
-    // The symlink targets survived: remove never follows a link.
-    for item in ["settings.json", "CLAUDE.md", "history.jsonl"] {
-        assert!(
-            env.live().join(item).exists(),
-            "~/.claude/{item} must survive"
-        );
-    }
-    assert!(env.live().join("projects/proj-a/s1.jsonl").exists());
-    assert!(env.live().join("plugins/repos").is_dir());
-    assert_eq!(env.live_token(), LIVE_TOKEN);
-}
-
-#[test]
-fn remove_refuses_the_default() {
-    let env = Env::new();
-    let o = env.cswap(&["remove", "default", "--yes"]);
-    assert!(!o.status.success());
-    assert!(stderr(&o).contains("nothing to remove"), "{}", stderr(&o));
-    assert_eq!(env.live_token(), LIVE_TOKEN);
-}
-
-#[test]
-fn removing_a_profile_leaves_the_shared_account_as_the_default() {
-    let env = Env::new();
-    assert_ok(&env.login(LIVE_EMAIL, "tok-mine"));
-    let o = env.cswap(&["remove", LIVE_EMAIL, "--yes"]);
-    assert_ok(&o);
-    assert!(
-        stdout(&o).contains("still the default"),
-        "the separation is stated: {}",
-        stdout(&o)
-    );
-    assert_eq!(env.live_token(), LIVE_TOKEN);
-}
-
-// ------------------------------------------------------------------ list/usage
-
-#[test]
-fn list_shows_the_default_line_then_one_row_per_profile() {
-    let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    assert_ok(&env.login("two@x.com", "tok-two"));
-    assert_ok(&env.cswap(&["alias", "create", "one@x.com", "o"]));
-
-    let o = env.cswap(&["list", "--quick"]);
-    assert_ok(&o);
-    let out = stdout(&o);
-    let first = out.lines().next().unwrap();
-    assert!(first.starts_with("default"), "default first: {out}");
-    assert!(first.contains(LIVE_EMAIL), "live login: {out}");
-    assert!(first.contains("live ~/.claude"), "{out}");
-    assert!(first.contains("● active"), "default in effect: {out}");
-    assert!(out.contains("ACCOUNT"), "header: {out}");
-
-    let row = |email: &str| {
-        out.lines()
-            .find(|l| l.contains(email) && !l.starts_with("default"))
-            .unwrap_or_else(|| panic!("no row for {email}: {out}"))
-    };
-    assert!(row("one@x.com").contains(" o "), "alias column: {out}");
-    assert!(
-        row("two@x.com").trim_start().starts_with("two@x.com"),
-        "no status word while nothing is active: {out}"
-    );
-
-    // Activating a profile moves the marker off the default.
-    let o = env.cswap_env(&["list", "--quick"], &[("CSWAP_ACTIVE", "one@x.com")]);
-    let out = stdout(&o);
-    assert!(
-        !out.lines().next().unwrap().contains("● active"),
-        "default not in effect: {out}"
-    );
-    let row = out
-        .lines()
-        .find(|l| l.contains("one@x.com") && !l.starts_with("default"))
+    let out = env
+        .cmd(&["codex", "exec", "x"])
+        .env("CSWAP_FAKE_EXIT", "7")
+        .output()
         .unwrap();
-    assert!(row.starts_with("active"), "{out}");
+    assert_eq!(out.status.code(), Some(7));
 }
 
 #[test]
-fn usage_renders_a_card_for_the_default_and_each_profile() {
+fn the_default_and_the_pin_variable_choose_the_account() {
     let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    assert_ok(&env.login("two@x.com", "tok-two"));
-    assert_ok(&env.cswap(&["alias", "create", "one@x.com", "o"]));
+    env.ok(&["add", "claude", "work"]);
+    env.log();
 
-    // Port 1 refuses instantly: exercises the error path without a network.
-    let dead = [("CSWAP_USAGE_URL", "http://127.0.0.1:1/usage")];
-    let o = env.cswap_env(&["usage"], &dead);
-    assert_ok(&o);
-    let out = stdout(&o);
-    let first = out.lines().next().unwrap();
-    assert!(first.starts_with("default —"), "default card first: {out}");
-    assert!(first.contains("[live ~/.claude]"), "{out}");
-    assert!(first.contains("● active"), "{out}");
+    // Out of the box a bare launch stays on the agent's own login.
+    env.ok(&["claude"]);
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"));
+    assert_eq!(env.account("claude-0")["starts_here"], true);
+    assert!(env.ok(&["use", "claude"]).contains("root login"));
+
+    // A pin for one shell wins over the default.
+    let out = env
+        .cmd(&["claude"])
+        .env("CSWAP_CLAUDE", "work")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-1\n"));
+
+    env.ok(&["use", "claude", "work"]);
+    env.ok(&["claude"]);
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-1\n"));
+    assert_eq!(env.account("claude-1")["starts_here"], true);
+    assert_eq!(env.account("claude-0")["starts_here"], false);
+    assert!(env.ok(&["use", "claude"]).contains("work"));
+
+    // The flag wins over both.
+    let out = env
+        .cmd(&["claude", "--cswap=0"])
+        .env("CSWAP_CLAUDE", "work")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"));
+
+    // Codex was never touched by any of this.
+    env.ok(&["codex"]);
+    assert!(env.log().contains("CSWAP_ACCOUNT=codex-0\n"));
+
+    // And back to the agent's own login.
+    env.ok(&["use", "claude", "default"]);
+    env.ok(&["claude"]);
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"));
+    env.fails(&["use", "claude", "nobody"]);
+}
+
+#[test]
+fn start_with_default_and_an_agent_needs_no_terminal() {
+    let env = Env::new();
+    env.ok(&["start", "--default", "codex", "--", "exec", "hello there"]);
+    let log = env.log();
+    assert!(log.contains("run: codex\n"), "{log}");
+    assert_eq!(args_of(&log), ["exec", "hello there"], "{log}");
+}
+
+// ------------------------------------------------------------------ accounts
+
+#[test]
+fn add_shares_everything_but_the_login() {
+    let env = Env::new();
+    let native_before = tree(&env.home().join(".claude"));
+
+    let out = env.ok(&["add", "claude", "work"]);
     assert!(
-        out.contains("one@x.com") && out.contains("two@x.com"),
+        out.contains("work is signed in as new@example.com"),
         "{out}"
     );
-    assert!(out.contains("[o]"), "aliases in the header: {out}");
-    assert_eq!(out.matches("usage unavailable").count(), 3, "{out}");
+    let log = env.log();
+    assert_eq!(args_of(&log), ["auth", "login"], "{log}");
 
-    // Scoped to one profile hides the other AND the default card.
-    let o = env.cswap_env(&["usage", "two@x.com"], &dead);
-    assert_ok(&o);
-    let out = stdout(&o);
-    assert!(!out.contains("one@x.com"), "{out}");
-    assert!(!out.contains("default —"), "{out}");
-
-    // An alias scopes to its account.
-    let o = env.cswap_env(&["usage", "o"], &dead);
-    assert_ok(&o);
-    assert!(stdout(&o).contains("one@x.com"), "{}", stdout(&o));
-    assert!(!stdout(&o).contains("two@x.com"), "{}", stdout(&o));
-
-    // Scoped to the default hides every profile.
-    let o = env.cswap_env(&["usage", "default"], &dead);
-    assert_ok(&o);
-    let out = stdout(&o);
-    assert!(out.contains("default —"), "{out}");
-    assert!(!out.contains("one@x.com"), "{out}");
-
-    assert!(!env.cswap_env(&["usage", "ghost"], &dead).status.success());
-}
-
-// ------------------------------------------------------------------- migration
-
-#[test]
-fn migrates_a_0_5_account_config_without_moving_anything() {
-    let env = Env::new();
-    fs::create_dir_all(env.config_path().parent().unwrap()).unwrap();
-    fs::write(
-        env.config_path(),
-        "[[account]]\nemail = \"dev@neura.org\"\naliases = [\"neura\", \"1\"]\n\n\
-         [[account]]\nemail = \"me@gmail.com\"\n",
-    )
-    .unwrap();
-    // 0.5 already keyed directories by email, so this one must not move.
-    let dir = env.profile("dev@neura.org");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join(".credentials.json"),
-        Env::creds("tok-neura").to_string(),
-    )
-    .unwrap();
-    let store = env.data().join("accounts");
-    fs::create_dir_all(&store).unwrap();
-    fs::write(store.join("me@gmail.com.creds.json"), "{}").unwrap();
-
-    // Reading commands never migrate. They say there is something to run.
-    let nagged = env.cswap(&["list", "--quick"]);
-    assert_ok(&nagged);
-    assert!(
-        stderr(&nagged).contains("cswap migrate"),
-        "{}",
-        stderr(&nagged)
-    );
-    assert!(
-        env.config_text().contains("[[account]]"),
-        "the config is untouched until migrate runs: {}",
-        env.config_text()
-    );
-
-    let o = env.cswap(&["migrate", "--yes"]);
-    assert_ok(&o);
-    assert!(
-        stderr(&o).contains("migrated to the 0.6.1 model"),
-        "{}",
-        stderr(&o)
-    );
-
-    let cfg = env.config_text();
-    assert!(!cfg.contains("[[account]]"), "{cfg}");
-    assert!(cfg.contains("email = \"dev@neura.org\""), "{cfg}");
-    assert!(
-        cfg.contains("\"neura\"") && cfg.contains("\"1\""),
-        "aliases kept: {cfg}"
-    );
-
-    // The directory never moved, so nothing recorded in ~/.claude can dangle.
-    assert!(dir.is_dir(), "the email-keyed directory stays put");
-    assert_eq!(env.profile_token("dev@neura.org"), "tok-neura");
-    assert!(
-        !stderr(&o).contains("back under its email"),
-        "nothing to move from 0.5: {}",
-        stderr(&o)
-    );
-
-    // The old store moved aside rather than being merged into a profile.
-    assert!(!store.exists());
-    assert!(env.data().join("accounts.pre-0.6.bak").is_dir());
-    assert!(
-        !env.profile("me@gmail.com")
-            .join(".credentials.json")
-            .exists(),
-        "no credential was copied into a profile"
-    );
-    assert!(
-        stderr(&o).contains("cswap login me@gmail.com"),
-        "{}",
-        stderr(&o)
-    );
-
-    // Idempotent, and the nag stops once there is nothing left to do.
-    let o2 = env.cswap(&["list", "--quick"]);
-    assert_ok(&o2);
-    assert!(!stderr(&o2).contains("migrated"), "{}", stderr(&o2));
-    assert!(!stderr(&o2).contains("cswap migrate"), "{}", stderr(&o2));
-    let o3 = env.cswap(&["migrate", "--yes"]);
-    assert_ok(&o3);
-    assert!(
-        stdout(&o3).contains("already in the current format"),
-        "{}",
-        stdout(&o3)
-    );
-}
-
-/// 0.6.0 briefly keyed profiles by a separate `name`, which renamed the
-/// directory. Undo that: the name becomes an alias and the directory goes back
-/// under the account.
-#[test]
-fn migrates_a_0_6_0_named_config_back_under_the_account() {
-    let env = Env::new();
-    fs::create_dir_all(env.config_path().parent().unwrap()).unwrap();
-    fs::write(
-        env.config_path(),
-        "[[profile]]\nname = \"wadhwani\"\nemail = \"dev@gmail.com\"\n",
-    )
-    .unwrap();
-    let named = env.profile("wadhwani");
-    fs::create_dir_all(&named).unwrap();
-    fs::write(
-        named.join(".credentials.json"),
-        Env::creds("tok-w").to_string(),
-    )
-    .unwrap();
-    // 0.6.0 may also have left a compatibility symlink at the email path.
-    std::os::unix::fs::symlink(&named, env.profile("dev@gmail.com")).unwrap();
-
-    let o = env.cswap(&["migrate", "--yes"]);
-    assert_ok(&o);
-    assert!(
-        stderr(&o).contains("back under its email"),
-        "{}",
-        stderr(&o)
-    );
-
-    let cfg = env.config_text();
-    assert!(!cfg.contains("name ="), "the name key is gone: {cfg}");
-    assert!(cfg.contains("email = \"dev@gmail.com\""), "{cfg}");
-    assert!(
-        cfg.contains("aliases = [\"wadhwani\"]"),
-        "the name survives as an alias: {cfg}"
-    );
-
-    // The directory is back under the account, and the stale link is gone.
-    assert!(!named.exists(), "name-keyed directory removed");
-    let dir = env.profile("dev@gmail.com");
-    assert!(
-        dir.is_dir() && !is_symlink(&dir),
-        "real directory, not a link"
-    );
-    assert_eq!(env.profile_token("dev@gmail.com"), "tok-w");
-
-    // The alias still resolves everywhere.
-    let o = env.cswap(&["activate", "--print", "wadhwani"]);
-    assert_ok(&o);
-    assert_eq!(stdout(&o).trim(), "export CSWAP_ACTIVE='dev@gmail.com'");
-}
-
-#[test]
-fn migration_survives_a_pre_0_4_name_and_a_stored_default() {
-    let env = Env::new();
-    fs::create_dir_all(env.config_path().parent().unwrap()).unwrap();
-    fs::write(
-        env.config_path(),
-        "default = \"main\"\n\n[[account]]\nname = \"main\"\nemail = \"m@x.com\"\n\
-         isolated = true\n",
-    )
-    .unwrap();
-
-    assert_ok(&env.cswap(&["migrate", "--yes"]));
-    let cfg = env.config_text();
-    assert!(cfg.contains("email = \"m@x.com\""), "{cfg}");
-    assert!(
-        cfg.contains("aliases = [\"main\"]"),
-        "the old name became an alias: {cfg}"
-    );
-    assert!(
-        !cfg.contains("default ="),
-        "no stored default survives: {cfg}"
-    );
-    assert!(!cfg.contains("isolated"), "obsolete field dropped: {cfg}");
-}
-
-// ------------------------------------------------------------- sync behaviour
-
-#[test]
-fn profile_sync_picks_up_new_files_and_prunes_dangling_links() {
-    let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    let profile = env.profile("one@x.com");
-    let src = env.live();
-
-    fs::write(src.join("brand-new.json"), "{}").unwrap();
-    assert_ok(&env.run_cmd(&["run", "one@x.com"], &[]));
-    assert!(is_link_to(
-        &profile.join("brand-new.json"),
-        &src.join("brand-new.json")
-    ));
-
-    fs::remove_file(src.join("brand-new.json")).unwrap();
-    assert_ok(&env.run_cmd(&["run", "one@x.com"], &[]));
-    assert!(!profile.join("brand-new.json").exists());
-
-    // A real file the profile grew on its own is never clobbered.
-    fs::write(profile.join("settings.json.local"), "mine").unwrap();
-    fs::write(src.join("settings.json.local"), "theirs").unwrap();
-    assert_ok(&env.run_cmd(&["run", "one@x.com"], &[]));
+    let dir = env.account_dir("claude-1").join("config_dir");
+    // Shared: links into the agent's own dir.
+    for name in ["settings.json", "CLAUDE.md", "projects", "skills"] {
+        let md = fs::symlink_metadata(dir.join(name)).unwrap();
+        assert!(md.file_type().is_symlink(), "{name} should be a link");
+    }
     assert_eq!(
-        fs::read_to_string(profile.join("settings.json.local")).unwrap(),
-        "mine"
+        fs::read_to_string(dir.join("settings.json")).unwrap(),
+        r#"{"model":"opus"}"#
     );
-}
-
-/// A profile built by an older cswap carries links for names that have since
-/// joined the denylist. sync_links must drop them on the next launch instead of
-/// leaving a `.git` that makes git treat the profile as ~/.claude's worktree.
-#[test]
-fn run_prunes_links_that_have_since_been_denylisted() {
-    let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    let profile = env.profile("one@x.com");
-    let src = env.live();
-
-    for item in ["backups", ".git"] {
-        std::os::unix::fs::symlink(src.join(item), profile.join(item)).unwrap();
-        assert!(is_link_to(&profile.join(item), &src.join(item)));
-    }
-
-    assert_ok(&env.run_cmd(&["run", "one@x.com"], &[]));
-
-    for item in ["backups", ".git"] {
-        assert!(
-            !profile.join(item).exists(),
-            "{item} link should have been pruned"
-        );
-    }
-    for item in ["backups/.claude.json.backup.1", ".git/refs"] {
-        assert!(src.join(item).exists(), "~/.claude/{item} must survive");
-    }
-}
-
-// ------------------------------------------------------------ shadowed shares
-
-/// Replace a share link with a real directory holding a file, the way a live
-/// claude does when the link is missing at the moment it resolves the path.
-fn shadow_projects(env: &Env, email: &str) -> PathBuf {
-    let link = env.profile(email).join("projects");
-    fs::remove_file(&link).unwrap();
-    fs::create_dir_all(link.join("proj-x")).unwrap();
-    fs::write(link.join("proj-x/lost.jsonl"), "{\"stranded\":true}\n").unwrap();
-    link
-}
-
-#[test]
-fn a_shadowing_directory_is_reported_instead_of_swallowed() {
-    let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    let shadow = shadow_projects(&env, "one@x.com");
-
-    // Launching re-runs the mirror. It must refuse to clobber the directory AND
-    // refuse to stay quiet about it — silence here is what loses transcripts.
-    let o = env.run_cmd(&["run", "one@x.com"], &[]);
-    assert_ok(&o);
-    assert!(stderr(&o).contains("projects"), "{}", stderr(&o));
-    assert!(
-        stderr(&o).contains("cswap doctor"),
-        "points at the fix: {}",
-        stderr(&o)
-    );
-    assert!(
-        shadow.join("proj-x/lost.jsonl").exists(),
-        "the shadowing files are never clobbered"
-    );
-}
-
-#[test]
-fn doctor_finds_a_shadow_and_repair_parks_it_without_touching_live() {
-    let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    shadow_projects(&env, "one@x.com");
-
-    let o = env.cswap(&["doctor"]);
-    assert_ok(&o);
-    assert!(stdout(&o).contains("shadowed"), "{}", stdout(&o));
-    assert!(stdout(&o).contains("projects"), "{}", stdout(&o));
-    assert!(stdout(&o).contains("1 file"), "counts it: {}", stdout(&o));
-
-    let o = env.cswap(&["doctor", "--repair"]);
-    assert_ok(&o);
-    assert!(stdout(&o).contains("parked"), "{}", stdout(&o));
-
-    // The link is back...
-    let link = env.profile("one@x.com").join("projects");
-    assert!(is_symlink(&link), "the share link is restored");
-    assert_eq!(fs::read_link(&link).unwrap(), env.live().join("projects"));
-
-    // ...the stranded file still exists in cswap's own space...
-    let parked: Vec<PathBuf> = fs::read_dir(env.data().join("shadowed/one@x.com"))
+    // Private: the login is a real file of its own.
+    let creds = dir.join(".credentials.json");
+    assert!(!fs::symlink_metadata(&creds)
         .unwrap()
-        .map(|e| e.unwrap().path())
+        .file_type()
+        .is_symlink());
+    assert!(fs::read_to_string(&creds).unwrap().contains("tok-new"));
+    assert_eq!(
+        fs::metadata(env.cswap_home()).unwrap().permissions().mode() & 0o077,
+        0,
+        "~/.cswap must be private"
+    );
+
+    // Nothing was written into the agent's own dir, and its login is intact.
+    assert_eq!(tree(&env.home().join(".claude")), native_before);
+
+    let acc = env.account("claude-1");
+    assert_eq!(acc["name"], "work");
+    assert_eq!(acc["email"], "new@example.com");
+    assert_eq!(acc["signed_in"], true);
+    assert_eq!(env.account("claude-0")["email"], "own@example.com");
+}
+
+#[test]
+fn the_agents_own_logins_are_roots_and_not_accounts() {
+    let env = Env::new();
+    assert!(env.list().is_empty());
+    let keys: Vec<String> = env
+        .roots()
+        .iter()
+        .map(|d| d["key"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(parked.len(), 1, "one timestamped park directory");
-    assert!(
-        parked[0].join("projects/proj-x/lost.jsonl").exists(),
-        "nothing is deleted by a repair"
-    );
+    assert_eq!(keys, ["claude-0", "codex-0"]);
+    for d in env.roots() {
+        assert_eq!(d["name"], "root");
+        assert_eq!(d["same_login_as"], Value::Null);
+    }
 
-    // ...and ~/.claude was not written to. Repair reports, it does not merge.
+    // An account that signs in as the same person: the one pairing allowed.
+    env.add_claude("mine", "own@example.com");
+    let keys: Vec<String> = env
+        .list()
+        .iter()
+        .map(|a| a["key"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(keys, ["claude-1"]);
+    assert_eq!(env.account("claude-0")["same_login_as"], "mine");
+
+    let text = env.ok(&["root"]);
     assert!(
-        !env.live().join("projects/proj-x").exists(),
-        "repair never writes into ~/.claude"
+        text.contains("own@example.com") && text.contains("same login as mine"),
+        "{text}"
     );
-    assert!(env.live().join("projects/proj-a/s1.jsonl").exists());
+    // The command's name in earlier builds still works.
+    assert_eq!(env.ok(&["defaults"]), text);
+    let list = env.ok(&["list"]);
+    // One row: the account. The agent's own login is not listed with it.
+    assert!(list.contains("mine"), "{list}");
+    assert_eq!(list.matches("own@example.com").count(), 1, "{list}");
+    // Nowhere is the old word for it.
+    for cmd in [&["list"][..], &["root"], &["usage"], &["resets"], &["-h"]] {
+        let out = env.ok(cmd).to_lowercase();
+        assert!(!out.contains("native"), "cswap {cmd:?}\n{out}");
+    }
 }
 
 #[test]
-fn doctor_is_quiet_on_a_healthy_profile() {
+fn every_account_has_a_name() {
     let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    let o = env.cswap(&["doctor"]);
-    assert_ok(&o);
-    assert!(stdout(&o).contains("No problems found"), "{}", stdout(&o));
-    assert!(!stdout(&o).contains("shadowed"), "{}", stdout(&o));
+    // No name and nobody to ask: nothing is added and no sign-in runs.
+    let err = env.fails(&["add", "claude"]);
+    assert!(err.contains("name"), "{err}");
+    for bad in ["3", "root", "default", "auto", "two words"] {
+        let err = env.fails(&["add", "claude", bad]);
+        assert!(err.contains("name"), "{bad}: {err}");
+    }
+    assert_eq!(env.log(), "", "no sign-in must have run");
+    assert!(env.list().is_empty());
+
+    env.add_claude("work", "a@example.com");
+    env.add_claude("side", "b@example.com");
+    // A name is one account's, within its agent.
+    let err = env.fails(&["add", "claude", "work"]);
+    assert!(err.contains("work"), "{err}");
+    let err = env.fails(&["rename", "side", "work"]);
+    assert!(err.contains("work"), "{err}");
+
+    env.ok(&["rename", "side", "play"]);
+    assert_eq!(env.account("claude-2")["name"], "play");
+    env.log();
+    env.ok(&["claude", "--cswap=play"]);
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-2\n"));
+    env.fails(&["claude", "--cswap=side"]);
+    // The agent's own login is called root, and that cannot change.
+    env.fails(&["rename", "claude-0", "mine"]);
 }
 
 #[test]
-fn doctor_names_a_profile_that_never_logged_in() {
+fn a_login_is_held_by_one_account_only() {
     let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    fs::remove_file(env.profile("one@x.com").join(".credentials.json")).unwrap();
+    env.add_claude("work", "a@example.com");
+    env.log();
 
-    let o = env.cswap(&["doctor"]);
-    assert_ok(&o);
-    assert!(stdout(&o).contains("no login"), "{}", stdout(&o));
+    // Signing in as the same person again adds nothing.
+    let out = env
+        .cmd(&["add", "claude", "again"])
+        .env("CSWAP_FAKE_EMAIL", "a@example.com")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = text(&out.stderr);
     assert!(
-        stdout(&o).contains("cswap login one@x.com"),
+        err.contains("work already holds the login a@example.com"),
+        "{err}"
+    );
+    assert!(!env.account_dir("claude-2").exists());
+    assert_eq!(env.list().len(), 1);
+    // The name is free, for the login that is someone else's.
+    env.add_claude("again", "b@example.com");
+    assert_eq!(env.account("claude-2")["email"], "b@example.com");
+
+    // Codex tells logins apart by the account behind them.
+    env.ok(&["add", "codex", "team"]);
+    let err = env.fails(&["add", "codex", "team2"]);
+    assert!(err.contains("team already holds"), "{err}");
+    let out = env
+        .cmd(&["add", "codex", "team2"])
+        .env("CSWAP_FAKE_ACCT", "acct-other")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+}
+
+#[test]
+fn a_file_the_agent_makes_later_is_shared_at_the_next_launch() {
+    let env = Env::new();
+    env.ok(&["add", "claude", "work"]);
+    let dir = env.account_dir("claude-1").join("config_dir");
+    fs::create_dir_all(env.home().join(".claude/plugins")).unwrap();
+    assert!(fs::symlink_metadata(dir.join("plugins")).is_err());
+    env.ok(&["claude", "--cswap=1"]);
+    assert!(fs::symlink_metadata(dir.join("plugins"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[test]
+fn a_sign_in_that_fails_adds_nothing() {
+    let env = Env::new();
+    let out = env
+        .cmd(&["add", "codex", "team"])
+        .env("CSWAP_FAKE_FAIL", "1")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("nothing was added"),
         "{}",
-        stdout(&o)
+        text(&out.stderr)
     );
+    assert!(!env.account_dir("codex-1").exists());
+    assert!(env.list().is_empty());
+
+    // The name is free again.
+    env.ok(&["add", "codex", "team"]);
+    assert_eq!(env.account("codex-1")["name"], "team");
 }
 
-/// The regression that cost real transcript data: asking for a version number
-/// used to run the config migration, rewriting config.toml and renaming
-/// profile directories — including under live sessions.
 #[test]
-fn version_and_help_never_touch_the_config() {
+fn aliases_are_extra_names_that_can_be_set_shown_and_cleared() {
     let env = Env::new();
-    fs::create_dir_all(env.config_path().parent().unwrap()).unwrap();
-    let legacy = "[[account]]\nemail = \"dev@neura.org\"\naliases = [\"neura\"]\n";
-    fs::write(env.config_path(), legacy).unwrap();
+    env.add_claude("work", "a@example.com");
+    env.add_claude("side", "b@example.com");
+    assert_eq!(env.account("claude-2")["name"], "side");
+    assert_eq!(env.account("claude-2")["aliases"], serde_json::json!([]));
 
-    for args in [vec!["--version"], vec!["--help"], vec!["help", "list"]] {
-        let o = env.cswap(&args);
-        assert_ok(&o);
-        assert_eq!(
-            env.config_text(),
-            legacy,
-            "`cswap {}` rewrote the config",
-            args.join(" ")
-        );
+    // An alias cannot be another account's name or alias.
+    let err = env.fails(&["alias", "claude-2", "work"]);
+    assert!(err.contains("work"), "{err}");
+    env.ok(&["alias", "side", "play", "s"]);
+    let acc = env.account("claude-2");
+    assert_eq!(acc["name"], "side", "an alias does not replace the name");
+    assert_eq!(acc["aliases"], serde_json::json!(["play", "s"]));
+    let err = env.fails(&["alias", "work", "play"]);
+    assert!(err.contains("play"), "{err}");
+    let shown = env.ok(&["alias", "side"]);
+    assert!(shown.contains("play") && shown.contains('s'), "{shown}");
+
+    env.log();
+    for name in ["side", "play", "s"] {
+        env.ok(&["claude", &format!("--cswap={name}")]);
+        assert!(env.log().contains("CSWAP_ACCOUNT=claude-2\n"), "{name}");
     }
+    env.ok(&["alias", "side", "--clear"]);
+    assert_eq!(env.account("claude-2")["aliases"], serde_json::json!([]));
+    env.fails(&["claude", "--cswap=play"]);
+    env.ok(&["claude", "--cswap=side"]);
 }
 
-// ----------------------------------------------------------------- shell init
-
 #[test]
-fn shell_init_emits_wrappers() {
+fn remove_deletes_the_account_and_leaves_the_agents_own_login() {
     let env = Env::new();
-    for shell in ["bash", "zsh"] {
-        let o = env.cswap(&["shell-init", shell]);
-        assert_ok(&o);
-        let out = stdout(&o);
-        assert!(out.contains("cswap()"), "{out}");
-        assert!(out.contains("claude()"), "{out}");
-        assert!(out.contains("cswap _claude"), "{out}");
-    }
-    assert!(!env.cswap(&["shell-init", "fish"]).status.success());
+    env.ok(&["add", "claude", "work"]);
+    env.ok(&["use", "claude", "work"]);
+
+    // Without --yes and without a terminal, nothing is removed.
+    env.fails(&["remove", "work"]);
+    assert!(env.account_dir("claude-1").exists());
+
+    env.ok(&["remove", "work", "--yes"]);
+    assert!(!env.account_dir("claude-1").exists());
+    assert!(env.home().join(".claude/.credentials.json").exists());
+    // A bare launch fell back to the agent's own login.
+    env.log();
+    env.ok(&["claude"]);
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-0\n"));
+
+    let err = env.fails(&["remove", "claude-0", "--yes"]);
+    assert!(err.contains("own login"), "{err}");
 }
 
-// ---------------------------------------------------------------------- codex
+// ------------------------------------------------------------- look and help
 
-/// The fabricated $HOME has no ~/.codex, which is the common case for a cswap
-/// user who does not use Codex. They must never see the section, or a hint that
-/// it exists, or pay a network call for it.
 #[test]
-fn codex_is_invisible_when_it_is_not_configured() {
+fn help_names_every_command_in_groups() {
     let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    assert!(!env.home.path().join(".codex").exists());
-
-    for args in [vec!["usage"], vec!["list"], vec!["list", "--quick"]] {
-        let o = env.cswap_env(&args, &[("CSWAP_USAGE_URL", "http://127.0.0.1:1/u")]);
-        assert_ok(&o);
-        let all = stdout(&o) + &stderr(&o);
+    for flag in ["-h", "--help"] {
+        let out = env.ok(&[flag]);
+        for word in [
+            "USAGE",
+            "AGENTS",
+            "LOOK",
+            "ACCOUNTS",
+            "UPKEEP",
+            "SETUP",
+            "EXAMPLES",
+            "cswap start",
+            "ps  ",
+            "root  ",
+            "add <agent> <name>",
+            "rename <account> <name>",
+            "use <agent> [account]",
+            "update  ",
+            "herdr switch",
+            "--cswap=",
+            "--cswap  ",
+        ] {
+            assert!(out.contains(word), "{flag}: help lacks {word:?}\n{out}");
+        }
         assert!(
-            !all.to_lowercase().contains("codex"),
-            "`cswap {}` leaked codex: {all}",
-            args.join(" ")
+            out.lines().all(|l| l.chars().count() <= 100),
+            "a help line is too long\n{out}"
         );
     }
+    assert!(env.ok(&["--version"]).contains(env!("CARGO_PKG_VERSION")));
+    // A mistyped command is an error, not a silent dashboard.
+    env.fails(&["nonsense"]);
 }
 
-/// A ~/.codex that exists but carries no usable token must also render nothing.
-/// Best-effort means silent, not an error line in the middle of the report.
-#[test]
-fn codex_stays_silent_when_the_login_is_unusable() {
-    let env = Env::new();
-    assert_ok(&env.login("one@x.com", "tok-one"));
-    let codex = env.home.path().join(".codex");
-    fs::create_dir_all(&codex).unwrap();
-    fs::write(codex.join("auth.json"), r#"{"auth_mode":"chatgpt"}"#).unwrap();
+/// A stand-in for herdr's `hc`. The terminal `t7` has the process named in
+/// `hc/pid` in front; Ctrl+C ends it, and a send puts the next agent there.
+/// With `hc/direct` the agent is the terminal's own program until it dies,
+/// and a shell after that, as herdr does for a kept terminal.
+const FAKE_HC: &str = r#"#!/bin/sh
+dir="$HOME/hc"
+old=$(cat "$dir/pid")
+case "$1" in
+  get)
+    if kill -0 "$old" 2>/dev/null; then front=$old
+    elif [ -f "$dir/sent" ]; then front=$(cat "$dir/next")
+    else front=1; fi
+    if [ -f "$dir/direct" ] && [ "$front" = "$old" ]; then argv=claude; else argv=/bin/zsh; fi
+    if [ -f "$dir/keep" ]; then keep=true; else keep=false; fi
+    printf '{"address":"t7","state":"live","keep":%s,"argv":["%s"],' "$keep" "$argv"
+    printf '"status":{"state":"%s"},"foreground":{"pid":%s}}\n' "$(cat "$dir/status")" "$front"
+    ;;
+  keys) echo "$*" >> "$dir/log"; kill "$old" ;;
+  keep) echo "$*" >> "$dir/log"; : > "$dir/keep" ;;
+  send)
+    echo "$*" >> "$dir/log"
+    mv "$dir/next-proc" "$HOME/proc/$(cat "$dir/next")"
+    : > "$dir/sent"
+    ;;
+esac
+"#;
 
-    let o = env.cswap_env(
-        &["usage"],
-        &[
-            ("CSWAP_USAGE_URL", "http://127.0.0.1:1/u"),
-            ("CSWAP_CODEX_USAGE_URL", "http://127.0.0.1:1/cx"),
-        ],
+/// A process that lives until it is killed and belongs to nobody, so that it
+/// is gone the moment it ends. Returns its pid.
+fn orphan() -> u32 {
+    let out = Command::new("sh")
+        .args(["-c", "sleep 300 >/dev/null 2>&1 & echo $!"])
+        .output()
+        .unwrap();
+    text(&out.stdout).trim().parse().unwrap()
+}
+
+const SESSION: &str = "32efd4c2-3347-4240-a60a-61b639bc1ece";
+
+/// A home with a `work` account beside the root login, herdr's stand-in on
+/// the PATH, and Claude Code running in terminal t7 on the root login with
+/// the command line `cmdline`, in a conversation that has a transcript.
+/// Returns the pid that will be the agent once it runs on `work`.
+fn herdr_terminal(env: &Env, cmdline: &str) -> u32 {
+    env.add_claude("work", "work@example.com");
+    let h = env.home();
+    let hc = h.join("bin/hc");
+    fs::write(&hc, FAKE_HC).unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (old, next) = (orphan(), orphan());
+    let proc_of = |dir: PathBuf, environ: &str, cmdline: &str| {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("comm"), "claude\n").unwrap();
+        fs::write(dir.join("environ"), environ).unwrap();
+        fs::write(dir.join("cmdline"), cmdline).unwrap();
+    };
+    proc_of(h.join("proc").join(old.to_string()), "", cmdline);
+    fs::create_dir_all(h.join("hc")).unwrap();
+    fs::write(h.join("hc/pid"), old.to_string()).unwrap();
+    fs::write(h.join("hc/next"), next.to_string()).unwrap();
+    fs::write(h.join("hc/status"), "idle").unwrap();
+    fs::create_dir_all(h.join(".claude/sessions")).unwrap();
+    fs::write(
+        h.join(format!(".claude/sessions/{old}.json")),
+        format!(r#"{{"pid":{old},"sessionId":"{SESSION}"}}"#),
+    )
+    .unwrap();
+    fs::write(
+        h.join(format!(".claude/projects/proj-a/{SESSION}.jsonl")),
+        "{}\n",
+    )
+    .unwrap();
+    // What the agent will look like once it runs on `work`.
+    let work_dir = env.account_dir("claude-1").join("config_dir");
+    proc_of(
+        h.join("hc/next-proc"),
+        &format!("CLAUDE_CONFIG_DIR={}\0", work_dir.display()),
+        "claude\0",
     );
-    assert_ok(&o);
-    let all = stdout(&o) + &stderr(&o);
-    assert!(!all.to_lowercase().contains("codex"), "{all}");
+    next
+}
+
+#[test]
+fn an_agent_that_is_its_terminals_own_program_is_switched_without_ending_the_terminal() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0--model\0opus\0--continue\0the task\0");
+    let h = env.home();
+    // No shell started this agent, and herdr is not keeping the terminal.
+    fs::write(h.join("hc/direct"), "").unwrap();
+
+    let done: Value =
+        serde_json::from_str(&env.ok(&["herdr", "switch", "t7", "work", "--json"])).unwrap();
+    assert_eq!(done["resumed"], true);
+    assert_eq!(done["started"], true);
+    // Keeping is turned on first, so herdr puts a shell where the agent was.
+    // No Ctrl+C: a clean exit would end the terminal. The model comes along.
+    let log = fs::read_to_string(h.join("hc/log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        [
+            "keep t7",
+            &format!("send t7 cswap claude --cswap=work --model opus --resume {SESSION}"),
+        ]
+    );
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
+#[test]
+fn a_herdr_terminal_moves_to_another_account_and_keeps_its_conversation() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0");
+    let h = env.home();
+    fs::write(h.join("hc/status"), "working").unwrap();
+
+    let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
+    assert_eq!(info["account"], "claude-0");
+    assert_eq!(info["session"], SESSION);
+    let current: Vec<&Value> = info["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["current"] == true)
+        .collect();
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0]["name"], "root");
+
+    // Not in the middle of a turn, and not onto the account it is on.
+    let err = env.fails(&["herdr", "switch", "t7", "work"]);
+    assert!(err.contains("middle of a turn"), "{err}");
+    fs::write(h.join("hc/status"), "idle").unwrap();
+    let err = env.fails(&["herdr", "switch", "t7", "root"]);
+    assert!(err.contains("already runs on root"), "{err}");
+    assert!(!h.join("hc/log").exists(), "a refusal touched the terminal");
+
+    let done: Value =
+        serde_json::from_str(&env.ok(&["herdr", "switch", "t7", "work", "--json"])).unwrap();
+    assert_eq!(done["from"], "root");
+    assert_eq!(done["to"], "work");
+    assert_eq!(done["resumed"], true);
+    assert_eq!(done["started"], true);
+    let log = fs::read_to_string(h.join("hc/log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        [
+            "keys t7 ctrl+c",
+            &format!("send t7 cswap claude --cswap=work --resume {SESSION}"),
+        ]
+    );
+    let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
+    assert_eq!(info["account"], "claude-1");
+
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
+#[test]
+fn the_text_views_work_without_a_terminal() {
+    let env = Env::new();
+    env.ok(&["add", "claude", "work"]);
+    let list = env.ok(&["list"]);
+    assert!(
+        list.contains("work") && list.contains("new@example.com"),
+        "{list}"
+    );
+    assert!(!list.contains('\x1b'), "no colour codes when piped");
+    for cmd in [
+        &["usage"][..],
+        &["usage", "work"],
+        &["root"],
+        &["resets"],
+        &["suggest"],
+        &["suggest", "claude"],
+        &["ps"],
+        &["sync", "--check"],
+    ] {
+        let out = env.run(cmd);
+        assert!(out.status.success(), "cswap {cmd:?}: {}", text(&out.stderr));
+    }
+    assert_eq!(env.ok(&["ps", "--json"]).trim(), "[]");
+    // The dashboard needs a terminal and says so.
+    let err = env.fails(&[]);
+    assert!(err.contains("terminal"), "{err}");
+}
+
+#[test]
+fn shell_init_wraps_the_installed_agents() {
+    let env = Env::new();
+    let bash = env.ok(&["shell-init", "bash"]);
+    assert!(
+        bash.contains("claude() { command cswap claude \"$@\"; }"),
+        "{bash}"
+    );
+    assert!(
+        bash.contains("codex() { command cswap codex \"$@\"; }"),
+        "{bash}"
+    );
+    assert!(
+        !bash.contains("grok()"),
+        "grok is not installed here\n{bash}"
+    );
+    let fish = env.ok(&["shell-init", "fish"]);
+    assert!(fish.contains("command cswap claude $argv"), "{fish}");
+    let ps = env.ok(&["shell-init", "powershell"]);
+    assert!(
+        ps.contains("function claude { cswap.exe claude @args }"),
+        "{ps}"
+    );
+    env.fails(&["shell-init", "tcsh"]);
+
+    // What bash prints really is a wrapper: sourced, `claude` goes through cswap.
+    let script = format!("{bash}\nclaude --print 'a b'\n");
+    let mut sh = Command::new("bash");
+    sh.arg("-c").arg(&script);
+    for (k, v) in env.cmd(&[]).get_envs() {
+        if let Some(v) = v {
+            sh.env(k, v);
+        }
+    }
+    sh.env(
+        "PATH",
+        format!(
+            "{}:{}:/usr/bin:/bin",
+            Path::new(BIN).parent().unwrap().display(),
+            env.home().join("bin").display()
+        ),
+    );
+    env.log();
+    let out = sh.output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let log = env.log();
+    assert_eq!(args_of(&log), ["--print", "a b"], "{log}");
+    assert!(log.contains("CSWAP_ACCOUNT=claude-0\n"), "{log}");
+
+    // A shell with a list of its own wraps what the list holds and no more.
+    // The dashboard writes the list, under Settings > Shell.
+    fs::create_dir_all(env.cswap_home()).unwrap();
+    fs::write(
+        env.cswap_home().join("settings.json"),
+        r#"{"shells":{"bash":["codex"]}}"#,
+    )
+    .unwrap();
+    let bash = env.ok(&["shell-init", "bash"]);
+    assert!(
+        bash.contains("codex()") && !bash.contains("claude()"),
+        "{bash}"
+    );
+    // Another shell has no list yet, so it still wraps them all.
+    assert!(env.ok(&["shell-init", "zsh"]).contains("claude()"));
+}
+
+#[test]
+fn doctor_reports_and_migrate_has_nothing_to_do_on_a_fresh_home() {
+    let env = Env::new();
+    let out = env.run(&["doctor"]);
+    let all = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    assert!(all.contains("Claude Code"), "{all}");
+    let out = env.ok(&["migrate"]);
+    assert!(out.to_lowercase().contains("nothing"), "{out}");
 }
