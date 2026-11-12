@@ -51,7 +51,8 @@ pub const SPEC: Spec = Spec {
         "cache",
         "log",
         // The installed binary. Codex compares its own path against the home,
-        // so a link here would not be recognised anyway.
+        // so a link here would not be recognised anyway. `codex update`
+        // therefore runs on the root home: see `own_args`.
         "packages",
         // The desktop app's own state.
         "sqlite",
@@ -68,6 +69,7 @@ pub const SPEC: Spec = Spec {
     cred_file: "auth.json",
     login_life: "Access token lasts 10 days and codex renews it by itself. OpenAI publishes no fixed lifetime for the login; it ends on sign-out, a password change or revocation.",
     scrub_env: &["CODEX_API_KEY", "CODEX_ACCESS_TOKEN"],
+    own_args: &["update"],
     login_args: &["login"],
     rgb: (16, 163, 127),
 };

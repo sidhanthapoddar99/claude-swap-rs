@@ -57,6 +57,10 @@ pub struct Spec {
     /// Env vars that would make the agent ignore the account's login. Removed
     /// from the environment of a launch on a cswap account.
     pub scrub_env: &'static [&'static str],
+    /// First arguments that are about the installed program, not about an
+    /// account: `codex update`. They run on the agent's own home, because
+    /// the program finds its installation from there.
+    pub own_args: &'static [&'static str],
     /// Arguments that start the agent's own login flow.
     pub login_args: &'static [&'static str],
     /// Accent colour in the dashboard.

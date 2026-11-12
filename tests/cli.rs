@@ -1342,6 +1342,33 @@ fn the_guide_for_agents_names_only_real_commands() {
 /// not get its parent's account. It starts on the default of its own agent,
 /// which is one rule for every pair of agents: a Codex under a Claude has no
 /// account in common with it anyway.
+/// `codex update` finds its installation under its own home, so it fails on
+/// an account's home with "Could not detect the Codex installation method".
+#[test]
+fn a_command_about_the_program_itself_runs_on_its_own_home() {
+    let env = Env::new();
+    env.add_claude("work", "work@example.com");
+    env.ok(&["use", "claude", "work"]);
+    env.log();
+
+    // A launch goes to the default account.
+    env.ok(&["claude", "the task"]);
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-1"));
+    // An update does not, even when an account is named.
+    for args in [
+        &["claude", "update"][..],
+        &["claude", "--cswap=work", "update"],
+    ] {
+        env.ok(args);
+        let log = env.log();
+        assert!(log.contains("arg: update"), "{log}");
+        assert!(log.contains("CLAUDE_CONFIG_DIR=\n"), "{log}");
+    }
+    // Only as the first argument: a task that says "update" is a task.
+    env.ok(&["claude", "-p", "update"]);
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-1"));
+}
+
 #[test]
 fn a_sub_agent_in_herdr_starts_on_its_agents_default() {
     let env = Env::new();

@@ -67,6 +67,7 @@ pub const SPEC: Spec = Spec {
     scrub_env: &["GEMINI_API_KEY", "AGY_ADC_AUTH"],
     // agy has no sign-in subcommand: started on an empty dir it walks its own
     // sign-in, and the user quits when done.
+    own_args: &[],
     login_args: &[],
     rgb: (76, 141, 246),
 };

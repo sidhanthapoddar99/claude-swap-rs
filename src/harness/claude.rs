@@ -76,6 +76,7 @@ pub const SPEC: Spec = Spec {
         "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     ],
+    own_args: &["update"],
     login_args: &["auth", "login"],
     rgb: (217, 119, 87),
 };
