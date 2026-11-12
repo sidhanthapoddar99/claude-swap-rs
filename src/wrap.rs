@@ -10,7 +10,9 @@
 //!
 //! Without a flag the account is, in order: `$CSWAP_<HARNESS>` (set for
 //! everything started inside a wrapped session, or by hand for one terminal),
-//! then the harness's default from the settings.
+//! then the harness's default from the settings. A sub-agent that herdr
+//! starts gets the login environment, so it starts on the default too,
+//! whatever account the agent that asked for it runs on.
 //!
 //! cswap then `exec`s the real binary, so signals, exit codes and the terminal
 //! are the agent's own. Nothing here touches the network.
@@ -204,20 +206,25 @@ pub fn run(h: Harness, args: Vec<String>) -> Result<()> {
         (Some(Selector::Select), _) => (Selector::Select, Via::Picker),
         (Some(s), _) => (s, Via::Flag),
         (None, Some(v)) => (selector(&v), Via::Env),
-        (None, None) => match hs.start.as_str() {
-            "auto" => (Selector::Auto, Via::Auto),
-            other => (Selector::Named(vec![other.to_string()]), Via::Default),
-        },
+        (None, None) => (Selector::Select, Via::Default),
     };
 
     let settings = Settings::load()?;
     let reg = Registry::load()?;
+    // Nothing was named: the agent's default.
+    let (sel, via) = match (sel, via) {
+        (_, Via::Default) => match hs.start.as_str() {
+            "auto" => (Selector::Auto, Via::Auto),
+            other => (Selector::Named(vec![other.to_string()]), Via::Default),
+        },
+        named => named,
+    };
     let (acc, note) = match resolve(&reg, h, &sel, &settings) {
         Ok(found) => found,
         // A stored default that no longer resolves (the account was removed by
         // hand) must not lock the user out of the agent: fall back to its
         // default login.
-        Err(e) if via == Via::Default || via == Via::Env => {
+        Err(e) if matches!(via, Via::Default | Via::Env) => {
             let native = reg
                 .of(h)
                 .find(|a| a.is_native())
@@ -274,8 +281,26 @@ fn launch(
     if hs.announce && !quiet && std::io::stderr().is_terminal() {
         announce(&acc, via, note, settings);
     }
+    // With a PATH shim, `claude` on PATH is cswap. A wrapper of the user's
+    // that runs `claude` from PATH would then come straight back here, for
+    // ever. Count the returns and stop.
+    let now = crate::shim::now_ms();
+    let depth = crate::shim::guard_depth(now);
+    if depth >= crate::shim::GUARD_LIMIT {
+        bail!(
+            "{} keeps starting cswap again, {} times in a row, so it is not the real {}: \
+             it runs `{}` from PATH, which is cswap's shim. Point cswap at the real binary \
+             (CSWAP_{}_BIN, or Settings > Harness), or turn the shims off: cswap shims off",
+            bin.display(),
+            depth,
+            h.name(),
+            h.spec().bins[0],
+            h.id().to_uppercase()
+        );
+    }
     let mut cmd = Command::new(&bin);
     manage::apply_env(&mut cmd, &acc);
+    cmd.env(crate::shim::GUARD, format!("{}:{now}", depth + 1));
     cmd.args(args);
     sessions::register(&acc.key());
     match platform::become_program(cmd)? {}

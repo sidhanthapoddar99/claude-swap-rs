@@ -28,6 +28,9 @@ impl Sandbox {
         // real ones.
         std::env::set_var("CSWAP_PROC", dir.path().join("proc"));
         std::env::set_var("CSWAP_OFFLINE", "1");
+        // herdr may be running on the machine the tests run on; they never
+        // ask it anything.
+        std::env::set_var("CSWAP_HC", dir.path().join("no-hc"));
         // The shell page lists the login shell and reads its rc file.
         std::env::set_var("SHELL", "/bin/zsh");
         std::env::remove_var("ZDOTDIR");

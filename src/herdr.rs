@@ -1,11 +1,21 @@
 //! Herdr keeps agents in terminals that stay alive. This is what cswap does
 //! for it: say which account the agent in a terminal runs on, list what a
 //! launch menu can offer, and move a running agent to another account without
-//! losing its conversation.
+//! losing its conversation, or start it again on the account it is on.
 //!
 //! A switch stops the agent, waits for a shell in its place, and types the
 //! launch on the new account with the arguments that resume the conversation.
 //! The terminal, its tab, its place and its sub-agents stay as they are.
+//! A restart is the same on the account the agent already runs on: it comes
+//! back as the program on disk now, with its settings read again.
+//!
+//! Between the agent leaving and the launch being typed the terminal is a
+//! bare shell, and herdr types whatever is sent to the terminal into it: a
+//! sub-agent's report, for one. Such text is lost, and it can leave the
+//! shell waiting for the end of a quote, where the launch would be swallowed
+//! too. So an agent whose sub-agents are still working is left alone unless
+//! forced, the prompt is cleared before the launch is typed, and the launch
+//! is typed again when it did not run.
 //! Herdr is driven through its own command, `hc`.
 //!
 //! There are two kinds of terminal. In one a shell started the agent, and the
@@ -23,8 +33,8 @@ use serde_json::{json, Value};
 
 use crate::cli::{self, Ctx};
 use crate::harness::Harness;
-use crate::sessions::{self, Talk};
-use crate::store::Account;
+use crate::sessions::{self, Live, Talk};
+use crate::store::{Account, Registry};
 use crate::{manage, platform, view};
 
 /// Programs that leave a prompt behind when the agent they ran ends.
@@ -100,7 +110,7 @@ fn kept_options(h: Harness, old_args: &[String]) -> Vec<String> {
 
 /// Run `hc` and return what it printed. `CSWAP_HC` names another program,
 /// which is what the tests use.
-fn hc(args: &[&str]) -> Result<String> {
+pub(crate) fn hc(args: &[&str]) -> Result<String> {
     let bin = std::env::var_os("CSWAP_HC").unwrap_or_else(|| "hc".into());
     let out = Command::new(&bin)
         .args(args)
@@ -126,6 +136,8 @@ struct Terminal {
     status: Option<String>,
     /// The program in front, which is the agent while one runs.
     front: Option<u32>,
+    /// Is the program in front a shell, waiting at its prompt?
+    front_shell: bool,
     /// Is the terminal's own program a shell, with the agent started in it?
     shell: bool,
     /// Does herdr put a shell in place of the program when it is killed?
@@ -136,12 +148,15 @@ impl Terminal {
     fn get(t: &str) -> Result<Terminal> {
         let v: Value = serde_json::from_str(&hc(&["get", t, "--json"])?)
             .context("hc get did not print JSON")?;
-        let first = v["argv"][0].as_str().unwrap_or_default();
-        let program = Path::new(first)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+        let name = |path: &str| {
+            Path::new(path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        };
+        let program = name(v["argv"][0].as_str().unwrap_or_default());
+        let front = name(v["foreground"]["name"].as_str().unwrap_or_default());
         Ok(Terminal {
             address: v["address"].as_str().unwrap_or(t).to_string(),
             live: v["state"] == "live",
@@ -149,6 +164,7 @@ impl Terminal {
             front: v["foreground"]["pid"]
                 .as_u64()
                 .and_then(|p| u32::try_from(p).ok()),
+            front_shell: SHELLS.contains(&front.as_str()),
             shell: SHELLS.contains(&program.as_str()),
             keep: v["keep"] == true,
         })
@@ -165,18 +181,63 @@ struct Running<'a> {
     acc: &'a Account,
     pid: u32,
     talk: Talk,
+    /// The terminals under this one, at any depth, whose agent is in the
+    /// middle of a turn: they report to this agent when they are done.
+    working_under: Vec<String>,
+}
+
+/// One terminal as `hc ls` lists it: its address, the terminal it was
+/// started from, and its agent's status.
+type Listed = (String, Option<String>, Option<String>);
+
+/// Every live terminal herdr has.
+fn listed() -> Result<Vec<Listed>> {
+    let v: Value =
+        serde_json::from_str(&hc(&["ls", "--json"])?).context("hc ls did not print JSON")?;
+    let text = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    Ok(v["terminals"]
+        .as_array()
+        .context("hc ls listed no terminals")?
+        .iter()
+        .filter_map(|t| Some((text(&t["address"])?, text(&t["parent"]), text(&t["status"]))))
+        .collect())
+}
+
+/// The terminals under `t`, children and theirs, that are in a turn.
+fn working_under(all: &[Listed], t: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut todo = vec![t.to_string()];
+    let mut seen = vec![t.to_string()];
+    while let Some(at) = todo.pop() {
+        for (address, parent, status) in all {
+            if parent.as_deref() != Some(at.as_str()) || seen.contains(address) {
+                continue;
+            }
+            seen.push(address.clone());
+            todo.push(address.clone());
+            if status.as_deref().is_some_and(|s| BUSY.contains(&s)) {
+                out.push(address.clone());
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// The account whose agent is `pid`, or a parent of `pid`: a tool the agent
 /// runs can be the program in front for a while.
 fn agent_of(c: &Ctx, pid: u32) -> Option<(&Account, u32)> {
+    agent_in(&c.reg, &c.live, pid)
+}
+
+/// `agent_of` for a caller that has not read everything a command reads.
+fn agent_in<'a>(reg: &'a Registry, live: &Live, pid: u32) -> Option<(&'a Account, u32)> {
     let mut at = pid;
     for _ in 0..8 {
-        let hit = c
-            .live
+        let hit = live
             .iter()
             .find(|(_, pids)| pids.contains(&at))
-            .and_then(|(key, _)| c.reg.get(key));
+            .and_then(|(key, _)| reg.get(key));
         if let Some(acc) = hit {
             return Some((acc, at));
         }
@@ -196,11 +257,13 @@ fn running<'a>(c: &'a Ctx, t: &str) -> Result<Running<'a>> {
         .and_then(|pid| agent_of(c, pid))
         .with_context(|| format!("{name} is not running an agent that cswap knows"))?;
     let talk = sessions::talk(acc.harness, pid, &acc.config_dir());
+    let working_under = working_under(&listed()?, &terminal.address);
     Ok(Running {
         terminal,
         acc,
         pid,
         talk,
+        working_under,
     })
 }
 
@@ -209,7 +272,7 @@ fn why_not(r: &Running) -> Option<String> {
     let t = &r.terminal.address;
     if r.terminal.busy() {
         Some(format!(
-            "{t} is in the middle of a turn. Switch when it stops."
+            "{t} is in the middle of a turn. Try again when it stops."
         ))
     } else if !r.terminal.shell && !cfg!(unix) {
         Some(format!(
@@ -361,7 +424,7 @@ fn wait_for(t: &str, wait: Duration, seen: impl Fn(&Terminal) -> Result<bool>) -
     }
 }
 
-/// What a switch did.
+/// What a switch or a restart did.
 pub struct Switched {
     pub terminal: String,
     pub agent: Harness,
@@ -374,16 +437,97 @@ pub struct Switched {
     pub line: String,
 }
 
-/// Move the agent in terminal `t` to the account `to`. `fresh` allows a new
-/// conversation when the running one cannot be told.
-pub fn switch(c: &Ctx, t: &str, to: &str, fresh: bool) -> Result<Switched> {
+/// What the caller allows a switch or a restart to do.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Allow {
+    /// A new conversation, when the running one cannot be told.
+    pub fresh: bool,
+    /// Going ahead while sub-agents are still working.
+    pub force: bool,
+}
+
+/// Move the agent in terminal `t` to the account `to`.
+pub fn switch(c: &Ctx, t: &str, to: &str, allow: Allow) -> Result<Switched> {
     let r = running(c, t)?;
+    let target = c.reg.find(r.acc.harness, to)?;
+    if target.key() == r.acc.key() {
+        bail!(
+            "{} already runs on {}. To start it again there: cswap herdr restart {}",
+            r.terminal.address,
+            target.title(),
+            r.terminal.address
+        );
+    }
+    relaunch(c, r, target, allow)
+}
+
+/// Stop the agent in terminal `t` and start it again on the account it is on,
+/// in the same conversation. The new one is the program on disk now, which is
+/// how an update to the agent, to cswap or to the agent's settings takes hold.
+pub fn restart(c: &Ctx, t: &str, allow: Allow) -> Result<Switched> {
+    let r = running(c, t)?;
+    let target = r.acc;
+    relaunch(c, r, target, allow)
+}
+
+/// Why an agent with sub-agents at work is left alone.
+fn children_note(t: &str, working: &[String]) -> String {
+    format!(
+        "{t} has {} still working: {}. A report one of them sends while {t} is stopped \
+         is typed into its shell and lost.",
+        if working.len() == 1 {
+            "a sub-agent".to_string()
+        } else {
+            format!("{} sub-agents", working.len())
+        },
+        working.join(", ")
+    )
+}
+
+/// Type the launch at the shell in `t` and wait for the agent to run on
+/// `key`. Text that reached the shell first, such as a report meant for the
+/// agent, can leave it waiting for the end of a quote, and a line typed there
+/// never runs. So the prompt is cleared before the line is typed when the
+/// shell was there all along (`clear`), and when the shell is still in front
+/// a while after the line, the prompt is cleared and the line typed again.
+/// A new shell is not cleared at first: a Ctrl+C would stop it reading its
+/// own rc file. False when the agent is not seen running in the end.
+fn launch(c: &Ctx, t: &str, line: &str, key: &str, clear: bool) -> Result<bool> {
+    // How long a shell may stay in front after the line before the line
+    // counts as not run. A shell that was there runs it at once; one that
+    // herdr has just started may still be loading.
+    let settle = Duration::from_millis(if clear { 2500 } else { 8000 });
+    for attempt in 0..3 {
+        if clear || attempt > 0 {
+            hc(&["keys", t, "ctrl+c"])?;
+        }
+        hc(&["send", t, line])?;
+        let typed = Instant::now();
+        let not_run = std::cell::Cell::new(false);
+        let started = wait_for(t, Duration::from_secs(8), |term| {
+            let live = sessions::scan(&c.reg);
+            let runs = term
+                .front
+                .is_some_and(|pid| live.get(key).is_some_and(|pids| pids.contains(&pid)));
+            not_run.set(!runs && term.front_shell && typed.elapsed() >= settle);
+            Ok(runs || not_run.get())
+        })?;
+        if started && !not_run.get() {
+            return Ok(true);
+        }
+        // Something other than a shell is in front: the line ran, and what
+        // it started is not to be interrupted.
+        if !Terminal::get(t)?.front_shell {
+            return Ok(false);
+        }
+    }
+    Ok(false)
+}
+
+/// Stop the agent `r` and start it on `target` with its conversation.
+fn relaunch(c: &Ctx, r: Running, target: &Account, allow: Allow) -> Result<Switched> {
     let t = r.terminal.address.clone();
     let h = r.acc.harness;
-    let target = c.reg.find(h, to)?;
-    if target.key() == r.acc.key() {
-        bail!("{t} already runs on {}", target.title());
-    }
     if !c.signed_in(target) {
         bail!(
             "{} is not signed in: run `cswap login {}` first",
@@ -394,13 +538,19 @@ pub fn switch(c: &Ctx, t: &str, to: &str, fresh: bool) -> Result<Switched> {
     if let Some(why) = why_not(&r) {
         bail!(why);
     }
+    if !allow.force && !r.working_under.is_empty() {
+        bail!(
+            "{} Wait for them, or go ahead with `--force` and check on them afterwards.",
+            children_note(&t, &r.working_under)
+        );
+    }
     let (session, resume) = match &r.talk {
         Talk::Open { id, resume } => (Some(id.clone()), resume.clone()),
         Talk::Fresh => (None, Vec::new()),
-        Talk::Unknown if fresh => (None, Vec::new()),
+        Talk::Unknown if allow.fresh => (None, Vec::new()),
         Talk::Unknown => bail!(
             "cswap cannot tell which conversation {t} is in, so it was left alone. \
-             `--fresh` switches anyway and starts a new one."
+             `--fresh` goes ahead anyway and starts a new one."
         ),
     };
     let line = launch_line(target, &sessions::command_line(r.pid), &resume);
@@ -424,15 +574,7 @@ pub fn switch(c: &Ctx, t: &str, to: &str, fresh: bool) -> Result<Switched> {
     if !back {
         bail!("the agent in {t} stopped but no shell came back. Start it again with: {line}");
     }
-    hc(&["send", &t, &line])?;
-
-    let key = target.key();
-    let started = wait_for(&t, Duration::from_secs(8), |term| {
-        let live = sessions::scan(&c.reg);
-        Ok(term
-            .front
-            .is_some_and(|pid| live.get(&key).is_some_and(|pids| pids.contains(&pid))))
-    })?;
+    let started = launch(c, &t, &line, &target.key(), r.terminal.shell)?;
     Ok(Switched {
         terminal: t,
         agent: h,
@@ -560,6 +702,8 @@ pub fn info_cmd(t: &str, as_json: bool) -> Result<()> {
             "conversation": r.talk.word(),
             "session": session,
             "why_not": why_not(&r),
+            // Sub-agents in a turn: a switch or a restart needs `--force`.
+            "children_working": r.working_under,
             "accounts": rows(&c, h, Some(&key)),
         });
         println!("{}", serde_json::to_string_pretty(&v)?);
@@ -574,19 +718,28 @@ pub fn info_cmd(t: &str, as_json: bool) -> Result<()> {
     let talk = match &r.talk {
         Talk::Open { id, .. } => format!("conversation {id}"),
         Talk::Fresh => "nothing said yet".to_string(),
-        Talk::Unknown => "conversation not found: a switch needs --fresh".to_string(),
+        Talk::Unknown => "conversation not found: a switch or a restart needs --fresh".to_string(),
     };
     println!("{}", c.p.dim(&talk));
     if let Some(why) = why_not(&r) {
         println!("{}", c.p.warn(&why));
     }
+    if !r.working_under.is_empty() {
+        println!(
+            "{}",
+            c.p.warn(&format!(
+                "{} A switch or a restart needs --force.",
+                children_note(&r.terminal.address, &r.working_under)
+            ))
+        );
+    }
     Ok(())
 }
 
 /// `cswap herdr switch <terminal> <account>`.
-pub fn switch_cmd(t: &str, to: &str, fresh: bool, as_json: bool) -> Result<()> {
+pub fn switch_cmd(t: &str, to: &str, allow: Allow, as_json: bool) -> Result<()> {
     let c = Ctx::load()?;
-    let s = switch(&c, t, to, fresh)?;
+    let s = switch(&c, t, to, allow)?;
     if as_json {
         let v = json!({
             "terminal": s.terminal,
@@ -611,6 +764,43 @@ pub fn switch_cmd(t: &str, to: &str, fresh: bool, as_json: bool) -> Result<()> {
         c.p.bold(&s.terminal),
         s.agent.name(),
         s.from,
+        c.p.bold(&s.to)
+    );
+    if !s.started {
+        println!(
+            "{}",
+            c.p.warn("The launch was typed, but the agent is not seen running yet: look at the terminal.")
+        );
+    }
+    Ok(())
+}
+
+/// `cswap herdr restart <terminal>`.
+pub fn restart_cmd(t: &str, allow: Allow, as_json: bool) -> Result<()> {
+    let c = Ctx::load()?;
+    let s = restart(&c, t, allow)?;
+    if as_json {
+        let v = json!({
+            "terminal": s.terminal,
+            "agent": s.agent.id(),
+            "account": s.to,
+            "session": s.session,
+            "resumed": s.session.is_some(),
+            "started": s.started,
+            "line": s.line,
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let how = if s.session.is_some() {
+        "same conversation"
+    } else {
+        "new conversation"
+    };
+    println!(
+        "{}  {} started again on {}, {how}.",
+        c.p.bold(&s.terminal),
+        s.agent.name(),
         c.p.bold(&s.to)
     );
     if !s.started {
@@ -676,6 +866,33 @@ mod tests {
             launch_line(root, &["claude".to_string()], &[]),
             "cswap claude --cswap=root"
         );
+    }
+
+    #[test]
+    fn sub_agents_at_work_are_found_at_any_depth() {
+        let t = |a: &str, parent: Option<&str>, status: Option<&str>| {
+            (
+                a.to_string(),
+                parent.map(str::to_string),
+                status.map(str::to_string),
+            )
+        };
+        let all = [
+            t("t1", None, Some("idle")),
+            t("t2", Some("t1"), Some("done")),
+            t("t3", Some("t1"), Some("working")),
+            // Under a child that is itself done.
+            t("t4", Some("t2"), Some("blocked")),
+            // A plain program has no status.
+            t("t5", Some("t1"), None),
+            // Someone else's.
+            t("t6", Some("t9"), Some("working")),
+            t("t9", None, Some("idle")),
+        ];
+        assert_eq!(working_under(&all, "t1"), ["t3", "t4"]);
+        assert_eq!(working_under(&all, "t2"), ["t4"]);
+        assert!(working_under(&all, "t3").is_empty());
+        assert_eq!(working_under(&all, "t9"), ["t6"]);
     }
 
     #[test]

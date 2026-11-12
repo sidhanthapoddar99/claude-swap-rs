@@ -322,7 +322,15 @@ fn the_account_selected_on_the_accounts_page_is_spelled_out() {
         .iter()
         .position(|l| l.contains("+ Add account"))
         .unwrap();
-    assert!(rows[add + 1].contains('╰'), "{text}");
+    // The add button is the last line of the list, level with the bottom
+    // of the card beside it, and every agent has a box of its own above it.
+    assert!(rows[add].contains('╰'), "{text}");
+    let boxed = |title: &str, name: &str| {
+        let top = rows.iter().position(|l| l.contains(title)).unwrap();
+        assert!(rows[top + 1].contains(name) && top < add, "{text}");
+    };
+    boxed("╭ Claude Code ─", "work");
+    boxed("╭ Codex ─", "team");
 }
 
 #[test]
@@ -633,6 +641,15 @@ fn keys_move_between_the_menu_and_the_page() {
 }
 
 #[test]
+fn a_page_is_named_by_its_title_in_any_case() {
+    for page in Page::ALL {
+        assert_eq!(Page::named(&page.title().to_lowercase()), Some(page));
+    }
+    assert_eq!(Page::named(" Usage "), Some(Page::Usage));
+    assert_eq!(Page::named("usages"), None);
+}
+
+#[test]
 fn a_click_lands_on_what_is_drawn_there() {
     use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     let sb = Sandbox::new();
@@ -784,6 +801,101 @@ fn an_update_check_can_be_asked_for_and_says_what_it_found() {
     let text = screen(&mut app, 132, 40);
     assert!(text.contains("99.0.0 is out"), "{text}");
     assert!(text.contains("cswap update"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn path_shims_are_turned_on_and_off_from_the_shell_tab() {
+    let sb = Sandbox::new();
+    sb.demo();
+    sb.fake_agents();
+    let (mut app, _rx) = app();
+    key(&mut app, KeyCode::Char('0'));
+    key(&mut app, KeyCode::Char(']'));
+    key(&mut app, KeyCode::Char(']'));
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("OTHER PROGRAMS"), "{text}");
+    let row = text.lines().find(|l| l.contains("PATH shims   ")).unwrap();
+    assert!(row.contains("off"), "{row}");
+
+    // The row comes after the shells. Enter opens the boxes, none ticked.
+    let at = app.derived.shells.len();
+    app.sel[Page::Settings.index()] = at;
+    key(&mut app, KeyCode::Enter);
+    let text = screen(&mut app, 132, 40);
+    show("settings/shims dialog", &text);
+    assert!(text.contains("Agents with a PATH shim"), "{text}");
+    assert!(text.contains("[ ] claude"), "{text}");
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::Enter);
+
+    // Saved: the link, the line in the login shell's file, and what to do next.
+    let text = screen(&mut app, 132, 40);
+    show("settings/shims on", &text);
+    assert!(text.contains("PATH shims are on for claude"), "{text}");
+    assert!(
+        text.contains("Added the PATH line to ~/.zprofile"),
+        "{text}"
+    );
+    assert!(text.contains("hc server restart --fresh"), "{text}");
+    assert_eq!(crate::store::Settings::load().unwrap().shims, ["claude"]);
+    let link = crate::shim::dir().join("claude");
+    assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+    let zprofile = crate::paths::home().join(".zprofile");
+    assert!(std::fs::read_to_string(&zprofile)
+        .unwrap()
+        .contains(".cswap/shims"));
+    key(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none());
+    let text = screen(&mut app, 132, 40);
+    let row = text.lines().find(|l| l.contains("PATH shims   ")).unwrap();
+    assert!(row.contains("claude"), "{row}");
+
+    // The shim covers every shell, so each shell shows claude as integrated
+    // and its tick there is locked, with the reason beside it.
+    let zsh = app
+        .derived
+        .shells
+        .iter()
+        .position(|s| s.name == "zsh")
+        .unwrap();
+    assert!(app.derived.shells[zsh].wraps(Harness::Claude));
+    assert!(!app.derived.shells[zsh].wraps(Harness::Codex));
+    app.sel[Page::Settings.index()] = zsh;
+    let text = screen(&mut app, 132, 40);
+    show("settings/shell with a shim", &text);
+    assert!(text.contains("tick here is locked"), "{text}");
+    key(&mut app, KeyCode::Enter);
+    let text = screen(&mut app, 132, 40);
+    show("settings/shell dialog with a shim", &text);
+    assert!(text.contains("PATH shim is on"), "{text}");
+    key(&mut app, KeyCode::Char(' ')); // claude: locked, stays ticked
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Char(' ')); // codex
+    key(&mut app, KeyCode::Enter);
+    // Only the choice that was open is stored: claude is not put on the list.
+    assert_eq!(
+        crate::store::Settings::load().unwrap().shells["zsh"],
+        ["codex"]
+    );
+    assert!(app.derived.shells[zsh].wraps(Harness::Claude));
+    app.modal = None;
+
+    // Unticked and saved, it is all gone again.
+    app.sel[Page::Settings.index()] = at;
+    key(&mut app, KeyCode::Enter);
+    assert!(screen(&mut app, 132, 40).contains("[x] claude"));
+    key(&mut app, KeyCode::Char(' '));
+    key(&mut app, KeyCode::Enter);
+    let text = screen(&mut app, 132, 40);
+    assert!(text.contains("PATH shims are off"), "{text}");
+    assert!(text.contains("out of ~/.zprofile"), "{text}");
+    assert!(crate::store::Settings::load().unwrap().shims.is_empty());
+    assert!(!crate::shim::dir().exists() && !zprofile.exists());
+    // The shell's own list is what counts again.
+    key(&mut app, KeyCode::Enter);
+    assert!(!app.derived.shells[zsh].wraps(Harness::Claude));
+    assert!(app.derived.shells[zsh].wraps(Harness::Codex));
 }
 
 #[test]
@@ -1048,42 +1160,98 @@ fn the_resets_page_has_three_parts_and_one_weekly_figure_per_account() {
 }
 
 #[test]
-fn selecting_a_reset_softly_marks_the_accounts_other_rows() {
+fn enter_or_a_second_click_fades_every_other_accounts_resets() {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     let sb = Sandbox::new();
     sb.demo();
     let (mut app, _rx) = app();
     app.dispatch(Action::Go(Page::Resets));
     app.focus = Focus::Main;
-    // The colour of the marker in front of each row of an account.
-    let marks = |app: &mut App, name: &str| {
+    let faint = app.theme.faint();
+    // For each row of an account, top to bottom: where it is on the screen,
+    // whether it has a marker in front, and whether its name is faded.
+    let rows = |app: &mut App, name: &str| {
         let mut term = Terminal::new(TestBackend::new(132, 40)).unwrap();
         term.draw(|f| ui::draw(f, app)).unwrap();
         let buf = term.backend().buffer().clone();
         let mut out = Vec::new();
         for y in 0..40 {
             let row: String = (0..132).map(|x| buf[(x, y)].symbol()).collect();
-            if let Some(at) = row.find(&format!("▌● {name}")) {
+            if let Some(at) = row.find(&format!("● {name}")) {
                 let x = row[..at].chars().count() as u16;
-                out.push(buf[(x, y)].fg);
+                let marked = buf[(x - 1, y)].symbol() == "▌";
+                out.push((y, marked, buf[(x + 2, y)].fg == faint));
             }
         }
         out
     };
-    let (strong, faint) = (app.theme.accent(), app.theme.faint());
+    let look = |app: &mut App, name: &str| -> Vec<(bool, bool)> {
+        rows(app, name)
+            .into_iter()
+            .map(|(_, m, f)| (m, f))
+            .collect()
+    };
+    const PLAIN: (bool, bool) = (false, false);
+    const SELECTED: (bool, bool) = (true, false);
+    const FADED: (bool, bool) = (false, true);
 
     // The rows, top to bottom: work's spare reset, the weekly resets of work
-    // and side, then the renewals of side and work.
+    // and side, then the renewals of side and work. Selecting one marks that
+    // row and nothing else.
     app.sel[Page::Resets.index()] = 0;
-    assert_eq!(marks(&mut app, "work"), [strong, faint, faint]);
-    assert!(marks(&mut app, "side").is_empty());
+    assert_eq!(look(&mut app, "work"), [SELECTED, PLAIN, PLAIN]);
+    assert_eq!(look(&mut app, "side"), [PLAIN, PLAIN]);
+    assert!(screen(&mut app, 132, 40).contains("⏎ only this account"));
 
+    // Enter narrows the page to the row's account: the others fade.
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.spot.as_deref(), Some("claude-1"));
+    assert_eq!(look(&mut app, "work"), [SELECTED, PLAIN, PLAIN]);
+    assert_eq!(look(&mut app, "side"), [FADED, FADED]);
+    let text = screen(&mut app, 132, 40);
+    assert!(
+        text.contains("⏎ show all") && text.contains("esc show all"),
+        "{text}"
+    );
+
+    // The selection still moves anywhere; a faded row keeps its marker.
     app.sel[Page::Resets.index()] = 2;
-    assert_eq!(marks(&mut app, "side"), [strong, faint]);
-    assert!(marks(&mut app, "work").is_empty());
+    assert_eq!(look(&mut app, "side"), [(true, true), FADED]);
+    // Enter there narrows to that account instead.
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(look(&mut app, "side"), [SELECTED, PLAIN]);
+    assert_eq!(look(&mut app, "work"), [FADED, FADED, FADED]);
+    // Enter on a row of the account shows them all again.
+    key(&mut app, KeyCode::Enter);
+    assert!(app.spot.is_none());
+    assert_eq!(look(&mut app, "work"), [PLAIN, PLAIN, PLAIN]);
 
-    // Nothing is marked while the menu has the keys.
-    app.focus = Focus::Nav;
-    assert!(marks(&mut app, "work").is_empty() && marks(&mut app, "side").is_empty());
+    // Escape shows all first, and only then goes back to the menu.
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Esc);
+    assert!(app.spot.is_none() && app.focus == Focus::Main);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Nav);
+
+    // One click selects a row; a second click on it narrows the page.
+    let (y, ..) = rows(&mut app, "work")[1];
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 60,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.on_mouse(click);
+    assert_eq!((app.row(), app.spot.is_none()), (1, true));
+    assert_eq!(look(&mut app, "side"), [PLAIN, PLAIN]);
+    app.on_mouse(click);
+    assert_eq!(look(&mut app, "work"), [PLAIN, SELECTED, PLAIN]);
+    assert_eq!(look(&mut app, "side"), [FADED, FADED]);
+
+    // Leaving the page shows everything again.
+    app.dispatch(Action::Go(Page::Overview));
+    app.dispatch(Action::Go(Page::Resets));
+    assert!(app.spot.is_none());
 }
 
 #[test]

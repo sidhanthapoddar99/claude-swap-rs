@@ -1,5 +1,6 @@
-//! Accounts: the list on the left, everything about the selected one on the
-//! right. Adding, signing in, naming and removing all start here.
+//! Accounts: the list on the left, in a box per agent, and everything about
+//! the selected one on the right. Adding, signing in, naming and removing all
+//! start here.
 //!
 //! The right side has four parts. First the facts, a line each. Then every
 //! limit of the account and its pay-as-you-go credit, then the spare resets
@@ -13,27 +14,23 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Borders, Paragraph};
 use ratatui::Frame;
 
+use super::boxes::{plan, scroll};
 use super::{
     dot_or_star, expiry_color, fit_date, head, launch_hint, limit_lines, name_cell, paint_row,
-    plan_text, row_style, scroll_start, status, status_span, LimitCols,
+    plan_text, row_style, status, status_span, LimitCols,
 };
 use crate::harness::Harness;
 use crate::model::{self, Source};
 use crate::paths;
 use crate::store::{self, Account};
 use crate::tui::app::{Action, App, Focus};
-use crate::tui::theme::{DOT, STAR};
+use crate::tui::theme::STAR;
 use crate::tui::widgets::{
     self, card, card_note, card_with, clip, fit, kv, kv_wrapped, truncate, Hits,
 };
 use crate::view;
 
 const LABEL_W: usize = 11;
-
-enum Item {
-    Header(Harness),
-    Account(usize),
-}
 
 pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let list_w = (area.width * 2 / 5).clamp(28, 40);
@@ -49,31 +46,32 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     }
 }
 
+/// What an agent's box says on its border, at the right: where a launch
+/// that names no account goes when that is none of the accounts in the box
+/// (those wear a star), or that the agent is missing or experimental.
+fn box_note(app: &App, h: Harness) -> &'static str {
+    let installed = app.derived.bins.get(&h).is_some_and(|b| b.is_some());
+    match app.hs.get(&h).map(|s| s.start.as_str()) {
+        _ if !installed => "not installed",
+        Some("auto") => "default: auto",
+        Some("root") => "default: root",
+        _ if h.spec().experimental => "experimental",
+        _ => "",
+    }
+}
+
+/// The accounts in a box per agent, and the add button under them.
 fn list(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let t = &app.theme;
     let focused = app.focus == Focus::Main;
-    let inner = card(f, area, "", t, focused.then(|| t.accent()));
-    let w = inner.width as usize;
-    if inner.height == 0 {
+    if area.height == 0 || area.width < 8 {
         return;
     }
-
-    let mut items = Vec::new();
-    let mut last = None;
-    for (i, acc) in app.reg.accounts.iter().enumerate() {
-        if last != Some(acc.harness) {
-            items.push(Item::Header(acc.harness));
-            last = Some(acc.harness);
-        }
-        items.push(Item::Account(i));
-    }
-
-    // The last line of the card is the add button, with a blank line above
-    // it when there is room. The accounts scroll in what is left.
-    let add = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
+    // The last line is the add button. The boxes scroll in what is above it.
+    let add = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" + ", t.s_accent()),
+            Span::styled("  + ", t.s_accent()),
             Span::styled("Add account", t.s_accent()),
             Span::styled("  a", t.s_faint()),
         ])),
@@ -81,75 +79,78 @@ fn list(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     );
     hits.add(add, Action::AddAccount);
 
-    let sel = app.row();
-    let sel_line = items
-        .iter()
-        .position(|it| matches!(it, Item::Account(i) if *i == sel))
-        .unwrap_or(0);
-    let h = (inner.height as usize).saturating_sub(if inner.height >= 4 { 2 } else { 1 });
-    // Keep the group header of the first visible account on screen.
-    let start = scroll_start(sel_line, items.len(), h);
-    for (line, item) in items.iter().enumerate().skip(start).take(h) {
-        let rect = Rect::new(inner.x, inner.y + (line - start) as u16, inner.width, 1);
-        match item {
-            Item::Header(hn) => {
-                let installed = app.derived.bins.get(hn).is_some_and(|b| b.is_some());
-                let mut spans = vec![
-                    Span::styled(format!(" {DOT} "), Style::default().fg(t.harness(*hn))),
-                    Span::styled(
-                        hn.name().to_uppercase(),
-                        Style::default().fg(t.dim()).add_modifier(Modifier::BOLD),
-                    ),
-                ];
-                // Where a launch that names no account goes, when it is not
-                // one of the accounts below: those wear a star.
-                let start = app.hs.get(hn).map(|s| s.start.as_str());
-                let note = match start {
-                    _ if !installed => "not installed",
-                    Some("auto") => "default: auto",
-                    Some("root") => "default: root",
-                    _ if hn.spec().experimental => "experimental",
-                    _ => "",
-                };
-                if !note.is_empty() {
-                    let used = widgets::line_width(&Line::from(spans.clone()));
-                    let room = w.saturating_sub(used + 1);
-                    if widgets::width(note) <= room {
-                        spans.push(Span::raw(" ".repeat(room - widgets::width(note))));
-                        spans.push(Span::styled(note, t.s_faint()));
-                    }
-                }
-                f.render_widget(Paragraph::new(Line::from(spans)), rect);
+    let accounts = &app.reg.accounts;
+    let view_h = (area.height as usize).saturating_sub(1);
+    if accounts.is_empty() || view_h < 3 {
+        return;
+    }
+    let agents: Vec<Harness> = accounts.iter().map(|a| a.harness).collect();
+    // One line each.
+    let lens = vec![1; accounts.len()];
+    let plan = plan(&agents, &lens, 0);
+    let sel = app.row().min(accounts.len() - 1);
+    let top = scroll(&plan, &lens, sel, view_h);
+    let end = top + view_h;
+    let screen_y = |line: usize| area.y + (line - top) as u16;
+
+    for g in &plan.groups {
+        let Some((from, to, sides)) = g.shown(top, end) else {
+            continue;
+        };
+        // The box with the selection wears its agent's colour.
+        let color = t.harness(g.harness);
+        let border = if focused && g.accounts.contains(&sel) {
+            color
+        } else {
+            t.border()
+        };
+        let title = Line::from(Span::styled(
+            g.harness.name(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+        let rect = Rect::new(area.x, screen_y(from), area.width, (to - from) as u16);
+        let inner = card_with(f, rect, title, t, border, sides);
+        let note = box_note(app, g.harness);
+        let room = (area.width as usize).saturating_sub(g.harness.name().len() + 10);
+        if !note.is_empty() && sides.contains(Borders::TOP) && note.len() <= room {
+            card_note(f, rect, Line::from(Span::styled(note, t.s_faint())), t);
+        }
+
+        let w = inner.width as usize;
+        for i in g.accounts.clone() {
+            let y = plan.at[i];
+            if y < top || y >= end {
+                continue;
             }
-            Item::Account(i) => {
-                let acc = &app.reg.accounts[*i];
-                let selected = focused && *i == sel;
-                let (mark, bg) = row_style(app, selected || *i == sel);
-                if *i == sel {
-                    paint_row(f, rect, bg);
-                }
-                let state = status(app, acc);
-                let state_w = 12.min(w / 3);
-                // The default account of the agent has a star before its name.
-                let star = if app.is_default(acc) {
-                    Span::styled(format!("{STAR} "), t.s(t.harness(acc.harness)))
-                } else {
-                    Span::raw("  ")
-                };
-                let mut spans = vec![mark, star];
-                spans.extend(name_cell(
-                    app,
-                    acc,
-                    w.saturating_sub(4 + state_w),
-                    selected,
-                    false,
-                ));
-                spans.push(Span::raw(" "));
-                let s = status_span(t, state);
-                spans.push(Span::styled(fit(&s.content, state_w), s.style));
-                f.render_widget(Paragraph::new(Line::from(spans)), rect);
-                hits.add(rect, Action::Row(*i));
+            let acc = &accounts[i];
+            let rect = Rect::new(inner.x, screen_y(y), inner.width, 1);
+            // The selected account keeps its shade while the menu has the
+            // keys: the right side is about it either way.
+            let (mark, bg) = row_style(app, i == sel);
+            if i == sel {
+                paint_row(f, rect, bg);
             }
+            let state = status(app, acc);
+            let state_w = 12.min(w / 3);
+            // The default account of the agent has a star before its name.
+            let star = if app.is_default(acc) {
+                Span::styled(format!("{STAR} "), t.s(color))
+            } else {
+                Span::raw("  ")
+            };
+            let mut spans = vec![mark, star];
+            spans.extend(name_cell(
+                app,
+                acc,
+                w.saturating_sub(4 + state_w),
+                focused && i == sel,
+                false,
+            ));
+            spans.push(Span::raw(" "));
+            let s = status_span(t, state);
+            spans.push(Span::styled(fit(&s.content, state_w), s.style));
+            f.render_widget(Paragraph::new(Line::from(spans)), rect);
+            hits.add(rect, Action::Row(i));
         }
     }
 }

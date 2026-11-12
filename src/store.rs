@@ -43,6 +43,11 @@ pub struct Settings {
     /// The agents each shell wraps, by shell name. A shell that is not here
     /// has no list of its own yet: see `shell::chosen`.
     pub shells: BTreeMap<String, Vec<String>>,
+    /// The agents that have a PATH shim, by id. Empty: the feature is off.
+    pub shims: Vec<String>,
+    /// Login files cswap made itself to hold the shims' `PATH` line, so
+    /// turning shims off can remove them again.
+    pub shim_files_made: Vec<std::path::PathBuf>,
 }
 
 impl Default for Settings {
@@ -59,6 +64,8 @@ impl Default for Settings {
             auto_skip_above_pct: 97.0,
             update_check: true,
             shells: BTreeMap::new(),
+            shims: Vec::new(),
+            shim_files_made: Vec::new(),
         }
     }
 }

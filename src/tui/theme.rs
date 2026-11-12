@@ -300,21 +300,6 @@ impl Theme {
     pub fn raised(&self) -> Color {
         self.pick(|p| p.raised, Color::Reset)
     }
-    /// A row that goes with the selected one: halfway from the panel to
-    /// `raised`. So small a step needs 24-bit colour. Without it the row is
-    /// left as it is, and its marker alone says it.
-    pub fn soft(&self) -> Color {
-        if self.scheme == Scheme::Terminal || !self.truecolor {
-            return self.panel();
-        }
-        let p = self.palette();
-        let mid = |a: u8, b: u8| ((a as u16 + b as u16) / 2) as u8;
-        Color::Rgb(
-            mid(p.panel.0, p.raised.0),
-            mid(p.panel.1, p.raised.1),
-            mid(p.panel.2, p.raised.2),
-        )
-    }
     pub fn border(&self) -> Color {
         self.pick(|p| p.border, Color::DarkGray)
     }

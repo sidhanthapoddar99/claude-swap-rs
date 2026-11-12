@@ -14,6 +14,7 @@ use crate::store::Account;
 
 pub mod accounts;
 pub mod analytics;
+mod boxes;
 pub mod health;
 pub mod help;
 pub mod integrations;

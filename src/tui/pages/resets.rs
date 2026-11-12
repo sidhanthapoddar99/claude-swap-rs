@@ -8,8 +8,10 @@
 //! what resets, how long until then, the date, and how full the account's
 //! week is. Only a spare reset has a count.
 //!
-//! Selecting a row softly marks every other row of the same account, in all
-//! three tables, so one account's resets can be read off at a glance.
+//! Enter on a row, or a second click on it, narrows the page to that row's
+//! account: every other account's rows fade, in all three tables, so one
+//! account's resets can be read off at a glance. Enter on a row of that
+//! account, or Esc, shows them all again.
 //!
 //! This page only shows. cswap has no way to spend a reset, on purpose.
 
@@ -266,11 +268,11 @@ struct Section<'a> {
     note: Option<(String, Color)>,
 }
 
-/// What is selected on the page: the row, counted over all three tables,
-/// and the account it belongs to.
+/// What is picked on the page: the selected row, counted over all three
+/// tables, and the account the page is narrowed to.
 struct Picked<'a> {
     row: Option<usize>,
-    key: Option<&'a str>,
+    spot: Option<&'a str>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,25 +338,31 @@ fn table(
         .row
         .and_then(|s| s.checked_sub(offset))
         .filter(|s| *s < rows.len());
-    // A table without the selection scrolls to the selected account's first
-    // row in it, so that row is in view too.
-    let same = |row: &Row| picked.key == Some(row.key.as_str());
-    let anchor = local.or_else(|| rows.iter().position(same)).unwrap_or(0);
+    // A table without the selection scrolls to the first row of the account
+    // the page is narrowed to, so that row is in view too.
+    let spot = |row: &Row| picked.spot == Some(row.key.as_str());
+    let anchor = local.or_else(|| rows.iter().position(spot)).unwrap_or(0);
     let start = scroll_start(anchor, rows.len(), list_h);
     for (j, row) in rows.iter().enumerate().skip(start).take(list_h) {
         let rect = Rect::new(inner.x, top + (j - start) as u16, inner.width, 1);
         let selected = local == Some(j);
-        let (mut mark, bg) = row_style(app, selected);
+        let (mark, bg) = row_style(app, selected);
         if selected {
             paint_row(f, rect, bg);
-        } else if same(row) {
-            // The selected account's other rows: a softer shade and a
-            // fainter marker than the selection's own.
-            paint_row(f, rect, Style::default().bg(t.soft()));
-            mark = Span::styled("▌", Style::default().fg(t.faint()).bg(t.soft()));
+        }
+        let mut cells = line(app, row, now, &c);
+        if picked.spot.is_some() && !spot(row) {
+            // Another account's row while the page is narrowed to one: all
+            // of it in the faintest colour, the dot and the bar too.
+            for cell in &mut cells {
+                cell.style = Style {
+                    bg: cell.style.bg,
+                    ..t.s_faint()
+                };
+            }
         }
         let mut spans = vec![mark];
-        spans.extend(line(app, row, now, &c));
+        spans.extend(cells);
         f.render_widget(Paragraph::new(Line::from(spans)), rect);
         hits.add(rect, Action::Row(offset + j));
     }
@@ -401,9 +409,11 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
 
     let picked = Picked {
         row: sel,
-        key: sel
-            .and_then(|s| parts.iter().flatten().nth(s))
-            .map(|r| r.key.as_str()),
+        // An account that has no row left narrows nothing.
+        spot: app
+            .spot
+            .as_deref()
+            .filter(|k| parts.iter().flatten().any(|r| r.key == *k)),
     };
 
     let spare = view::grant_count(&app.reg, now);

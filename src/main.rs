@@ -6,10 +6,11 @@
 //!   argument parser below.
 //! - `cswap <command>` is one of the plain commands.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::process::ExitCode;
 
+mod agent_info;
 mod cli;
 mod fsx;
 mod harness;
@@ -27,6 +28,7 @@ mod platform;
 mod refresh;
 mod sessions;
 mod shell;
+mod shim;
 mod store;
 mod suggest;
 mod sync;
@@ -75,6 +77,23 @@ enum HerdrCmd {
         /// Start a new conversation when the running one cannot be told
         #[arg(long)]
         fresh: bool,
+        /// Go ahead while its sub-agents are still working
+        #[arg(long)]
+        force: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop the agent in a terminal and start it again, same conversation
+    Restart {
+        /// The terminal: `t7` or its name
+        terminal: String,
+        /// Start a new conversation when the running one cannot be told
+        #[arg(long)]
+        fresh: bool,
+        /// Go ahead while its sub-agents are still working
+        #[arg(long)]
+        force: bool,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -97,10 +116,30 @@ enum HerdrCmd {
 }
 
 #[derive(Subcommand)]
+enum ShimsCmd {
+    /// Make shims: for the agents named, or every installed one
+    On {
+        /// claude, codex, agy, grok
+        agents: Vec<String>,
+    },
+    /// Remove the shims and the PATH lines
+    Off,
+}
+
+#[derive(Subcommand)]
 enum Cmd {
-    /// Open the dashboard (what a bare `cswap` does)
-    #[command(visible_alias = "ui")]
-    Dashboard,
+    /// How a coding agent uses cswap: a short guide written for the agent
+    AgentInfo,
+
+    /// Open the dashboard (what a bare `cswap` does), on a page if you name one
+    #[command(
+        visible_alias = "ui",
+        after_help = "Examples:\n  cswap dashboard            the Overview\n  cswap dashboard usage      the Usage page\n\nPages: overview, usage, resets, accounts, root, sync, sessions, analytics,\nhealth, integrations, settings, help."
+    )]
+    Dashboard {
+        /// The page to open on
+        page: Option<String>,
+    },
 
     /// Pick an agent and an account, then run it
     #[command(
@@ -117,9 +156,9 @@ enum Cmd {
         args: Vec<String>,
     },
 
-    /// Agents in herdr terminals: which account, and switch it
+    /// Agents in herdr terminals: which account, switch it, restart it
     #[command(
-        after_help = "Examples:\n  cswap herdr ls                  which account each terminal's agent runs on\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n  cswap herdr install --show      put the cswap layout into herdr and show it\n  cswap herdr status              whether the layout is installed\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. It refuses in the middle of a turn."
+        after_help = "Examples:\n  cswap herdr ls                  which account each terminal's agent runs on\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr restart t7          stop it, start it again where it is, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n  cswap herdr install --show      put the cswap layout into herdr and show it\n  cswap herdr status              whether the layout is installed\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. A restart does the same on the account it\nis on, so an update takes hold. Both refuse in the middle of a turn, and while\nsub-agents of the agent are still working: a report they send meanwhile would\nbe lost. `--force` goes ahead anyway."
     )]
     Herdr {
         #[command(subcommand)]
@@ -261,6 +300,25 @@ enum Cmd {
         shell: String,
     },
 
+    /// PATH shims: agents started by other programs go through cswap too
+    #[command(
+        after_help = "Examples:\n  cswap shims                where they stand\n  cswap shims on             a shim for every installed agent\n  cswap shims on claude      only for Claude Code\n  cswap shims off            remove them and the PATH lines again\n\nA shim is a link named after an agent, in ~/.cswap/shims, which is put first\non PATH in your login files. A program that starts `claude` itself, such as\nherdr, then reaches cswap. Off by default. Linux and macOS."
+    )]
+    Shims {
+        #[command(subcommand)]
+        what: Option<ShimsCmd>,
+    },
+
+    /// Undo what cswap wrote outside ~/.cswap: shims and shell lines
+    #[command(
+        after_help = "Removes the PATH shims with their lines in your login files, and the cswap\nline in your shells' rc files. It then prints the two commands that delete\nthe binary and ~/.cswap. It does not run them: that folder holds your logins."
+    )]
+    Uninstall {
+        /// Do not ask first
+        #[arg(short, long)]
+        yes: bool,
+    },
+
     /// Install the latest release
     #[command(visible_alias = "upgrade")]
     Update {
@@ -284,8 +342,20 @@ fn help(p: &Paint) -> String {
         env!("CARGO_PKG_VERSION")
     ));
 
+    // First, because an agent reads from the top and stops early.
+    out.push_str(&head("FOR AGENTS"));
+    out.push_str(&row(
+        "cswap agent-info",
+        "how an agent uses cswap. If you are one, read it first",
+    ));
+    out.push('\n');
+
     out.push_str(&head("USAGE"));
     out.push_str(&row("cswap", "open the dashboard"));
+    out.push_str(&row(
+        "cswap dashboard [page]",
+        "open it on a page: usage, resets, …",
+    ));
     out.push_str(&row(
         "cswap <agent> [args…]",
         "run an agent on the account it starts on",
@@ -367,8 +437,20 @@ fn help(p: &Paint) -> String {
                 ),
                 ("update", "install the latest release (--check only looks)"),
                 (
+                    "shims [on|off]",
+                    "PATH shims: agents started by other programs use cswap too",
+                ),
+                (
+                    "uninstall",
+                    "undo the shims and the lines in your shell files",
+                ),
+                (
                     "herdr switch <t> <acct>",
                     "move a herdr terminal's agent to another account",
+                ),
+                (
+                    "herdr restart <t>",
+                    "start a herdr terminal's agent again, same conversation",
                 ),
                 (
                     "herdr install",
@@ -417,13 +499,13 @@ fn help(p: &Paint) -> String {
     out
 }
 
-fn dashboard() -> Result<()> {
+fn dashboard(page: Option<tui::app::Page>) -> Result<()> {
     // The check runs beside the dashboard and is read from its cache there.
     let settings = store::Settings::load()?;
     if update::enabled(&settings) {
         std::thread::spawn(update::check_if_due);
     }
-    match tui::run()? {
+    match tui::run(page)? {
         Some(tui::app::Exit::Launch { key }) => {
             let (h, _) =
                 store::parse_key(&key).ok_or_else(|| anyhow::anyhow!("bad account key {key}"))?;
@@ -448,20 +530,27 @@ fn run() -> Result<ExitCode> {
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
 
+    // Started through a PATH shim, under an agent's own name: every word
+    // belongs to the agent.
+    if let Some(h) = shim::invoked_as() {
+        wrap::run(h, args)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
     // An agent's name first: the rest belongs to the agent, word for word.
     if let Some(h) = args.first().and_then(|a| Harness::from_id(a)) {
         wrap::run(h, args[1..].to_vec())?;
         return Ok(ExitCode::SUCCESS);
     }
     if args.is_empty() {
-        dashboard()?;
+        dashboard(None)?;
         return Ok(ExitCode::SUCCESS);
     }
 
     let command = Cli::command().override_help(help(&Paint::stdout()));
     let cli = Cli::from_arg_matches(&command.get_matches())?;
     let Some(cmd) = cli.command else {
-        dashboard()?;
+        dashboard(None)?;
         return Ok(ExitCode::SUCCESS);
     };
     // Commands whose output is read by a program, or that start an agent,
@@ -469,8 +558,9 @@ fn run() -> Result<ExitCode> {
     let quiet = matches!(
         cmd,
         Cmd::ShellInit { .. }
+            | Cmd::AgentInfo
             | Cmd::Start { .. }
-            | Cmd::Dashboard
+            | Cmd::Dashboard { .. }
             | Cmd::Update { .. }
             | Cmd::Ps { json: true }
             | Cmd::List { json: true }
@@ -479,7 +569,20 @@ fn run() -> Result<ExitCode> {
     );
     let mut ok = true;
     match cmd {
-        Cmd::Dashboard => dashboard()?,
+        Cmd::AgentInfo => print!("{}", agent_info::text()),
+        Cmd::Dashboard { page } => {
+            let page = match page {
+                Some(word) => Some(tui::app::Page::named(&word).with_context(|| {
+                    let all: Vec<String> = tui::app::Page::ALL
+                        .iter()
+                        .map(|p| p.title().to_lowercase())
+                        .collect();
+                    format!("'{word}' is not a page. Use one of: {}", all.join(", "))
+                })?),
+                None => None,
+            };
+            dashboard(page)?
+        }
         Cmd::Start {
             default,
             agent,
@@ -494,8 +597,15 @@ fn run() -> Result<ExitCode> {
                 terminal,
                 account,
                 fresh,
+                force,
                 json,
-            } => herdr::switch_cmd(&terminal, &account, fresh, json)?,
+            } => herdr::switch_cmd(&terminal, &account, herdr::Allow { fresh, force }, json)?,
+            HerdrCmd::Restart {
+                terminal,
+                fresh,
+                force,
+                json,
+            } => herdr::restart_cmd(&terminal, herdr::Allow { fresh, force }, json)?,
             HerdrCmd::Install { show, json } => integration::install_cmd(show, json)?,
             HerdrCmd::Status { json } => ok = integration::status_cmd(json)?,
         },
@@ -524,6 +634,14 @@ fn run() -> Result<ExitCode> {
         Cmd::Migrate => migrate::run()?,
         Cmd::ShellInit { shell } => cli::shell_init(&shell)?,
         Cmd::Update { check } => update::run(check)?,
+        Cmd::Shims { what: None } => ok = cli::shims_status()?,
+        Cmd::Shims {
+            what: Some(ShimsCmd::On { agents }),
+        } => cli::shims_on(&agents)?,
+        Cmd::Shims {
+            what: Some(ShimsCmd::Off),
+        } => cli::shims_off()?,
+        Cmd::Uninstall { yes } => cli::uninstall(yes)?,
     }
     if !quiet {
         if let Ok(settings) = store::Settings::load() {

@@ -99,9 +99,16 @@ impl Env {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(BIN);
-        c.args(args)
-            .env_clear()
+        let mut c = self.program(BIN);
+        c.args(args);
+        c
+    }
+
+    /// Any program, in this home's environment and with nothing of the real
+    /// one: the tests may themselves be run by an agent that cswap started.
+    fn program(&self, bin: impl AsRef<std::ffi::OsStr>) -> Command {
+        let mut c = Command::new(bin);
+        c.env_clear()
             .env("HOME", self.home())
             .env("CSWAP_HOME", self.cswap_home())
             .env("CSWAP_PROC", self.home().join("proc"))
@@ -633,6 +640,8 @@ fn help_names_every_command_in_groups() {
     for flag in ["-h", "--help"] {
         let out = env.ok(&[flag]);
         for word in [
+            "FOR AGENTS",
+            "cswap agent-info",
             "USAGE",
             "AGENTS",
             "LOOK",
@@ -641,13 +650,17 @@ fn help_names_every_command_in_groups() {
             "SETUP",
             "EXAMPLES",
             "cswap start",
+            "cswap dashboard [page]",
             "ps  ",
             "root  ",
             "add <agent> <name>",
             "rename <account> <name>",
             "use <agent> [account]",
             "update  ",
+            "shims [on|off]",
+            "uninstall  ",
             "herdr switch",
+            "herdr restart <t>",
             "herdr install",
             "--cswap=",
             "--cswap  ",
@@ -658,6 +671,11 @@ fn help_names_every_command_in_groups() {
             out.lines().all(|l| l.chars().count() <= 100),
             "a help line is too long\n{out}"
         );
+        // The guide for agents is named before anything else.
+        assert!(
+            out.find("agent-info").unwrap() < out.find("USAGE").unwrap(),
+            "{flag}: agent-info is not at the top\n{out}"
+        );
     }
     assert!(env.ok(&["--version"]).contains(env!("CARGO_PKG_VERSION")));
     // A mistyped command is an error, not a silent dashboard.
@@ -667,7 +685,10 @@ fn help_names_every_command_in_groups() {
 /// A stand-in for herdr's `hc`. The terminal `t7` has the process named in
 /// `hc/pid` in front; Ctrl+C ends it, and a send puts the next agent there.
 /// With `hc/direct` the agent is the terminal's own program until it dies,
-/// and a shell after that, as herdr does for a kept terminal.
+/// and a shell after that, as herdr does for a kept terminal. `hc/ls` is what
+/// `hc ls` lists: the terminals under `t7`. With `hc/swallow` the shell has
+/// text at its prompt that swallows the next line sent, until a Ctrl+C
+/// clears it.
 const FAKE_HC: &str = r#"#!/bin/sh
 dir="$HOME/hc"
 old=$(cat "$dir/pid")
@@ -678,17 +699,32 @@ case "$1" in
     else front=1; fi
     if [ -f "$dir/direct" ] && [ "$front" = "$old" ]; then argv=claude; else argv=/bin/zsh; fi
     if [ -f "$dir/keep" ]; then keep=true; else keep=false; fi
+    if [ "$front" = 1 ]; then name=zsh; else name=claude; fi
     printf '{"address":"t7","state":"live","keep":%s,"argv":["%s"],' "$keep" "$argv"
-    printf '"status":{"state":"%s"},"foreground":{"pid":%s}}\n' "$(cat "$dir/status")" "$front"
+    printf '"status":{"state":"%s"},' "$(cat "$dir/status")"
+    printf '"foreground":{"pid":%s,"name":"%s"}}\n' "$front" "$name"
     ;;
-  keys) echo "$*" >> "$dir/log"; kill "$old" ;;
+  ls)
+    if [ -f "$dir/ls" ]; then cat "$dir/ls"; else echo '{"terminals":[]}'; fi
+    ;;
+  keys)
+    echo "$*" >> "$dir/log"
+    if kill "$old" 2>/dev/null; then :
+    elif [ -f "$dir/swallow" ]; then
+      n=$(($(cat "$dir/swallow") - 1))
+      if [ "$n" -le 0 ]; then rm "$dir/swallow"; else echo "$n" > "$dir/swallow"; fi
+    fi
+    ;;
   keep) echo "$*" >> "$dir/log"; : > "$dir/keep" ;;
   send)
     echo "$*" >> "$dir/log"
-    mv "$dir/next-proc" "$HOME/proc/$(cat "$dir/next")"
-    : > "$dir/sent"
+    if [ ! -f "$dir/swallow" ]; then
+      mv "$dir/next-proc" "$HOME/proc/$(cat "$dir/next")"
+      : > "$dir/sent"
+    fi
     ;;
 esac
+exit 0
 "#;
 
 /// A process that lives until it is killed and belongs to nobody, so that it
@@ -818,12 +854,126 @@ fn a_herdr_terminal_moves_to_another_account_and_keeps_its_conversation() {
         log.lines().collect::<Vec<_>>(),
         [
             "keys t7 ctrl+c",
+            // The prompt is cleared before the launch is typed.
+            "keys t7 ctrl+c",
             &format!("send t7 cswap claude --cswap=work --resume {SESSION}"),
         ]
     );
     let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
     assert_eq!(info["account"], "claude-1");
 
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
+/// A restart is a switch onto the account the agent is on: it comes back in
+/// the same terminal and conversation, as the program that is on disk now.
+#[test]
+fn a_herdr_terminal_restarts_its_agent_on_the_same_account() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0--model\0opus\0");
+    let h = env.home();
+    // What the agent looks like once it runs again: on its root login.
+    fs::write(h.join("hc/next-proc/environ"), "HC_TERMINAL_ID=t7\0").unwrap();
+
+    // Not in the middle of a turn.
+    fs::write(h.join("hc/status"), "working").unwrap();
+    let err = env.fails(&["herdr", "restart", "t7"]);
+    assert!(err.contains("middle of a turn"), "{err}");
+    assert!(!h.join("hc/log").exists(), "a refusal touched the terminal");
+    fs::write(h.join("hc/status"), "idle").unwrap();
+    // A switch onto the same account says how to restart instead.
+    let err = env.fails(&["herdr", "switch", "t7", "root"]);
+    assert!(err.contains("cswap herdr restart t7"), "{err}");
+
+    let done: Value = serde_json::from_str(&env.ok(&["herdr", "restart", "t7", "--json"])).unwrap();
+    assert_eq!(done["account"], "root");
+    assert_eq!(done["resumed"], true);
+    assert_eq!(done["started"], true);
+    let log = fs::read_to_string(h.join("hc/log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        [
+            "keys t7 ctrl+c",
+            "keys t7 ctrl+c",
+            &format!("send t7 cswap claude --cswap=root --model opus --resume {SESSION}"),
+        ]
+    );
+    let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
+    assert_eq!(info["account"], "claude-0");
+    assert_eq!(info["pid"], next);
+
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
+/// A sub-agent reports to its parent by having herdr type into the parent's
+/// terminal. While the parent is stopped that text lands in a bare shell.
+#[test]
+fn an_agent_whose_sub_agents_are_working_is_left_alone_unless_forced() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0");
+    let h = env.home();
+    fs::write(h.join("hc/next-proc/environ"), "HC_TERMINAL_ID=t7\0").unwrap();
+    // Under t7: one done, one working, and one working under the done one.
+    fs::write(
+        h.join("hc/ls"),
+        r#"{"terminals":[
+            {"address":"t7","state":"live","status":"idle"},
+            {"address":"t8","parent":"t7","state":"live","status":"done"},
+            {"address":"t9","parent":"t7","state":"live","status":"working"},
+            {"address":"t10","parent":"t8","state":"live","status":"blocked"},
+            {"address":"t11","state":"live","status":"working"}]}"#,
+    )
+    .unwrap();
+
+    let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
+    assert_eq!(info["children_working"], serde_json::json!(["t10", "t9"]));
+    assert_eq!(info["why_not"], Value::Null);
+    for args in [
+        vec!["herdr", "restart", "t7"],
+        vec!["herdr", "switch", "t7", "work"],
+    ] {
+        let err = env.fails(&args);
+        assert!(err.contains("2 sub-agents still working: t10, t9"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+    }
+    assert!(!h.join("hc/log").exists(), "a refusal touched the terminal");
+
+    let done: Value =
+        serde_json::from_str(&env.ok(&["herdr", "restart", "t7", "--force", "--json"])).unwrap();
+    assert_eq!(done["started"], true);
+    assert_eq!(done["resumed"], true);
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
+/// Text that reached the shell before the launch, such as a report with an
+/// apostrophe in it, leaves the shell waiting for the end of a quote, and a
+/// line typed there never runs.
+#[test]
+fn a_launch_that_the_shell_swallowed_is_typed_again() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0");
+    let h = env.home();
+    fs::write(h.join("hc/next-proc/environ"), "HC_TERMINAL_ID=t7\0").unwrap();
+    // The text arrives after the prompt was cleared: it takes the Ctrl+C
+    // that stops the agent, the one that clears, and one more.
+    fs::write(h.join("hc/swallow"), "2").unwrap();
+
+    let done: Value = serde_json::from_str(&env.ok(&["herdr", "restart", "t7", "--json"])).unwrap();
+    assert_eq!(done["started"], true, "{done}");
+    let line = format!("send t7 cswap claude --cswap=root --resume {SESSION}");
+    let log = fs::read_to_string(h.join("hc/log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        [
+            "keys t7 ctrl+c",
+            "keys t7 ctrl+c",
+            // Swallowed: the shell is still in front, so cswap clears the
+            // prompt and types the line again.
+            &line,
+            "keys t7 ctrl+c",
+            &line,
+        ]
+    );
     let _ = Command::new("kill").arg(next.to_string()).status();
 }
 
@@ -854,6 +1004,14 @@ fn the_text_views_work_without_a_terminal() {
     // The dashboard needs a terminal and says so.
     let err = env.fails(&[]);
     assert!(err.contains("terminal"), "{err}");
+    // It opens on a page when one is named, and a wrong name is said first.
+    let err = env.fails(&["dashboard", "Usage"]);
+    assert!(err.contains("terminal"), "{err}");
+    let err = env.fails(&["dashboard", "nonsense"]);
+    assert!(
+        err.contains("'nonsense' is not a page") && err.contains("usage, resets"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -883,13 +1041,8 @@ fn shell_init_wraps_the_installed_agents() {
 
     // What bash prints really is a wrapper: sourced, `claude` goes through cswap.
     let script = format!("{bash}\nclaude --print 'a b'\n");
-    let mut sh = Command::new("bash");
+    let mut sh = env.program("bash");
     sh.arg("-c").arg(&script);
-    for (k, v) in env.cmd(&[]).get_envs() {
-        if let Some(v) = v {
-            sh.env(k, v);
-        }
-    }
     sh.env(
         "PATH",
         format!(
@@ -1025,4 +1178,432 @@ fn the_herdr_layout_is_installed_from_the_repository() {
         "{}",
         text(&out.stderr)
     );
+}
+
+/// `cswap agent-info` is a guide an agent can act on: every command it names
+/// is one this binary has.
+#[test]
+fn the_guide_for_agents_names_only_real_commands() {
+    let env = Env::new();
+    let guide = env.ok(&["agent-info"]);
+    for word in [
+        "a guide for agents",
+        env!("CARGO_PKG_VERSION"),
+        "$CSWAP_ACCOUNT",
+        "cswap claude --cswap=work",
+        "hc run --bg --name w1 cswap claude",
+        "Never switch or restart your own terminal",
+        "Leave these to the user",
+    ] {
+        assert!(guide.contains(word), "the guide lacks {word:?}\n{guide}");
+    }
+    // The commands it tells an agent to run all exist and take those flags.
+    for args in [
+        vec!["ps", "--json"],
+        vec!["list", "--json"],
+        vec!["suggest"],
+        vec!["usage"],
+        vec!["herdr", "ls", "-h"],
+        vec!["herdr", "info", "-h"],
+        vec!["herdr", "switch", "-h"],
+        vec!["herdr", "restart", "-h"],
+        vec!["refresh", "-h"],
+    ] {
+        env.ok(&args);
+    }
+    assert!(env.ok(&["usage", "-h"]).contains("--refresh"));
+}
+
+/// herdr starts a new terminal in the login environment, so a sub-agent does
+/// not get its parent's account. It starts on the default of its own agent,
+/// which is one rule for every pair of agents: a Codex under a Claude has no
+/// account in common with it anyway.
+#[test]
+fn a_sub_agent_in_herdr_starts_on_its_agents_default() {
+    let env = Env::new();
+    env.add_claude("work", "work@example.com");
+    env.add_claude("side", "side@example.com");
+    env.ok(&["use", "claude", "side"]);
+    let h = env.home();
+    // herdr is never asked about the terminal above: this one would fail.
+    let hc = h.join("bin/hc");
+    fs::write(&hc, "#!/bin/sh\necho asked >> \"$HOME/hc-asked\"\nexit 1\n").unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
+    env.log();
+
+    // In a terminal an agent on `work` started: the default, `side`.
+    let out = env
+        .cmd(&["claude", "the task"])
+        .env("HC_TERMINAL_ID", "t9")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let log = env.log();
+    assert!(log.contains("arg: the task"), "{log}");
+    assert!(log.contains("CSWAP_ACCOUNT=claude-2"), "{log}");
+    assert!(!h.join("hc-asked").exists());
+
+    // Another kind of agent there starts on its own default.
+    let out = env
+        .cmd(&["codex"])
+        .env("HC_TERMINAL_ID", "t9")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(env.log().contains("CSWAP_ACCOUNT=codex-0"));
+
+    // An account named on the command line still wins.
+    let out = env
+        .cmd(&["claude", "--cswap=work"])
+        .env("HC_TERMINAL_ID", "t9")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-1"));
+}
+
+// --------------------------------------------------------------- PATH shims
+
+impl Env {
+    fn shims(&self) -> PathBuf {
+        self.cswap_home().join("shims")
+    }
+
+    /// The `PATH` of a program that sees the shims first, as after a login.
+    fn shim_path(&self) -> String {
+        format!(
+            "{}:{}:/usr/bin:/bin",
+            self.shims().display(),
+            self.home().join("bin").display()
+        )
+    }
+
+    /// Run `program` the way another program would: by its bare name, found
+    /// on a `PATH` that has the shims first.
+    fn bare(&self, program: &str, args: &[&str]) -> Output {
+        self.program("sh")
+            .arg("-c")
+            .arg(format!("exec {program} \"$@\""))
+            .arg("sh")
+            .args(args)
+            .env("PATH", self.shim_path())
+            .output()
+            .unwrap()
+    }
+}
+
+#[test]
+fn shims_are_off_until_asked_for_and_leave_nothing_behind() {
+    let env = Env::new();
+    assert!(env.ok(&["shims"]).contains("PATH shims are off"));
+    assert!(!env.shims().exists());
+    let profile = env.home().join(".profile");
+
+    // No login file is there, so cswap makes one, and takes it away again.
+    let out = env.ok(&["shims", "on"]);
+    assert!(out.contains("on for claude, codex"), "{out}");
+    assert!(out.contains("~/.profile"), "{out}");
+    assert!(out.contains("hc server restart --fresh"), "{out}");
+    for name in ["claude", "codex"] {
+        let link = env.shims().join(name);
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(
+            fs::canonicalize(&link).unwrap(),
+            fs::canonicalize(BIN).unwrap()
+        );
+    }
+    // Grok is not installed here, so it gets no shim.
+    assert!(!env.shims().join("grok").exists());
+    let text = fs::read_to_string(&profile).unwrap();
+    assert_eq!(text.lines().count(), 2, "{text}");
+    assert!(text.contains("\"$HOME/.cswap/shims:$PATH\""), "{text}");
+    // Asking again adds nothing.
+    env.ok(&["shims", "on"]);
+    assert_eq!(fs::read_to_string(&profile).unwrap(), text);
+
+    let out = env.ok(&["shims", "off"]);
+    assert!(out.contains("~/.profile"), "{out}");
+    assert!(!profile.exists(), "a file cswap made is still there");
+    assert!(!env.shims().exists());
+    assert!(env.ok(&["shims"]).contains("PATH shims are off"));
+
+    // A login file of the user's gets the line at its end and comes back
+    // byte for byte. A link stays a link.
+    let dotfiles = env.home().join("dotfiles");
+    fs::create_dir_all(&dotfiles).unwrap();
+    let mine = "export EDITOR=vi\n# no newline at the end";
+    fs::write(dotfiles.join("profile"), mine).unwrap();
+    std::os::unix::fs::symlink(dotfiles.join("profile"), &profile).unwrap();
+    fs::write(env.home().join(".bash_profile"), ". ~/.profile\n").unwrap();
+
+    let out = env.ok(&["shims", "on", "claude"]);
+    assert!(
+        out.contains("~/.profile") && out.contains("~/.bash_profile"),
+        "{out}"
+    );
+    assert!(env.shims().join("claude").exists());
+    assert!(!env.shims().join("codex").exists());
+    let text = fs::read_to_string(&profile).unwrap();
+    assert!(text.starts_with(mine) && text.contains("cswap shims off"));
+
+    // Naming another agent later replaces the list.
+    env.ok(&["shims", "on", "codex"]);
+    assert!(!env.shims().join("claude").exists());
+    assert!(env.shims().join("codex").exists());
+
+    env.ok(&["shims", "off"]);
+    assert!(fs::symlink_metadata(&profile).unwrap().is_symlink());
+    assert_eq!(fs::read_to_string(&profile).unwrap(), format!("{mine}\n"));
+    assert_eq!(
+        fs::read_to_string(env.home().join(".bash_profile")).unwrap(),
+        ". ~/.profile\n"
+    );
+    assert!(!env.shims().exists());
+
+    assert!(env.fails(&["shims", "on", "nonsense"]).contains("nonsense"));
+    assert!(!env.shims().exists());
+}
+
+#[test]
+fn an_agent_another_program_starts_goes_through_its_shim() {
+    let env = Env::new();
+    env.add_claude("work", "work@example.com");
+    env.ok(&["use", "claude", "work"]);
+    env.ok(&["shims", "on"]);
+    env.log();
+
+    // A bare `claude`, found on PATH by a program that knows nothing of cswap.
+    let out = env.bare("claude", &["--print", "a b"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let log = env.log();
+    assert_eq!(log.matches("run: claude").count(), 1, "{log}");
+    assert_eq!(args_of(&log), ["--print", "a b"], "{log}");
+    assert!(log.contains("CSWAP_ACCOUNT=claude-1\n"), "{log}");
+
+    // cswap's own flag works there too, and so does every other agent.
+    let out = env.bare("claude", &["--cswap=0", "-p"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let log = env.log();
+    assert_eq!(args_of(&log), ["-p"], "{log}");
+    assert!(log.contains("CSWAP_ACCOUNT=claude-0\n"), "{log}");
+    let out = env.bare("codex", &["exec", "x"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let log = env.log();
+    assert!(log.contains("run: codex") && log.contains("CSWAP_ACCOUNT=codex-0\n"));
+
+    // The agent's exit code is still the caller's.
+    let out = env
+        .program(env.shims().join("claude"))
+        .env("PATH", env.shim_path())
+        .env("CSWAP_FAKE_EXIT", "7")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(7));
+
+    // Where they stand, from an environment that has the folder first, and
+    // from one that does not.
+    let out = env
+        .cmd(&["shims"])
+        .env("PATH", env.shim_path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stdout));
+    assert!(
+        text(&out.stdout).contains("claude runs through cswap from here"),
+        "{}",
+        text(&out.stdout)
+    );
+    let out = env.run(&["shims"]);
+    assert!(!out.status.success());
+    let said = text(&out.stdout);
+    assert!(said.contains("comes first on PATH here"), "{said}");
+    assert!(said.contains("hc server restart --fresh"), "{said}");
+}
+
+#[test]
+fn a_wrapper_that_runs_the_shim_again_is_stopped() {
+    let env = Env::new();
+    env.ok(&["shims", "on", "claude"]);
+    // Someone's own `claude` script that runs `claude` from PATH. With the
+    // shim first on PATH that is cswap again, and so on for ever.
+    fs::write(
+        env.home().join("bin/claude"),
+        "#!/bin/sh\necho again >> \"$CSWAP_FAKE_LOG\"\nexec claude \"$@\"\n",
+    )
+    .unwrap();
+    let out = env.bare("claude", &["-p"]);
+    assert!(!out.status.success());
+    let err = text(&out.stderr);
+    assert!(err.contains("keeps starting cswap again"), "{err}");
+    assert!(err.contains("cswap shims off"), "{err}");
+    assert_eq!(env.log().matches("again").count(), 4);
+}
+
+#[test]
+fn shell_init_puts_the_shims_first_again() {
+    let env = Env::new();
+    assert!(!env.ok(&["shell-init", "bash"]).contains("shims"));
+    env.ok(&["shims", "on"]);
+    let bash = env.ok(&["shell-init", "bash"]);
+    assert!(bash.contains("claude() { command cswap claude"), "{bash}");
+    assert!(env.ok(&["shell-init", "fish"]).contains("set -gx PATH"));
+
+    // A shim covers every shell: a shell whose own list leaves the agent out
+    // wraps it all the same, and goes back to its list when the shim goes.
+    let settings = env.cswap_home().join("settings.json");
+    let mut json: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+    json["shells"] = serde_json::json!({ "zsh": ["codex"] });
+    fs::write(&settings, json.to_string()).unwrap();
+    env.ok(&["shims", "on", "claude"]);
+    let zsh = env.ok(&["shell-init", "zsh"]);
+    assert!(zsh.contains("claude()") && zsh.contains("codex()"), "{zsh}");
+    env.ok(&["shims", "off"]);
+    let zsh = env.ok(&["shell-init", "zsh"]);
+    assert!(
+        !zsh.contains("claude()") && zsh.contains("codex()"),
+        "{zsh}"
+    );
+    assert!(!zsh.contains("shims"), "{zsh}");
+    env.ok(&["shims", "on"]);
+    assert!(!env.ok(&["shell-init", "powershell"]).contains("shims"));
+
+    // Sourced after an rc file that put its own folders in front.
+    let mut sh = env.program("bash");
+    sh.arg("-c")
+        .arg(format!("PATH=\"/opt/x:$PATH\"\n{bash}\necho \"$PATH\"\n"));
+    let out = sh.env("PATH", "/usr/bin:/bin").output().unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout).trim(),
+        format!("{}:/opt/x:/usr/bin:/bin", env.shims().display())
+    );
+}
+
+#[test]
+fn doctor_says_when_herdr_is_here_and_the_shims_are_not() {
+    let env = Env::new();
+    let gap = "agents that herdr starts by a bare name skip cswap";
+    // No herdr: nothing to say.
+    assert!(!env.ok(&["doctor"]).contains(gap));
+
+    fs::create_dir_all(env.home().join(".config/herdr-app")).unwrap();
+    let out = env.ok(&["doctor"]);
+    assert!(out.contains(gap), "{out}");
+    assert!(out.contains("cswap shims on"), "{out}");
+
+    // On, but this environment still finds the real agent first.
+    env.ok(&["shims", "on", "claude"]);
+    let out = env.ok(&["doctor"]);
+    assert!(!out.contains(gap), "{out}");
+    assert!(
+        out.contains("comes before cswap's shim on PATH here"),
+        "{out}"
+    );
+
+    // On, and first on PATH.
+    let out = env
+        .cmd(&["doctor"])
+        .env("PATH", env.shim_path())
+        .output()
+        .unwrap();
+    let out = text(&out.stdout);
+    assert!(
+        out.contains("a bare claude reaches cswap from this environment"),
+        "{out}"
+    );
+
+    // The link was removed by hand.
+    fs::remove_file(env.shims().join("claude")).unwrap();
+    let out = env.ok(&["doctor"]);
+    assert!(out.contains("the shim for claude is missing"), "{out}");
+}
+
+/// herdr keeps the `PATH` it started with, so what it starts for a bare
+/// `claude` is asked of herdr itself, not read from this environment.
+#[test]
+fn health_asks_herdr_which_program_it_would_start() {
+    let env = Env::new();
+    // A stand-in for `hc exec`: it runs the program with herdr's own PATH.
+    let hc = env.home().join("bin/hc");
+    fs::write(
+        &hc,
+        "#!/bin/sh\n[ \"$1\" = exec ] || exit 1\nshift 3\nPATH=$(cat \"$HOME/hc-path\") exec \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
+    let old = format!("{}:/usr/bin:/bin", env.home().join("bin").display());
+    fs::write(env.home().join("hc-path"), &old).unwrap();
+    env.ok(&["shims", "on", "claude"]);
+
+    // This environment has the shim first, and herdr still has the old PATH.
+    let run = |args: &[&str]| {
+        let out = env.cmd(args).env("PATH", env.shim_path()).output().unwrap();
+        (out.status.success(), text(&out.stdout))
+    };
+    let (_, out) = run(&["doctor"]);
+    assert!(
+        out.contains("a bare claude reaches cswap from this environment"),
+        "{out}"
+    );
+    assert!(out.contains("herdr still starts ~/bin/claude"), "{out}");
+    assert!(out.contains("hc server restart --fresh"), "{out}");
+    let (ok, out) = run(&["shims"]);
+    assert!(
+        !ok && out.contains("herdr still starts ~/bin/claude"),
+        "{out}"
+    );
+
+    // herdr restarted with the new PATH.
+    fs::write(env.home().join("hc-path"), env.shim_path()).unwrap();
+    let (_, out) = run(&["doctor"]);
+    assert!(
+        out.contains("herdr starts a bare claude through cswap"),
+        "{out}"
+    );
+    let (ok, out) = run(&["shims"]);
+    assert!(
+        ok && out.contains("herdr starts a bare claude through cswap"),
+        "{out}"
+    );
+}
+
+#[test]
+fn uninstall_undoes_what_cswap_wrote_outside_its_folder() {
+    let env = Env::new();
+    env.add_claude("work", "work@example.com");
+    let bashrc = env.home().join(".bashrc");
+    let mine = "alias ll='ls -l'\n";
+    fs::write(
+        &bashrc,
+        format!(
+            "{mine}\n# cswap: run the agents through cswap. Choose which in `cswap`, Settings > Shell.\n\
+             command -v cswap >/dev/null 2>&1 && eval \"$(cswap shell-init bash)\"\nexport A=1\n"
+        ),
+    )
+    .unwrap();
+    env.ok(&["shims", "on"]);
+    assert!(env.home().join(".profile").exists());
+
+    // It asks first, and with nobody to ask it does nothing.
+    assert!(env.fails(&["uninstall"]).contains("-y"));
+    assert!(env.shims().exists());
+
+    let out = env.ok(&["uninstall", "-y"]);
+    assert!(
+        out.contains("~/.bashrc") && out.contains("~/.profile"),
+        "{out}"
+    );
+    assert!(out.contains("rm -rf ~/.cswap"), "{out}");
+    assert!(!env.shims().exists());
+    assert!(!env.home().join(".profile").exists());
+    assert_eq!(
+        fs::read_to_string(&bashrc).unwrap(),
+        format!("{mine}export A=1\n")
+    );
+    // The accounts are the user's to delete.
+    assert!(env.account_dir("claude-1").is_dir());
+    assert_eq!(env.list().len(), 1);
+    // A second run finds nothing left to undo.
+    let out = env.ok(&["uninstall", "-y"]);
+    assert!(!out.contains("~/.bashrc"), "{out}");
 }

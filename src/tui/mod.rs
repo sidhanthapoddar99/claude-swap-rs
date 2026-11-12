@@ -22,13 +22,13 @@ mod widgets;
 #[cfg(test)]
 mod tests;
 
-use app::{App, Exit, Msg, Suspend};
+use app::{Action, App, Exit, Msg, Page, Suspend};
 
 use crate::manage;
 use crate::store::Registry;
 
 /// Open the dashboard. Returns what to do once it has closed, if anything.
-pub fn run() -> Result<Option<Exit>> {
+pub fn run(page: Option<Page>) -> Result<Option<Exit>> {
     if !stdout().is_terminal() || !std::io::stdin().is_terminal() {
         anyhow::bail!(
             "the dashboard needs a terminal. For text output use `cswap list`, `cswap usage` or `cswap -h`."
@@ -36,6 +36,10 @@ pub fn run() -> Result<Option<Exit>> {
     }
     let (tx, rx) = mpsc::channel();
     let mut app = App::new(tx)?;
+    // Asked for by name: open there, with the keys on the page.
+    if let Some(page) = page {
+        app.dispatch(Action::Go(page));
+    }
 
     // A panic must not leave the terminal reporting mouse movement. ratatui's
     // own hook, added by `init`, puts the rest back.

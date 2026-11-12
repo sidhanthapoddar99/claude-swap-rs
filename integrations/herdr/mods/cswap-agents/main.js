@@ -2,8 +2,10 @@
 // A viewed done agent stays in Done until left.
 // A right-click shows the account an agent runs on and moves it to another
 // one: cswap stops the agent and starts it again there, same conversation.
+// The same menu restarts an agent where it is, so an update takes hold.
 // Ctrl+click (Cmd on a Mac) selects several agents; a right-click on one of
-// them then acts on all of them: move them to an account, or close them.
+// them then acts on all of them: move them to an account, restart them, or
+// close them.
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -12,8 +14,9 @@ import { agents, terminals, panes, focused, spaces, run, theme, shared, setShare
 // A sub-agent a menu asked for: started under an agent, which is told about it.
 const SPAWN = "cswap.spawn";
 
-// A switch a menu asked for. The list does the work, because it stays when
-// the menu closes; whichever copy of the list sees the request first takes it.
+// A switch or a restart a menu asked for. The list does the work, because it
+// stays when the menu closes; whichever copy of the list sees the request
+// first takes it. A restart is a job with `restart` set and no account key.
 const SWITCH = "cswap.switch";
 
 // A menu's word to the list that the selection is over.
@@ -30,6 +33,22 @@ async function cswap(args, timeout = 30000) {
 
 // cswap's own words for a failure, without its name in front.
 const complaint = (r) => (r.stderr || r.stdout || "cswap failed").replace(/^cswap:\s*/, "").trim();
+
+// The sub-agents under an agent that are in a turn. They report to it by
+// having herdr type into its terminal, and while it is stopped that text
+// lands in a bare shell and is lost. So such an agent is asked about first,
+// and in a selection it stays as it is.
+const working = (info) => info?.children_working ?? [];
+
+// Why a selected agent stays where it is, if it does.
+const stays = (i) => i.error ?? i.why_not
+  ?? (i.conversation === "unknown" ? "conversation not found" : null)
+  ?? (working(i).length ? "sub-agents working" : null);
+
+// The selected agents a restart can take now: on this machine, known to
+// cswap, between turns, in a conversation cswap can find, and with no
+// sub-agent at work.
+const restartable = (infos) => (infos ?? []).filter(i => !stays(i));
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -112,8 +131,9 @@ export default class Agents extends View {
     this.pendingPins = JSON.parse(localStorage.getItem("pins") ?? "[]");
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
-    // Agents on their way to another account.
-    this.switching = new Set();
+    // Agents on their way to another account or being restarted, each with
+    // the word its row shows meanwhile.
+    this.switching = new Map();
     // Agents picked with Ctrl+click, for one action on all of them.
     this.selected = new Set();
     // The accounts view: each agent's account in place of its time and status.
@@ -219,11 +239,11 @@ export default class Agents extends View {
   openAgentMenu(address, cx) {
     cx.stop_propagation();
     if (this.selected.size > 1 && this.selected.has(address)) {
-      openOverlay({ mod: "cswap-agents", kind: "popup", width: 264, height: 142, props: { agentAddress: address, group: [...this.selected] } });
+      openOverlay({ mod: "cswap-agents", kind: "popup", width: 264, height: 173, props: { agentAddress: address, group: [...this.selected] } });
       return;
     }
     if (this.selected.size) { this.selected.clear(); cx.notify(); }
-    openOverlay({ mod: "cswap-agents", kind: "popup", width: 264, height: 146, props: { agentAddress: address } });
+    openOverlay({ mod: "cswap-agents", kind: "popup", width: 264, height: 177, props: { agentAddress: address } });
   }
 
   // Ctrl+click (Cmd on a Mac) puts an agent in the selection or takes it
@@ -258,13 +278,21 @@ export default class Agents extends View {
     const infos = this.groupInfo;
     const first = infos?.find(i => !i.error);
     if (!first) return;
-    const staying = infos.filter(i => i.error || i.why_not || i.conversation === "unknown").length;
+    const staying = infos.filter(stays).length;
     closeOverlay(props().overlay);
     openOverlay({
       mod: "cswap-agents", kind: "popup", width: 340,
       height: 44 + first.accounts.length * 31 + (staying ? 10 + staying * 19 : 0),
       props: { agentAddress: this.menuAddress(), group: props().group, accounts: first, infos },
     });
+  }
+
+  // Hand the restart of every selected agent that can restart to the list.
+  requestRestartGroup(cx) {
+    cx.stop_propagation();
+    const addresses = restartable(this.groupInfo).map(i => i.terminal);
+    closeOverlay(props().overlay);
+    if (addresses.length) setShared(SWITCH, { id: Date.now(), addresses, restart: true, fresh: false, force: false });
   }
 
   requestCloseGroup(cx) {
@@ -290,7 +318,10 @@ export default class Agents extends View {
       : kinds.size > 1 ? "different agents"
       : names.size === 1 ? [...names][0] : `${names.size} accounts`;
     const clear = () => { setShared(CLEAR, Date.now()); closeOverlay(props().overlay); };
-    const actions = [cx => { if (can) this.openGroupAccountMenu(cx); }, cx => this.requestCloseGroup(cx), clear];
+    // Only an idle agent whose conversation cswap can find is restarted.
+    const ready = restartable(infos);
+    const restartNote = !infos ? "\u2026" : !ready.length ? "none can now" : ready.length < group.length ? `${ready.length} of ${group.length}` : "";
+    const actions = [cx => { if (can) this.openGroupAccountMenu(cx); }, cx => { if (ready.length) this.requestRestartGroup(cx); }, cx => this.requestCloseGroup(cx), clear];
     const item = (id, label, index, note, enabled = true) => h_flex()
       .id(id).h(31).px(8).gap(8).rounded(4).items_center()
       .text_color(enabled ? t.foreground : t.dim)
@@ -303,8 +334,8 @@ export default class Agents extends View {
       .track_focus(this.menuHandle)
       .w_full().p(4).bg(t.popover).text_size(12.8)
       .on_key_down((e, cx) => {
-        if (e.key === "down") this.menuIndex = (this.menuIndex + 1) % 3;
-        else if (e.key === "up") this.menuIndex = this.menuIndex <= 0 ? 2 : this.menuIndex - 1;
+        if (e.key === "down") this.menuIndex = (this.menuIndex + 1) % 4;
+        else if (e.key === "up") this.menuIndex = this.menuIndex <= 0 ? 3 : this.menuIndex - 1;
         else if (e.key === "enter" || e.key === "space") actions[this.menuIndex]?.(cx);
         else if (e.key === "escape") closeOverlay(props().overlay);
         else return;
@@ -313,9 +344,10 @@ export default class Agents extends View {
       })
       .child(div().h(28).px(8).flex().items_center().text_size(11).text_color(t.dim).child(`${group.length} agents selected`))
       .child(item("group-switch-account", "Switch account", 0, account, can))
-      .child(item("group-close", `Close ${group.length} agents\u2026`, 1, ""))
+      .child(item("group-restart", `Restart ${group.length} agents`, 1, restartNote, ready.length > 0))
+      .child(item("group-close", `Close ${group.length} agents\u2026`, 2, ""))
       .child(div().mx(4).my(4).h(1).bg(t.border))
-      .child(item("group-clear", "Clear selection", 2, ""));
+      .child(item("group-clear", "Clear selection", 3, ""));
   }
 
   toggleAccounts(cx) {
@@ -412,7 +444,7 @@ export default class Agents extends View {
     });
   }
 
-  // Hand the switch to the list. A conversation cswap cannot find is asked about first.
+  // Hand the switch to the list.
   requestSwitch(acc, cx) {
     cx.stop_propagation();
     const info = props().accounts;
@@ -421,19 +453,38 @@ export default class Agents extends View {
     if (props().infos) {
       // Only the agents that can move and are not there already.
       const addresses = props().infos
-        .filter(i => !i.error && !i.why_not && i.conversation !== "unknown" && i.account !== acc.key)
+        .filter(i => !stays(i) && i.account !== acc.key)
         .map(i => i.terminal);
-      if (addresses.length) setShared(SWITCH, { id: Date.now(), addresses, key: acc.key, name: acc.name, fresh: false });
+      if (addresses.length) setShared(SWITCH, { id: Date.now(), addresses, key: acc.key, name: acc.name, fresh: false, force: false });
       return;
     }
-    if (info.conversation === "unknown") {
-      openOverlay({
-        mod: "cswap-agents", kind: "dialog", width: 460, height: 210,
-        props: { agentAddress: address, accounts: info, confirmSwitch: { key: acc.key, name: acc.name } },
-      });
+    this.askOrGo(info, { addresses: [address], key: acc.key, name: acc.name });
+  }
+
+  // Hand a switch or a restart of one agent to the list, after asking when
+  // it would cost something: a conversation cswap cannot find is not carried
+  // over, and sub-agents at work can lose a report.
+  askOrGo(info, job) {
+    const fresh = info.conversation === "unknown";
+    const force = working(info).length > 0;
+    if (!fresh && !force) {
+      setShared(SWITCH, { id: Date.now(), ...job, fresh: false, force: false });
       return;
     }
-    setShared(SWITCH, { id: Date.now(), addresses: [address], key: acc.key, name: acc.name, fresh: false });
+    openOverlay({
+      mod: "cswap-agents", kind: "dialog", width: 460, height: fresh && force ? 290 : force ? 230 : 210,
+      props: { agentAddress: info.terminal, accounts: info, confirmSwitch: { ...job, fresh, force } },
+    });
+  }
+
+  // Hand the restart to the list.
+  requestRestart(cx) {
+    cx.stop_propagation();
+    const info = this.account;
+    if (!info || info.why_not) return;
+    const address = this.menuAddress();
+    closeOverlay(props().overlay);
+    this.askOrGo(info, { addresses: [address], restart: true, name: info.name });
   }
 
   accountMenu(t) {
@@ -441,7 +492,6 @@ export default class Agents extends View {
     const rows = info.accounts;
     // For a selection: who is on each account, and who cannot move at all.
     const infos = props().infos;
-    const stays = (i) => i.error ?? i.why_not ?? (i.conversation === "unknown" ? "conversation not found" : null);
     const here = (acc) => (infos ?? []).filter(i => !i.error && i.account === acc.key).length;
     const all = (acc) => infos ? here(acc) === infos.length : acc.current;
     const can = (acc) => infos
@@ -490,9 +540,19 @@ export default class Agents extends View {
     const to = props().confirmSwitch;
     const cancel = () => closeOverlay(props().overlay);
     const go = () => {
-      setShared(SWITCH, { id: Date.now(), addresses: [this.menuAddress()], key: to.key, name: to.name, fresh: true });
+      setShared(SWITCH, { ...to, id: Date.now() });
       closeOverlay(props().overlay);
     };
+    const kids = working(info);
+    const title = to.force
+      ? (to.restart ? `Restart ${info.terminal} while its sub-agents work?` : `Move ${info.terminal} while its sub-agents work?`)
+      : (to.restart ? `Restart ${info.terminal} with a new conversation?` : `Start a new conversation on ${to.name}?`);
+    const reasons = [];
+    if (to.force) reasons.push(`${kids.length === 1 ? "A sub-agent is" : `${kids.length} sub-agents are`} still working under it: ${kids.join(", ")}. They report to ${info.terminal} when they are done, and a report that arrives while it is stopped is typed into its shell and lost. Wait for them, or go ahead and check on them afterwards.`);
+    if (to.fresh) reasons.push(`cswap cannot find the conversation ${info.terminal} is in, so it cannot carry it over. ${info.agent_name} would ${to.restart ? "start again" : "start"} on ${to.name} with a new one; the old one stays in its history.`);
+    const yes = to.force
+      ? (to.restart ? "Restart anyway" : "Switch anyway")
+      : (to.restart ? "Restart, new conversation" : "Switch, new conversation");
     const button = (id, label, index, action) => h_flex()
       .id(id).h(32).px(14).items_center().rounded(5)
       .border_1().border_color(this.confirmIndex === index ? t.foreground : t.input)
@@ -515,31 +575,36 @@ export default class Agents extends View {
         cx.stop_propagation();
         cx.notify();
       })
-      .child(div().font_semibold().text_size(15).text_color(t.foreground).child(`Start a new conversation on ${to.name}?`))
-      .child(div().text_color(t.muted).child(`cswap cannot find the conversation ${info.terminal} is in, so it cannot carry it over. ${info.agent_name} would start on ${to.name} with a new one; the old one stays in its history.`))
+      .child(div().font_semibold().text_size(15).text_color(t.foreground).child(title))
+      .children(reasons.map(text => div().text_color(t.muted).child(text)))
       .child(div().flex_1())
       .child(h_flex().justify_end().gap(8)
         .child(button("cancel-switch-account", "Cancel", 0, cancel))
-        .child(button("confirm-switch-account", "Switch, new conversation", 1, go)));
+        .child(button("confirm-switch-account", yes, 1, go)));
   }
 
-  // Move one agent and say how it went.
+  // Move or restart one agent and say how it went.
   async move(address, job) {
+    const failed = job.restart ? `${address} was not restarted` : `${address} was not moved`;
     try {
-      const args = ["herdr", "switch", address, job.key, "--json", ...(job.fresh ? ["--fresh"] : [])];
+      const what = job.restart ? ["restart", address] : ["switch", address, job.key];
+      const args = ["herdr", ...what, "--json", ...(job.fresh ? ["--fresh"] : []), ...(job.force ? ["--force"] : [])];
       // A send waits for a draft someone left in the terminal, so give it time.
       const r = await cswap(args, 120000);
-      if (r.code !== 0) return { ok: false, title: `${address} was not moved`, body: complaint(r), level: "error" };
+      if (r.code !== 0) return { ok: false, title: failed, body: complaint(r), level: "error" };
       const done = JSON.parse(r.stdout);
-      if (done.started) return { ok: true, title: `${address} is on ${done.to}`, body: done.resumed ? "Same conversation." : "New conversation.", level: "success" };
-      return { ok: false, title: `${address}: started on ${done.to}?`, body: "The launch was typed, but the agent is not seen running yet. Look at the terminal.", level: "warning" };
+      const on = job.restart ? done.account : done.to;
+      const talk = done.resumed ? "Same conversation." : "New conversation.";
+      if (done.started) return { ok: true, title: job.restart ? `${address} restarted on ${on}` : `${address} is on ${on}`, body: talk, level: "success" };
+      return { ok: false, title: `${address}: started on ${on}?`, body: "The launch was typed, but the agent is not seen running yet. Look at the terminal.", level: "warning" };
     } catch (error) {
-      return { ok: false, title: `${address} was not moved`, body: String(error), level: "error" };
+      return { ok: false, title: failed, body: String(error), level: "error" };
     }
   }
 
-  // The list's side of a switch: run cswap and say how it went. A selection
-  // moves one agent after the other, so no two are stopped at the same time.
+  // The list's side of a switch or a restart: run cswap and say how it went.
+  // A selection goes one agent after the other, so no two are stopped at the
+  // same time.
   takeSwitch(cx) {
     const job = shared(SWITCH);
     if (!job?.addresses?.length) return;
@@ -548,8 +613,11 @@ export default class Agents extends View {
     if (Date.now() - job.id > 10000) return;
     const many = job.addresses.length > 1;
     if (many) this.selected.clear();
-    for (const address of job.addresses) this.switching.add(address);
-    notify({ title: many ? `Moving ${job.addresses.length} agents to ${job.name}\u2026` : `Moving ${job.addresses[0]} to ${job.name}\u2026`, level: "info", timeout: 5000 });
+    for (const address of job.addresses) this.switching.set(address, job.restart ? "restarting\u2026" : "switching\u2026");
+    const start = job.restart
+      ? (many ? `Restarting ${job.addresses.length} agents\u2026` : `Restarting ${job.addresses[0]}\u2026`)
+      : (many ? `Moving ${job.addresses.length} agents to ${job.name}\u2026` : `Moving ${job.addresses[0]} to ${job.name}\u2026`);
+    notify({ title: start, level: "info", timeout: 5000 });
     cx.spawn(async cx => {
       let moved = 0;
       for (const address of job.addresses) {
@@ -560,7 +628,8 @@ export default class Agents extends View {
         this.switching.delete(address);
         cx.notify();
       }
-      if (many) notify({ title: `${moved} of ${job.addresses.length} agents are on ${job.name}`, body: "Each kept its conversation.", level: moved === job.addresses.length ? "success" : "warning" });
+      const sum = job.restart ? `${moved} of ${job.addresses.length} agents restarted` : `${moved} of ${job.addresses.length} agents are on ${job.name}`;
+      if (many) notify({ title: sum, body: "Each kept its conversation.", level: moved === job.addresses.length ? "success" : "warning" });
       if (this.showAccounts) this.loadAccounts(cx);
       cx.notify();
     });
@@ -697,6 +766,10 @@ export default class Agents extends View {
     const local = !this.menuAddress().includes("/");
     // The account in use sits beside the item that changes it.
     const account = this.account ? this.account.name : this.accountError ?? "\u2026";
+    // Stop it and start it again where it is: how an update takes hold.
+    const canRestart = Boolean(this.account) && !this.account.why_not;
+    const below = working(this.account).length;
+    const restartNote = !this.account ? (this.accountError ?? "\u2026") : this.account.why_not ? "in a turn" : below ? `${below} working below` : "";
     return v_flex()
       .id("agent-context-menu")
       .track_focus(this.menuHandle)
@@ -705,10 +778,11 @@ export default class Agents extends View {
       .bg(t.popover)
       .text_size(12.8)
       .on_key_down((e, cx) => {
-        if (e.key === "down") this.menuIndex = (this.menuIndex + 1) % 4;
-        else if (e.key === "up") this.menuIndex = this.menuIndex <= 0 ? 3 : this.menuIndex - 1;
+        if (e.key === "down") this.menuIndex = (this.menuIndex + 1) % 5;
+        else if (e.key === "up") this.menuIndex = this.menuIndex <= 0 ? 4 : this.menuIndex - 1;
         else if (e.key === "enter" || e.key === "space") {
-          if (this.menuIndex === 3) this.requestCloseAgentTree(cx);
+          if (this.menuIndex === 4) this.requestCloseAgentTree(cx);
+          else if (this.menuIndex === 3) this.requestRestart(cx);
           else if (this.menuIndex === 2) { if (local) this.requestSubAgent(cx); }
           else if (this.menuIndex === 1) this.openAccountMenu(cx);
           else this.copyAgentId(cx);
@@ -722,7 +796,8 @@ export default class Agents extends View {
       .child(item("switch-account", "Switch account", 1, cx => this.openAccountMenu(cx), account, Boolean(this.account)))
       .child(item("add-sub-agent", "Add sub-agent\u2026", 2, cx => this.requestSubAgent(cx), local ? "" : "other machine", local))
       .child(div().mx(4).my(4).h(1).bg(t.border))
-      .child(item("close-agent-tree", "Close agent tree…", 3, cx => this.requestCloseAgentTree(cx)));
+      .child(item("restart-agent", "Restart agent", 3, cx => this.requestRestart(cx), restartNote, canRestart))
+      .child(item("close-agent-tree", "Close agent tree…", 4, cx => this.requestCloseAgentTree(cx)));
   }
 
   peek(addr) {
@@ -936,7 +1011,7 @@ export default class Agents extends View {
           .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
-        .when(this.switching.has(a.address), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child("switching\u2026")))
+        .when(this.switching.has(a.address), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(this.switching.get(a.address))))
         .when(this.showAccounts && !this.switching.has(a.address), el => el.child(this.accountLabel(t, a.address)))
         .when(!this.showAccounts && !picked && this.hovered === a.address, el => el.child(pin))
         .when(!this.showAccounts && !picked && this.hovered !== a.address && !this.switching.has(a.address) && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))

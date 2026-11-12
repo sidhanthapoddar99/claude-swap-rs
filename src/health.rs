@@ -22,16 +22,35 @@ pub enum Level {
 #[derive(Debug, Clone)]
 pub struct Check {
     pub level: Level,
+    /// What the check is about: `cswap`, `shims`, an agent's id or an
+    /// account's key.
     pub area: String,
+    /// The heading it is listed under: an agent's checks and its accounts'
+    /// share one. Checks of one group follow each other.
+    pub group: String,
+    /// The agent the group is about, when it is about one.
+    pub agent: Option<Harness>,
     pub title: String,
     /// What to do about it; empty when nothing needs doing.
     pub detail: String,
 }
 
 fn check(level: Level, area: &str, title: impl Into<String>, detail: impl Into<String>) -> Check {
+    // An account's key is its agent's id and a number: `claude-2`.
+    let agent = Harness::ALL.into_iter().find(|h| {
+        area.strip_prefix(h.id())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+    });
+    let group = match (agent, area) {
+        (Some(h), _) => h.name(),
+        (None, "shims") => "PATH shims",
+        (None, other) => other,
+    };
     Check {
         level,
         area: area.to_string(),
+        group: group.to_string(),
+        agent,
         title: title.into(),
         detail: detail.into(),
     }
@@ -98,6 +117,95 @@ pub fn run(reg: &Registry, live: &Live) -> Vec<Check> {
             format!("shell '{name}' has no cswap integration"),
             "bash, zsh and fish are supported. Elsewhere, alias each agent to `cswap <agent>`.",
         )),
+    }
+
+    // ---- PATH shims: do agents that other programs start reach cswap?
+    if crate::shim::supported() {
+        use crate::shim::State;
+        let settings = store::Settings::load().unwrap_or_default();
+        let chosen = crate::shim::chosen(&settings);
+        let herdr =
+            crate::integration::herdr_home().is_dir() || crate::fsx::which("hc", None).is_some();
+        let later = "A new terminal sees the new PATH when its shell loads cswap, and every program after your next login. herdr keeps the PATH it started with: to give it the new one now, run `hc server restart --fresh` in a terminal outside herdr.";
+        if chosen.is_empty() && herdr {
+            out.push(check(
+                Level::Warn,
+                "shims",
+                "agents that herdr starts by a bare name skip cswap",
+                "herdr runs `claude`, `codex` and the rest straight from PATH, so a sub-agent an agent starts with `hc run claude …` lands on the root login, not on the default you set in cswap. Turn PATH shims on: Settings > Shell > PATH shims, or `cswap shims on`. Without them, start sub-agents as `cswap claude …`.",
+            ));
+        }
+        for h in &chosen {
+            let bin = h.spec().bins[0];
+            match crate::shim::state(*h) {
+                State::Active => out.push(check(
+                    Level::Ok,
+                    "shims",
+                    format!("a bare {bin} reaches cswap from this environment"),
+                    "",
+                )),
+                State::Broken => out.push(check(
+                    Level::Warn,
+                    "shims",
+                    format!("the shim for {bin} is missing or leads to another cswap"),
+                    "Make it again: `cswap shims on`, or Settings > Shell > PATH shims.",
+                )),
+                State::Shadowed(first) => out.push(check(
+                    Level::Warn,
+                    "shims",
+                    format!(
+                        "{} comes before cswap's shim on PATH here",
+                        paths::tilde(&first)
+                    ),
+                    format!(
+                        "A bare `{bin}` started from this environment skips cswap. {later}"
+                    ),
+                )),
+                State::OffPath => out.push(check(
+                    Level::Warn,
+                    "shims",
+                    format!(
+                        "{} is not on PATH here yet",
+                        paths::tilde(&crate::shim::dir())
+                    ),
+                    format!("So a bare `{bin}` started from this environment is not found through it. {later}"),
+                )),
+            }
+        }
+    }
+
+    // ---- PATH shims: and does herdr, which keeps the PATH it started with?
+    if crate::shim::supported() {
+        let settings = store::Settings::load().unwrap_or_default();
+        let chosen: Vec<Harness> = crate::shim::chosen(&settings)
+            .into_iter()
+            .filter(|h| crate::shim::state(*h) != crate::shim::State::Broken)
+            .collect();
+        for (h, first, ours) in crate::shim::seen_by_herdr(&chosen).unwrap_or_default() {
+            let bin = h.spec().bins[0];
+            if ours {
+                out.push(check(
+                    Level::Ok,
+                    "shims",
+                    format!("herdr starts a bare {bin} through cswap"),
+                    "",
+                ));
+                continue;
+            }
+            let what = match &first {
+                Some(first) => format!("herdr still starts {}", paths::tilde(first)),
+                None => format!("herdr finds no {bin} at all"),
+            };
+            out.push(check(
+                Level::Warn,
+                "shims",
+                format!("{what}, not cswap's shim"),
+                format!(
+                    "herdr keeps the PATH it started with, and that one does not have {} first. Until it does, `hc run {bin} …` skips cswap. Give herdr the new PATH: run `hc server restart --fresh` in a terminal outside herdr, or log in again.",
+                    paths::tilde(&crate::shim::dir())
+                ),
+            ));
+        }
     }
 
     // ---- each harness
