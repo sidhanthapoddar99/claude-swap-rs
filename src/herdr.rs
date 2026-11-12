@@ -1,11 +1,13 @@
 //! Herdr keeps agents in terminals that stay alive. This is what cswap does
 //! for it: say which account the agent in a terminal runs on, list what a
 //! launch menu can offer, and move a running agent to another account without
-//! losing its conversation.
+//! losing its conversation, or start it again on the account it is on.
 //!
 //! A switch stops the agent, waits for a shell in its place, and types the
 //! launch on the new account with the arguments that resume the conversation.
 //! The terminal, its tab, its place and its sub-agents stay as they are.
+//! A restart is the same on the account the agent already runs on: it comes
+//! back as the program on disk now, with its settings read again.
 //! Herdr is driven through its own command, `hc`.
 //!
 //! There are two kinds of terminal. In one a shell started the agent, and the
@@ -247,7 +249,7 @@ fn why_not(r: &Running) -> Option<String> {
     let t = &r.terminal.address;
     if r.terminal.busy() {
         Some(format!(
-            "{t} is in the middle of a turn. Switch when it stops."
+            "{t} is in the middle of a turn. Try again when it stops."
         ))
     } else if !r.terminal.shell && !cfg!(unix) {
         Some(format!(
@@ -399,7 +401,7 @@ fn wait_for(t: &str, wait: Duration, seen: impl Fn(&Terminal) -> Result<bool>) -
     }
 }
 
-/// What a switch did.
+/// What a switch or a restart did.
 pub struct Switched {
     pub terminal: String,
     pub agent: Harness,
@@ -416,12 +418,31 @@ pub struct Switched {
 /// conversation when the running one cannot be told.
 pub fn switch(c: &Ctx, t: &str, to: &str, fresh: bool) -> Result<Switched> {
     let r = running(c, t)?;
+    let target = c.reg.find(r.acc.harness, to)?;
+    if target.key() == r.acc.key() {
+        bail!(
+            "{} already runs on {}. To start it again there: cswap herdr restart {}",
+            r.terminal.address,
+            target.title(),
+            r.terminal.address
+        );
+    }
+    relaunch(c, r, target, fresh)
+}
+
+/// Stop the agent in terminal `t` and start it again on the account it is on,
+/// in the same conversation. The new one is the program on disk now, which is
+/// how an update to the agent, to cswap or to the agent's settings takes hold.
+pub fn restart(c: &Ctx, t: &str, fresh: bool) -> Result<Switched> {
+    let r = running(c, t)?;
+    let target = r.acc;
+    relaunch(c, r, target, fresh)
+}
+
+/// Stop the agent `r` and start it on `target` with its conversation.
+fn relaunch(c: &Ctx, r: Running, target: &Account, fresh: bool) -> Result<Switched> {
     let t = r.terminal.address.clone();
     let h = r.acc.harness;
-    let target = c.reg.find(h, to)?;
-    if target.key() == r.acc.key() {
-        bail!("{t} already runs on {}", target.title());
-    }
     if !c.signed_in(target) {
         bail!(
             "{} is not signed in: run `cswap login {}` first",
@@ -438,7 +459,7 @@ pub fn switch(c: &Ctx, t: &str, to: &str, fresh: bool) -> Result<Switched> {
         Talk::Unknown if fresh => (None, Vec::new()),
         Talk::Unknown => bail!(
             "cswap cannot tell which conversation {t} is in, so it was left alone. \
-             `--fresh` switches anyway and starts a new one."
+             `--fresh` goes ahead anyway and starts a new one."
         ),
     };
     let line = launch_line(target, &sessions::command_line(r.pid), &resume);
@@ -612,7 +633,7 @@ pub fn info_cmd(t: &str, as_json: bool) -> Result<()> {
     let talk = match &r.talk {
         Talk::Open { id, .. } => format!("conversation {id}"),
         Talk::Fresh => "nothing said yet".to_string(),
-        Talk::Unknown => "conversation not found: a switch needs --fresh".to_string(),
+        Talk::Unknown => "conversation not found: a switch or a restart needs --fresh".to_string(),
     };
     println!("{}", c.p.dim(&talk));
     if let Some(why) = why_not(&r) {
@@ -649,6 +670,43 @@ pub fn switch_cmd(t: &str, to: &str, fresh: bool, as_json: bool) -> Result<()> {
         c.p.bold(&s.terminal),
         s.agent.name(),
         s.from,
+        c.p.bold(&s.to)
+    );
+    if !s.started {
+        println!(
+            "{}",
+            c.p.warn("The launch was typed, but the agent is not seen running yet: look at the terminal.")
+        );
+    }
+    Ok(())
+}
+
+/// `cswap herdr restart <terminal>`.
+pub fn restart_cmd(t: &str, fresh: bool, as_json: bool) -> Result<()> {
+    let c = Ctx::load()?;
+    let s = restart(&c, t, fresh)?;
+    if as_json {
+        let v = json!({
+            "terminal": s.terminal,
+            "agent": s.agent.id(),
+            "account": s.to,
+            "session": s.session,
+            "resumed": s.session.is_some(),
+            "started": s.started,
+            "line": s.line,
+        });
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    let how = if s.session.is_some() {
+        "same conversation"
+    } else {
+        "new conversation"
+    };
+    println!(
+        "{}  {} started again on {}, {how}.",
+        c.p.bold(&s.terminal),
+        s.agent.name(),
         c.p.bold(&s.to)
     );
     if !s.started {

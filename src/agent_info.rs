@@ -55,14 +55,16 @@ Everything else on the command line goes to the agent untouched.
 These read what cswap has stored and ask no vendor. `cswap usage -r` and
 `cswap refresh` do ask; do not run them in a loop.
 
-## Moving a running agent (herdr)
+## Moving or restarting a running agent (herdr)
 
   cswap herdr info <terminal> --json     its account, and whether it can move
   cswap herdr switch <terminal> <account>
+  cswap herdr restart <terminal>         the same account, to apply an update
 
 A switch stops the agent and starts it again on the other account in the same
-conversation, in the same terminal. It refuses in the middle of a turn. Never
-switch your own terminal: the switch stops the agent in it, which is you.
+conversation, in the same terminal. A restart does that on the account it is
+on. Both refuse in the middle of a turn. Never switch or restart your own
+terminal: it stops the agent in it, which is you.
 
 ## Account names
 

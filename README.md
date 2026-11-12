@@ -285,8 +285,8 @@ The suggestion follows one idea: use what you would otherwise lose. An account w
 | Where | What you get |
 | --- | --- |
 | **+ menu** | Every agent has an arrow that opens its accounts, with how much of each is used. Pick one and the agent starts on it. "Best available" lets cswap choose. |
-| **Right-click an agent** | **Switch account** shows the account it runs on and moves it to another one: the agent stops and starts again there, in the same conversation. **Add sub-agent…** opens the + menu and starts your pick under that agent, which is told about it. |
-| **Ctrl+click agents** | Select several (Cmd+click on a Mac), then right-click one of them: move them all to one account, one after the other, or close them all. Switching needs agents of one kind; an agent in the middle of a turn stays where it is. |
+| **Right-click an agent** | **Switch account** shows the account it runs on and moves it to another one: the agent stops and starts again there, in the same conversation. **Add sub-agent…** opens the + menu and starts your pick under that agent, which is told about it. **Restart agent** stops it and starts it again on the same account and conversation, so an update takes hold. |
+| **Ctrl+click agents** | Select several (Cmd+click on a Mac), then right-click one of them: move them all to one account, restart them, or close them all, one after the other. Switching needs agents of one kind; an agent in the middle of a turn stays where it is. |
 | **Agents list** | The ⇄ icon beside the sort icon shows each agent's account in place of its time and status. Click it again to go back. |
 | **Sidebar** | **cswap**, between Settings and Add machine, opens this dashboard in a popup over the window. |
 
@@ -304,7 +304,7 @@ Or open the dashboard's **Integrations** page (`i`) and press Enter. An install 
 
 Two keys you can bind in herdr's `keys.json`: `cswap-chrome.dashboard` opens the dashboard popup, and `cswap-agents.accounts` flips the accounts view.
 
-### Moving a running agent from the command line
+### Moving or restarting a running agent from the command line
 
 The layout's menus run these, and they work without it:
 
@@ -312,6 +312,7 @@ The layout's menus run these, and they work without it:
 cswap herdr ls                 which account each terminal's agent runs on
 cswap herdr info t7            the account the agent in terminal t7 runs on
 cswap herdr switch t7 work     stop it, start it on `work`, same conversation
+cswap herdr restart t7         stop it, start it again where it is, same conversation
 cswap herdr menu               every agent with its accounts, as JSON, for a launch menu
 ```
 
@@ -319,7 +320,9 @@ A switch stops the agent, then types the launch on the new account at the shell 
 
 An agent that a shell started is stopped with Ctrl+C, and the shell is there again. An agent that is the terminal's own program (`hc run claude …`) has no shell behind it and a clean exit would end the terminal, so cswap turns herdr's keeping on for it and kills the agent: herdr then puts a shell in its place.
 
-It refuses when the agent is in the middle of a turn and when it cannot tell which conversation the agent is in. `--fresh` allows the second case and starts a new conversation. Finding the conversation reads `/proc`, so this is Linux only for Codex and Antigravity; the Antigravity part is not yet tested against a running agy.
+A restart is a switch onto the account the agent is already on. The agent comes back as the program on disk now and reads its settings again, so that is how an update to the agent or to cswap takes hold without losing the conversation.
+
+Both refuse when the agent is in the middle of a turn and when cswap cannot tell which conversation the agent is in. `--fresh` allows the second case and starts a new conversation. Finding the conversation reads `/proc`, so this is Linux only for Codex and Antigravity; the Antigravity part is not yet tested against a running agy.
 
 ## Commands
 
@@ -350,6 +353,7 @@ shell-init <shell>         print shell integration
 shims [on|off]             PATH shims: agents other programs start use cswap too
 uninstall                  undo the shims and the lines in your shell files
 herdr ls|info|switch       agents in herdr terminals: account and switch
+herdr restart <terminal>   start a terminal's agent again, same conversation
 herdr install|status       the cswap layout for herdr
 agent-info                 how a coding agent uses cswap: a guide for the agent
 update                     install the latest release         (--check)

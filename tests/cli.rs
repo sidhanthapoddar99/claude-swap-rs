@@ -99,9 +99,16 @@ impl Env {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(BIN);
-        c.args(args)
-            .env_clear()
+        let mut c = self.program(BIN);
+        c.args(args);
+        c
+    }
+
+    /// Any program, in this home's environment and with nothing of the real
+    /// one: the tests may themselves be run by an agent that cswap started.
+    fn program(&self, bin: impl AsRef<std::ffi::OsStr>) -> Command {
+        let mut c = Command::new(bin);
+        c.env_clear()
             .env("HOME", self.home())
             .env("CSWAP_HOME", self.cswap_home())
             .env("CSWAP_PROC", self.home().join("proc"))
@@ -652,6 +659,7 @@ fn help_names_every_command_in_groups() {
             "shims [on|off]",
             "uninstall  ",
             "herdr switch",
+            "herdr restart <t>",
             "herdr install",
             "--cswap=",
             "--cswap  ",
@@ -836,6 +844,45 @@ fn a_herdr_terminal_moves_to_another_account_and_keeps_its_conversation() {
     let _ = Command::new("kill").arg(next.to_string()).status();
 }
 
+/// A restart is a switch onto the account the agent is on: it comes back in
+/// the same terminal and conversation, as the program that is on disk now.
+#[test]
+fn a_herdr_terminal_restarts_its_agent_on_the_same_account() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0--model\0opus\0");
+    let h = env.home();
+    // What the agent looks like once it runs again: on its root login.
+    fs::write(h.join("hc/next-proc/environ"), "HC_TERMINAL_ID=t7\0").unwrap();
+
+    // Not in the middle of a turn.
+    fs::write(h.join("hc/status"), "working").unwrap();
+    let err = env.fails(&["herdr", "restart", "t7"]);
+    assert!(err.contains("middle of a turn"), "{err}");
+    assert!(!h.join("hc/log").exists(), "a refusal touched the terminal");
+    fs::write(h.join("hc/status"), "idle").unwrap();
+    // A switch onto the same account says how to restart instead.
+    let err = env.fails(&["herdr", "switch", "t7", "root"]);
+    assert!(err.contains("cswap herdr restart t7"), "{err}");
+
+    let done: Value = serde_json::from_str(&env.ok(&["herdr", "restart", "t7", "--json"])).unwrap();
+    assert_eq!(done["account"], "root");
+    assert_eq!(done["resumed"], true);
+    assert_eq!(done["started"], true);
+    let log = fs::read_to_string(h.join("hc/log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        [
+            "keys t7 ctrl+c",
+            &format!("send t7 cswap claude --cswap=root --model opus --resume {SESSION}"),
+        ]
+    );
+    let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
+    assert_eq!(info["account"], "claude-0");
+    assert_eq!(info["pid"], next);
+
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
 #[test]
 fn the_text_views_work_without_a_terminal() {
     let env = Env::new();
@@ -892,13 +939,8 @@ fn shell_init_wraps_the_installed_agents() {
 
     // What bash prints really is a wrapper: sourced, `claude` goes through cswap.
     let script = format!("{bash}\nclaude --print 'a b'\n");
-    let mut sh = Command::new("bash");
+    let mut sh = env.program("bash");
     sh.arg("-c").arg(&script);
-    for (k, v) in env.cmd(&[]).get_envs() {
-        if let Some(v) = v {
-            sh.env(k, v);
-        }
-    }
     sh.env(
         "PATH",
         format!(
@@ -1048,7 +1090,7 @@ fn the_guide_for_agents_names_only_real_commands() {
         "$CSWAP_ACCOUNT",
         "cswap claude --cswap=work",
         "hc run --bg --name w1 cswap claude",
-        "Never\nswitch your own terminal",
+        "Never switch or restart your own\nterminal",
         "Leave these to the user",
     ] {
         assert!(guide.contains(word), "the guide lacks {word:?}\n{guide}");
@@ -1062,6 +1104,7 @@ fn the_guide_for_agents_names_only_real_commands() {
         vec!["herdr", "ls", "-h"],
         vec!["herdr", "info", "-h"],
         vec!["herdr", "switch", "-h"],
+        vec!["herdr", "restart", "-h"],
         vec!["refresh", "-h"],
     ] {
         env.ok(&args);
@@ -1177,18 +1220,12 @@ impl Env {
     /// Run `program` the way another program would: by its bare name, found
     /// on a `PATH` that has the shims first.
     fn bare(&self, program: &str, args: &[&str]) -> Output {
-        let mut c = Command::new("sh");
-        c.arg("-c")
+        self.program("sh")
+            .arg("-c")
             .arg(format!("exec {program} \"$@\""))
             .arg("sh")
-            .args(args);
-        for (k, v) in self.cmd(&[]).get_envs() {
-            if let Some(v) = v {
-                c.env(k, v);
-            }
-        }
-        c.env("PATH", self.shim_path())
-            .stdin(std::process::Stdio::null())
+            .args(args)
+            .env("PATH", self.shim_path())
             .output()
             .unwrap()
     }
@@ -1294,13 +1331,8 @@ fn an_agent_another_program_starts_goes_through_its_shim() {
     assert!(log.contains("run: codex") && log.contains("CSWAP_ACCOUNT=codex-0\n"));
 
     // The agent's exit code is still the caller's.
-    let mut c = Command::new(env.shims().join("claude"));
-    for (k, v) in env.cmd(&[]).get_envs() {
-        if let Some(v) = v {
-            c.env(k, v);
-        }
-    }
-    let out = c
+    let out = env
+        .program(env.shims().join("claude"))
         .env("PATH", env.shim_path())
         .env("CSWAP_FAKE_EXIT", "7")
         .output()
@@ -1375,14 +1407,9 @@ fn shell_init_puts_the_shims_first_again() {
     assert!(!env.ok(&["shell-init", "powershell"]).contains("shims"));
 
     // Sourced after an rc file that put its own folders in front.
-    let mut sh = Command::new("bash");
+    let mut sh = env.program("bash");
     sh.arg("-c")
         .arg(format!("PATH=\"/opt/x:$PATH\"\n{bash}\necho \"$PATH\"\n"));
-    for (k, v) in env.cmd(&[]).get_envs() {
-        if let Some(v) = v {
-            sh.env(k, v);
-        }
-    }
     let out = sh.env("PATH", "/usr/bin:/bin").output().unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(
