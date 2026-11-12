@@ -650,6 +650,7 @@ fn help_names_every_command_in_groups() {
             "SETUP",
             "EXAMPLES",
             "cswap start",
+            "cswap dashboard [page]",
             "ps  ",
             "root  ",
             "add <agent> <name>",
@@ -910,6 +911,14 @@ fn the_text_views_work_without_a_terminal() {
     // The dashboard needs a terminal and says so.
     let err = env.fails(&[]);
     assert!(err.contains("terminal"), "{err}");
+    // It opens on a page when one is named, and a wrong name is said first.
+    let err = env.fails(&["dashboard", "Usage"]);
+    assert!(err.contains("terminal"), "{err}");
+    let err = env.fails(&["dashboard", "nonsense"]);
+    assert!(
+        err.contains("'nonsense' is not a page") && err.contains("usage, resets"),
+        "{err}"
+    );
 }
 
 #[test]

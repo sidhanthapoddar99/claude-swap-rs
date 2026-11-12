@@ -19,7 +19,7 @@ Left to right: the sidebar (268px), then the tab bar over the panes, as in `main
 - **Agent menu (264 × 177 popup):** Copy agent ID, Switch account (the account in use at the right), Add sub-agent…, a rule, Restart agent, Close agent tree…. Restart agent is off, with "in a turn" at its right, while the agent is working or blocked.
 - **Account list (320px wide popup):** one 31px row per account: a check on the one in use, the name, and "in use", the usage note or "not signed in". A line under the rows says why a switch is refused, when it is.
 - **Group menu (264 × 173 popup):** "N agents selected", Switch account (the shared account, "N accounts" or "different agents"), Restart N agents ("M of N" at its right when some cannot restart now), Close N agents…, a rule, Clear selection.
-- **Dashboard (dialog, 86% × 88% of the window):** a 34px bar with the title "cswap" and a ✕, over a terminal running `cswap`.
+- **Dashboard (dialog, 86% × 88% of the window):** a 34px bar with the title "cswap" and a ✕, over a terminal running `cswap dashboard usage`: the dashboard, opened on its Usage page.
 
 ## How it behaves
 
@@ -33,7 +33,7 @@ Left to right: the sidebar (268px), then the tab bar over the panes, as in `main
 - **Group restart:** restarts every selected agent that is between turns and whose conversation cswap can find, one after the other; the rest stay as they are. Agents of different kinds can be restarted together. One toast sums it up.
 - **Group close:** a dialog names the terminals; confirming closes each one's tree.
 - **Two-arrow icon in the header:** flips the accounts view. It reads `cswap herdr ls --json` when turned on and every 30 seconds while on. It is off at every start.
-- **cswap in the footer:** opens the dashboard dialog, reusing a running dashboard terminal. The ✕ ends that terminal and closes the dialog.
+- **cswap in the footer:** opens the dashboard dialog on the Usage page, reusing a running dashboard terminal as it was left. The ✕ ends that terminal and closes the dialog.
 - **Keys:** nothing is bound. `cswap-chrome.dashboard` and `cswap-agents.accounts` are commands a `keys.json` can bind.
 
 ## Built from

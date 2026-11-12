@@ -59,7 +59,7 @@ export default class WorkspaceChrome extends View {
         if (!terminal) {
           const bin = await cswapPath();
           if (!bin) throw new Error("cswap is not installed");
-          const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--rm", "--name", DASHBOARD, "--cwd", home(), "--", bin]);
+          const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--rm", "--name", DASHBOARD, "--cwd", home(), "--", bin, "dashboard", "usage"]);
           if (r.code !== 0) throw new Error(r.stderr || "could not start cswap");
           terminal = JSON.parse(r.stdout).address;
         }

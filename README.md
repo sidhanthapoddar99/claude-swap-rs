@@ -241,13 +241,13 @@ The pages are numbered in the order of the menu, so `1` is Overview; `i` is Inte
 | --- | --- |
 | **Overview** | What to use next for each agent, and every account on one line. |
 | **Usage** | Every limit of every account, in one box per agent: the plan under the name, then a line per limit with a bar and its pace marker, the percent used, how long until it resets and the date. The short windows of a few hours are listed here too. |
-| **Resets** | Three parts: the spare resets you hold with how many and when they expire, when each account's weekly limit resets, and when each plan renews. Every row gives the account, the reset, how long until then, the date, and how much of the account's week is used. Selecting a row softly marks the same account's other rows in all three parts. |
+| **Resets** | Three parts: the spare resets you hold with how many and when they expire, when each account's weekly limit resets, and when each plan renews. Every row gives the account, the reset, how long until then, the date, and how much of the account's week is used. Enter on a row, or a second click on it, fades every other account's rows in all three parts, so one account's resets stand out; Enter on it again or Esc shows them all. |
 | **Accounts** | Add, sign in, rename, set aliases, remove. For the selected account: its facts a line each, then every limit it has with its credits, then the spare resets it holds, then the details that explain them. Enter opens its actions in groups; `d` makes it the default of its agent. |
 | **Root** | Each agent's own login and its usage, which account holds the same login, `c` to make an account from it, and `d` to make it the default again. |
 | **Sync** | Per account: what is linked, what is private, what is shadowed, and when it was last synced. |
 | **Sessions** | The agents running right now: which account each is on, since when, and in which folder. |
 | **Analytics** | Burn rate per account over the last week and where it lands at the reset. More is planned. |
-| **Health** | Anything that needs attention: signed-out accounts, two accounts on one login, shadowed files, a missing shell integration. |
+| **Health** | Anything that needs attention: signed-out accounts, two accounts on one login, shadowed files, a missing shell integration. The checks are grouped: cswap, the shells, the PATH shims, then each agent with its accounts, and a group's title says how many of its checks need a look. |
 | **Integrations** | cswap inside other programs. One so far: the [herdr](#herdr) layout, with what it adds, whether it is installed, and Enter to install or show it. The files are fetched from GitHub only when you install. |
 | **Settings** | Three tabs; `t` and `T` move between them. General: the theme, refresh and updates, with a row that checks for an update now. Harness: every agent's options in one list. Shell: each shell with the agents it wraps, and a list of boxes to wrap or unwrap them. |
 | **Help** | How to start an agent on an account with every flag, what cswap's words mean, and every key. |
@@ -288,7 +288,7 @@ The suggestion follows one idea: use what you would otherwise lose. An account w
 | **Right-click an agent** | **Switch account** shows the account it runs on and moves it to another one: the agent stops and starts again there, in the same conversation. **Add sub-agent…** opens the + menu and starts your pick under that agent, which is told about it. **Restart agent** stops it and starts it again on the same account and conversation, so an update takes hold. |
 | **Ctrl+click agents** | Select several (Cmd+click on a Mac), then right-click one of them: move them all to one account, restart them, or close them all, one after the other. Switching needs agents of one kind; an agent in the middle of a turn stays where it is. |
 | **Agents list** | The ⇄ icon beside the sort icon shows each agent's account in place of its time and status. Click it again to go back. |
-| **Sidebar** | **cswap**, between Settings and Add machine, opens this dashboard in a popup over the window. |
+| **Sidebar** | **cswap**, between Settings and Add machine, opens this dashboard in a popup over the window, on its Usage page. |
 
 A sub-agent started through cswap, from the menu or by the agent itself with `hc run … cswap claude "<task>"`, starts on its parent's account unless you pick another. Agents mostly type the bare `hc run … claude "<task>"`, which herdr starts without cswap: turn [PATH shims](#path-shims) on and that lands on the parent's account too. The Health page warns while herdr is here and the shims are off.
 
@@ -328,6 +328,7 @@ Both refuse when the agent is in the middle of a turn and when cswap cannot tell
 
 ```
 cswap                      open the dashboard
+cswap dashboard [page]     open it on a page: usage, resets, accounts, …
 cswap <agent> [args…]      run an agent on the account it starts on
 cswap start [--default]    pick an agent and an account, then run it
 

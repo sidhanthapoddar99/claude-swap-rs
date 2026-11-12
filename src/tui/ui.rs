@@ -454,6 +454,21 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             label: "details",
             action: Action::Activate,
         });
+    } else if app.page == Page::Resets {
+        let row = pages::resets::rows(app)
+            .get(app.row())
+            .map(|r| r.key.clone());
+        if row.is_some() {
+            chips.push(Chip {
+                key: "⏎",
+                label: if row == app.spot {
+                    "show all"
+                } else {
+                    "only this account"
+                },
+                action: Action::Activate,
+            });
+        }
     } else if app.page == Page::Integrations {
         chips.push(Chip {
             key: "⏎",
@@ -487,6 +502,8 @@ fn footer(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
             key: "esc",
             label: if app.focus == Focus::Nav {
                 "quit"
+            } else if app.spot.is_some() {
+                "show all"
             } else {
                 "menu"
             },

@@ -633,6 +633,15 @@ fn keys_move_between_the_menu_and_the_page() {
 }
 
 #[test]
+fn a_page_is_named_by_its_title_in_any_case() {
+    for page in Page::ALL {
+        assert_eq!(Page::named(&page.title().to_lowercase()), Some(page));
+    }
+    assert_eq!(Page::named(" Usage "), Some(Page::Usage));
+    assert_eq!(Page::named("usages"), None);
+}
+
+#[test]
 fn a_click_lands_on_what_is_drawn_there() {
     use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     let sb = Sandbox::new();
@@ -1143,42 +1152,98 @@ fn the_resets_page_has_three_parts_and_one_weekly_figure_per_account() {
 }
 
 #[test]
-fn selecting_a_reset_softly_marks_the_accounts_other_rows() {
+fn enter_or_a_second_click_fades_every_other_accounts_resets() {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     let sb = Sandbox::new();
     sb.demo();
     let (mut app, _rx) = app();
     app.dispatch(Action::Go(Page::Resets));
     app.focus = Focus::Main;
-    // The colour of the marker in front of each row of an account.
-    let marks = |app: &mut App, name: &str| {
+    let faint = app.theme.faint();
+    // For each row of an account, top to bottom: where it is on the screen,
+    // whether it has a marker in front, and whether its name is faded.
+    let rows = |app: &mut App, name: &str| {
         let mut term = Terminal::new(TestBackend::new(132, 40)).unwrap();
         term.draw(|f| ui::draw(f, app)).unwrap();
         let buf = term.backend().buffer().clone();
         let mut out = Vec::new();
         for y in 0..40 {
             let row: String = (0..132).map(|x| buf[(x, y)].symbol()).collect();
-            if let Some(at) = row.find(&format!("▌● {name}")) {
+            if let Some(at) = row.find(&format!("● {name}")) {
                 let x = row[..at].chars().count() as u16;
-                out.push(buf[(x, y)].fg);
+                let marked = buf[(x - 1, y)].symbol() == "▌";
+                out.push((y, marked, buf[(x + 2, y)].fg == faint));
             }
         }
         out
     };
-    let (strong, faint) = (app.theme.accent(), app.theme.faint());
+    let look = |app: &mut App, name: &str| -> Vec<(bool, bool)> {
+        rows(app, name)
+            .into_iter()
+            .map(|(_, m, f)| (m, f))
+            .collect()
+    };
+    const PLAIN: (bool, bool) = (false, false);
+    const SELECTED: (bool, bool) = (true, false);
+    const FADED: (bool, bool) = (false, true);
 
     // The rows, top to bottom: work's spare reset, the weekly resets of work
-    // and side, then the renewals of side and work.
+    // and side, then the renewals of side and work. Selecting one marks that
+    // row and nothing else.
     app.sel[Page::Resets.index()] = 0;
-    assert_eq!(marks(&mut app, "work"), [strong, faint, faint]);
-    assert!(marks(&mut app, "side").is_empty());
+    assert_eq!(look(&mut app, "work"), [SELECTED, PLAIN, PLAIN]);
+    assert_eq!(look(&mut app, "side"), [PLAIN, PLAIN]);
+    assert!(screen(&mut app, 132, 40).contains("⏎ only this account"));
 
+    // Enter narrows the page to the row's account: the others fade.
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.spot.as_deref(), Some("claude-1"));
+    assert_eq!(look(&mut app, "work"), [SELECTED, PLAIN, PLAIN]);
+    assert_eq!(look(&mut app, "side"), [FADED, FADED]);
+    let text = screen(&mut app, 132, 40);
+    assert!(
+        text.contains("⏎ show all") && text.contains("esc show all"),
+        "{text}"
+    );
+
+    // The selection still moves anywhere; a faded row keeps its marker.
     app.sel[Page::Resets.index()] = 2;
-    assert_eq!(marks(&mut app, "side"), [strong, faint]);
-    assert!(marks(&mut app, "work").is_empty());
+    assert_eq!(look(&mut app, "side"), [(true, true), FADED]);
+    // Enter there narrows to that account instead.
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(look(&mut app, "side"), [SELECTED, PLAIN]);
+    assert_eq!(look(&mut app, "work"), [FADED, FADED, FADED]);
+    // Enter on a row of the account shows them all again.
+    key(&mut app, KeyCode::Enter);
+    assert!(app.spot.is_none());
+    assert_eq!(look(&mut app, "work"), [PLAIN, PLAIN, PLAIN]);
 
-    // Nothing is marked while the menu has the keys.
-    app.focus = Focus::Nav;
-    assert!(marks(&mut app, "work").is_empty() && marks(&mut app, "side").is_empty());
+    // Escape shows all first, and only then goes back to the menu.
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Esc);
+    assert!(app.spot.is_none() && app.focus == Focus::Main);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.focus, Focus::Nav);
+
+    // One click selects a row; a second click on it narrows the page.
+    let (y, ..) = rows(&mut app, "work")[1];
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 60,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.on_mouse(click);
+    assert_eq!((app.row(), app.spot.is_none()), (1, true));
+    assert_eq!(look(&mut app, "side"), [PLAIN, PLAIN]);
+    app.on_mouse(click);
+    assert_eq!(look(&mut app, "work"), [PLAIN, SELECTED, PLAIN]);
+    assert_eq!(look(&mut app, "side"), [FADED, FADED]);
+
+    // Leaving the page shows everything again.
+    app.dispatch(Action::Go(Page::Overview));
+    app.dispatch(Action::Go(Page::Resets));
+    assert!(app.spot.is_none());
 }
 
 #[test]

@@ -110,6 +110,13 @@ impl Page {
     pub fn index(self) -> usize {
         Page::ALL.iter().position(|p| *p == self).unwrap_or(0)
     }
+
+    /// The page a word on the command line names: its title, in any case.
+    pub fn named(word: &str) -> Option<Page> {
+        Page::ALL
+            .into_iter()
+            .find(|p| p.title().eq_ignore_ascii_case(word.trim()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -373,6 +380,9 @@ pub struct App {
     pub integration: crate::integration::State,
     /// An install is running on its thread.
     pub installing: bool,
+    /// The account the Resets page is narrowed to: every other account's
+    /// rows are faded there. Enter or a second click on a row sets it.
+    pub spot: Option<String>,
     pub update: UpdateCheck,
     pub modal: Option<Modal>,
     pub toast: Option<Toast>,
@@ -444,6 +454,7 @@ impl App {
             update: UpdateCheck::default(),
             integration: crate::integration::State::NotInstalled,
             installing: false,
+            spot: None,
             modal: None,
             toast: None,
             hits: Hits::default(),
@@ -891,6 +902,7 @@ impl App {
 
     fn go(&mut self, page: Page) {
         self.page = page;
+        self.spot = None;
         match page {
             Page::Sync => self.check_sync(),
             Page::Analytics => self.load_history(),
@@ -1269,6 +1281,8 @@ impl App {
             // Escape steps back one level: out of the page to the menu, and
             // from the menu out of cswap.
             Action::Back => match self.focus {
+                // A narrowed page shows everything again first.
+                Focus::Main if self.spot.is_some() => self.spot = None,
                 Focus::Main => self.focus = Focus::Nav,
                 Focus::Nav => self.quit = true,
             },
@@ -1317,7 +1331,14 @@ impl App {
                     }
                 }
                 Page::Integrations => self.dispatch(Action::IntegrationMenu),
-                Page::Resets | Page::Sessions | Page::Help => {}
+                // Narrow the page to the row's account, or show all again.
+                Page::Resets => {
+                    let key = pages::resets::rows(self)
+                        .get(self.row())
+                        .map(|r| r.key.clone());
+                    self.spot = key.filter(|k| self.spot.as_ref() != Some(k));
+                }
+                Page::Sessions | Page::Help => {}
             },
             Action::IntegrationMenu => self.integration_menu(),
             Action::InstallHerdr => {

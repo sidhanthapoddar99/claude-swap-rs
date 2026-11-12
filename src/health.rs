@@ -22,16 +22,35 @@ pub enum Level {
 #[derive(Debug, Clone)]
 pub struct Check {
     pub level: Level,
+    /// What the check is about: `cswap`, `shims`, an agent's id or an
+    /// account's key.
     pub area: String,
+    /// The heading it is listed under: an agent's checks and its accounts'
+    /// share one. Checks of one group follow each other.
+    pub group: String,
+    /// The agent the group is about, when it is about one.
+    pub agent: Option<Harness>,
     pub title: String,
     /// What to do about it; empty when nothing needs doing.
     pub detail: String,
 }
 
 fn check(level: Level, area: &str, title: impl Into<String>, detail: impl Into<String>) -> Check {
+    // An account's key is its agent's id and a number: `claude-2`.
+    let agent = Harness::ALL.into_iter().find(|h| {
+        area.strip_prefix(h.id())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
+    });
+    let group = match (agent, area) {
+        (Some(h), _) => h.name(),
+        (None, "shims") => "PATH shims",
+        (None, other) => other,
+    };
     Check {
         level,
         area: area.to_string(),
+        group: group.to_string(),
+        agent,
         title: title.into(),
         detail: detail.into(),
     }

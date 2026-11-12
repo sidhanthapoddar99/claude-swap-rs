@@ -1001,14 +1001,14 @@ pub fn doctor() -> Result<bool> {
     let c = Ctx::load()?;
     let p = &c.p;
     let checks = health::run(&c.reg, &c.live);
-    let mut area = String::new();
+    let mut group = String::new();
     for check in &checks {
-        if check.area != area {
-            if !area.is_empty() {
+        if check.group != group {
+            if !group.is_empty() {
                 println!();
             }
-            println!("{}", p.bold(&check.area));
-            area = check.area.clone();
+            println!("{}", p.bold(&check.group));
+            group = check.group.clone();
         }
         let mark = match check.level {
             Level::Ok => p.ok("✓"),

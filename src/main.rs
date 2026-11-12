@@ -6,7 +6,7 @@
 //!   argument parser below.
 //! - `cswap <command>` is one of the plain commands.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::process::ExitCode;
 
@@ -125,9 +125,15 @@ enum Cmd {
     /// How a coding agent uses cswap: a short guide written for the agent
     AgentInfo,
 
-    /// Open the dashboard (what a bare `cswap` does)
-    #[command(visible_alias = "ui")]
-    Dashboard,
+    /// Open the dashboard (what a bare `cswap` does), on a page if you name one
+    #[command(
+        visible_alias = "ui",
+        after_help = "Examples:\n  cswap dashboard            the Overview\n  cswap dashboard usage      the Usage page\n\nPages: overview, usage, resets, accounts, root, sync, sessions, analytics,\nhealth, integrations, settings, help."
+    )]
+    Dashboard {
+        /// The page to open on
+        page: Option<String>,
+    },
 
     /// Pick an agent and an account, then run it
     #[command(
@@ -341,6 +347,10 @@ fn help(p: &Paint) -> String {
     out.push_str(&head("USAGE"));
     out.push_str(&row("cswap", "open the dashboard"));
     out.push_str(&row(
+        "cswap dashboard [page]",
+        "open it on a page: usage, resets, …",
+    ));
+    out.push_str(&row(
         "cswap <agent> [args…]",
         "run an agent on the account it starts on",
     ));
@@ -483,13 +493,13 @@ fn help(p: &Paint) -> String {
     out
 }
 
-fn dashboard() -> Result<()> {
+fn dashboard(page: Option<tui::app::Page>) -> Result<()> {
     // The check runs beside the dashboard and is read from its cache there.
     let settings = store::Settings::load()?;
     if update::enabled(&settings) {
         std::thread::spawn(update::check_if_due);
     }
-    match tui::run()? {
+    match tui::run(page)? {
         Some(tui::app::Exit::Launch { key }) => {
             let (h, _) =
                 store::parse_key(&key).ok_or_else(|| anyhow::anyhow!("bad account key {key}"))?;
@@ -527,14 +537,14 @@ fn run() -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     if args.is_empty() {
-        dashboard()?;
+        dashboard(None)?;
         return Ok(ExitCode::SUCCESS);
     }
 
     let command = Cli::command().override_help(help(&Paint::stdout()));
     let cli = Cli::from_arg_matches(&command.get_matches())?;
     let Some(cmd) = cli.command else {
-        dashboard()?;
+        dashboard(None)?;
         return Ok(ExitCode::SUCCESS);
     };
     // Commands whose output is read by a program, or that start an agent,
@@ -544,7 +554,7 @@ fn run() -> Result<ExitCode> {
         Cmd::ShellInit { .. }
             | Cmd::AgentInfo
             | Cmd::Start { .. }
-            | Cmd::Dashboard
+            | Cmd::Dashboard { .. }
             | Cmd::Update { .. }
             | Cmd::Ps { json: true }
             | Cmd::List { json: true }
@@ -554,7 +564,19 @@ fn run() -> Result<ExitCode> {
     let mut ok = true;
     match cmd {
         Cmd::AgentInfo => print!("{}", agent_info::text()),
-        Cmd::Dashboard => dashboard()?,
+        Cmd::Dashboard { page } => {
+            let page = match page {
+                Some(word) => Some(tui::app::Page::named(&word).with_context(|| {
+                    let all: Vec<String> = tui::app::Page::ALL
+                        .iter()
+                        .map(|p| p.title().to_lowercase())
+                        .collect();
+                    format!("'{word}' is not a page. Use one of: {}", all.join(", "))
+                })?),
+                None => None,
+            };
+            dashboard(page)?
+        }
         Cmd::Start {
             default,
             agent,
