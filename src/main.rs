@@ -16,6 +16,7 @@ mod fsx;
 mod harness;
 mod health;
 mod herdr;
+mod herdr_saved;
 mod history;
 mod http;
 mod integration;
@@ -98,6 +99,32 @@ enum HerdrCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Write down which agent runs in which terminal, to restore later
+    Save {
+        /// Leave a save alone that herdr's last stop made worth keeping
+        #[arg(long)]
+        auto: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start the saved agents again, each in its conversation
+    Restore {
+        /// Only these terminals, by their saved address or name
+        terminals: Vec<String>,
+        /// Say what would be done and do nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Start a new conversation where the saved one was not known
+        #[arg(long)]
+        fresh: bool,
+        /// Use the save before the last one
+        #[arg(long)]
+        previous: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Put the cswap layout into herdr, or bring it up to date
     Install {
         /// Show the layout in herdr once it is installed
@@ -158,7 +185,7 @@ enum Cmd {
 
     /// Agents in herdr terminals: which account, switch it, restart it
     #[command(
-        after_help = "Examples:\n  cswap herdr ls                  which account each terminal's agent runs on\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr restart t7          stop it, start it again where it is, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n  cswap herdr install --show      put the cswap layout into herdr and show it\n  cswap herdr status              whether the layout is installed\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. A restart does the same on the account it\nis on, so an update takes hold. Both refuse in the middle of a turn, and while\nsub-agents of the agent are still working: a report they send meanwhile would\nbe lost. `--force` goes ahead anyway."
+        after_help = "Examples:\n  cswap herdr ls                  which account each terminal's agent runs on\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr restart t7          stop it, start it again where it is, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n  cswap herdr save                write down which agent is in which terminal\n  cswap herdr restore --dry-run   what would be started again after a stop\n  cswap herdr restore             start them again, same conversations\n  cswap herdr install --show      put the cswap layout into herdr and show it\n  cswap herdr status              whether the layout is installed\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. A restart does the same on the account it\nis on, so an update takes hold. Both refuse in the middle of a turn, and while\nsub-agents of the agent are still working: a report they send meanwhile would\nbe lost. `--force` goes ahead anyway.\n\nA stop of herdr ends every agent. `save` keeps the list a `restore` needs:\nagent, account, conversation, folder and parent of every terminal. The layout\nsaves on a timer."
     )]
     Herdr {
         #[command(subcommand)]
@@ -453,6 +480,10 @@ fn help(p: &Paint) -> String {
                     "start a herdr terminal's agent again, same conversation",
                 ),
                 (
+                    "herdr save | restore",
+                    "write down what runs in herdr; bring it back after a stop",
+                ),
+                (
                     "herdr install",
                     "put the cswap layout into herdr (--show switches to it)",
                 ),
@@ -606,6 +637,21 @@ fn run() -> Result<ExitCode> {
                 force,
                 json,
             } => herdr::restart_cmd(&terminal, herdr::Allow { fresh, force }, json)?,
+            HerdrCmd::Save { auto, json } => herdr_saved::save_cmd(auto, json)?,
+            HerdrCmd::Restore {
+                terminals,
+                dry_run,
+                fresh,
+                previous,
+                json,
+            } => {
+                let how = herdr_saved::How {
+                    dry_run,
+                    fresh,
+                    previous,
+                };
+                ok = herdr_saved::restore_cmd(&terminals, how, json)?
+            }
             HerdrCmd::Install { show, json } => integration::install_cmd(show, json)?,
             HerdrCmd::Status { json } => ok = integration::status_cmd(json)?,
         },

@@ -693,7 +693,10 @@ const FAKE_HC: &str = r#"#!/bin/sh
 dir="$HOME/hc"
 old=$(cat "$dir/pid")
 case "$1" in
+  server) printf '{"holder":{"instance":"%s"}}\n' "$(cat "$dir/core" 2>/dev/null)" ;;
+  run) echo "$*" >> "$dir/log"; echo '{"address":"t9"}' ;;
   get)
+    if [ -f "$dir/gone" ]; then echo "no terminal" >&2; exit 3; fi
     if kill -0 "$old" 2>/dev/null; then front=$old
     elif [ -f "$dir/sent" ]; then front=$(cat "$dir/next")
     else front=1; fi
@@ -901,6 +904,119 @@ fn a_herdr_terminal_restarts_its_agent_on_the_same_account() {
     let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
     assert_eq!(info["account"], "claude-0");
     assert_eq!(info["pid"], next);
+
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
+/// Herdr was stopped: the terminal is back as a shell and the agent is gone.
+#[test]
+fn a_saved_agent_is_started_again_in_its_terminal_after_a_stop() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0--model\0opus\0");
+    let h = env.home();
+    fs::write(h.join("hc/next-proc/environ"), "HC_TERMINAL_ID=t7\0").unwrap();
+    fs::write(h.join("hc/core"), "one").unwrap();
+
+    let saved: Value = serde_json::from_str(&env.ok(&["herdr", "save", "--json"])).unwrap();
+    let e = &saved["terminals"][0];
+    assert_eq!(saved["terminals"].as_array().unwrap().len(), 1);
+    assert_eq!(e["terminal"], "t7");
+    assert_eq!(e["agent"], "claude");
+    assert_eq!(e["account"], "claude-0");
+    assert_eq!(e["session"], SESSION);
+    assert_eq!(e["options"], serde_json::json!(["--model", "opus"]));
+
+    // The stop: the agent ends, and herdr's terminals are another set.
+    let old = fs::read_to_string(h.join("hc/pid")).unwrap();
+    let _ = Command::new("kill").arg(old.trim()).status();
+    while Command::new("kill")
+        .args(["-0", old.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    fs::write(h.join("hc/core"), "two").unwrap();
+
+    // The layout's timer does not write an empty list over the one to keep.
+    let auto: Value =
+        serde_json::from_str(&env.ok(&["herdr", "save", "--auto", "--json"])).unwrap();
+    assert_eq!(auto["kept"], true);
+    assert_eq!(auto["terminals"][0]["session"], SESSION);
+
+    let launch = format!("cswap claude --cswap=root --model opus --resume {SESSION}");
+    let line = match e["cwd"].as_str() {
+        Some(cwd) => format!("cd {cwd} && {launch}"),
+        None => launch,
+    };
+    let plan: Value =
+        serde_json::from_str(&env.ok(&["herdr", "restore", "--dry-run", "--json"])).unwrap();
+    assert_eq!(plan["terminals"][0]["did"], "typed");
+    assert_eq!(plan["terminals"][0]["line"], line.as_str());
+    assert!(!h.join("hc/log").exists(), "a dry run touched the terminal");
+
+    let done: Value = serde_json::from_str(&env.ok(&["herdr", "restore", "--json"])).unwrap();
+    assert_eq!(done["ok"], true);
+    assert_eq!(done["terminals"][0]["did"], "typed");
+    assert_eq!(done["terminals"][0]["started"], true);
+    let log = fs::read_to_string(h.join("hc/log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        ["keys t7 ctrl+c", &format!("send t7 {line}")]
+    );
+    // What runs now is saved, and the list that was used is kept beside it.
+    assert!(env.cswap_home().join("herdr-saved.prev.json").exists());
+    // A second restore finds the agent running and leaves it alone.
+    let again: Value =
+        serde_json::from_str(&env.ok(&["herdr", "restore", "--previous", "--json"])).unwrap();
+    assert_eq!(again["terminals"][0]["did"], "skipped");
+
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
+/// A worker that herdr did not keep is gone after a stop.
+#[test]
+fn a_saved_agent_whose_terminal_is_gone_gets_a_new_one() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0");
+    let h = env.home();
+    let entry = |terminal: &str, name: &str, conversation: &str| {
+        serde_json::json!({
+            "terminal": terminal, "name": name, "agent": "claude",
+            "account": "claude-0", "account_name": "root",
+            "conversation": conversation, "session": SESSION,
+            "resume": ["--resume", SESSION], "options": [],
+            "cwd": h, "parent": "t1", "keep": false, "outlive": true, "notify": false,
+        })
+    };
+    let saved = serde_json::json!({
+        "saved_at": 0, "core": "one",
+        "terminals": [entry("t7", "build", "open"), entry("t8", "lost", "unknown")],
+    });
+    fs::create_dir_all(env.cswap_home()).unwrap();
+    fs::write(env.cswap_home().join("herdr-saved.json"), saved.to_string()).unwrap();
+    fs::write(h.join("hc/gone"), "").unwrap();
+
+    let err = env.fails(&["herdr", "restore", "t99"]);
+    assert!(err.contains("t99 is not in the save"), "{err}");
+
+    let done: Value =
+        serde_json::from_str(&env.ok(&["herdr", "restore", "build", "lost", "--json"])).unwrap();
+    assert_eq!(done["terminals"][0]["did"], "run");
+    assert_eq!(done["terminals"][0]["now"], "t9");
+    // Never guessed: a conversation that was not known is not resumed.
+    assert_eq!(done["terminals"][1]["did"], "skipped");
+    // Its parent is gone too, so it gets none, not the caller as one.
+    let log = fs::read_to_string(h.join("hc/log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        [&format!(
+            "run --bg --json --name build --cwd {} --no-parent --no-notify cswap claude --cswap=root --resume {SESSION}",
+            h.display()
+        )]
+    );
 
     let _ = Command::new("kill").arg(next.to_string()).status();
 }

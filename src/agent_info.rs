@@ -70,6 +70,17 @@ are working: a report sent to it meanwhile is lost. Do not pass --force
 unless the user says so. Never switch or restart your own terminal: it stops
 the agent in it, which is you.
 
+## After herdr was stopped
+
+  cswap herdr restore --dry-run    what would be started again
+  cswap herdr restore              start the saved agents again
+
+cswap keeps a list of which agent, account and conversation is in which herdr
+terminal (`cswap herdr save`; the layout does it on a timer). A restore types
+the launch into a terminal that is back as a shell, and starts a terminal
+that is gone with `hc run` under its old parent. It starts programs in other
+terminals, so run it only when the user asks; `--dry-run` is safe.
+
 ## Account names
 
 An account answers to its name (work), its aliases, its key (claude-2), its

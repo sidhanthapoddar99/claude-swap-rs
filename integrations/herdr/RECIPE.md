@@ -45,7 +45,8 @@ Left to right: the sidebar (268px), then the tab bar over the panes, as in `main
 - **`cswap-tabs`** (clone of `tabs`): only its + opens `cswap-new-menu`.
 - **`cswap-chrome`** (clone of `workspace-chrome`): the footer row, and `openOverlay({ kind: "dialog", modal: true, layout })` with a `{ terminal }` block for the dashboard.
 - **Shipped mods used as they are:** `workspace-chrome` (brand row), `spaces`, `pane`, `files`, `changes`, `workspace-status`. The clones take their icons from `mods/workspace-chrome/` and `mods/tabs/`.
-- **Programs run:** `cswap` (`herdr menu`, `herdr ls`, `herdr info`, `herdr switch`, `herdr restart`, and the dashboard itself), found on the PATH, then in `~/.local/bin` and `~/.cargo/bin`; `hc` (`run`, `send`, `ls`); and `sh` once to read `$SHELL`. Nothing reaches the network; cswap reads this machine's processes and its own stored usage.
+- **Programs run:** `cswap` (`herdr menu`, `herdr ls`, `herdr info`, `herdr switch`, `herdr restart`, `herdr save --auto`, and the dashboard itself), found on the PATH, then in `~/.local/bin` and `~/.cargo/bin`; `hc` (`run`, `send`, `ls`); and `sh` once to read `$SHELL`. Nothing reaches the network; cswap reads this machine's processes and its own stored usage.
+- **Saving:** the agents list runs `cswap herdr save --auto --json` when it starts and every 30 seconds. It writes which agent, account and conversation is in which terminal to `~/.cswap/herdr-saved.json`, for `cswap herdr restore` after herdr was stopped. It shows nothing and a failure is ignored.
 - **herdr functions:** `agents`, `terminals`, `panes`, `spaces`, `focused`, `shared`/`setShared`, `openOverlay`/`closeOverlay`, `run`, `hc`, `exec`, `notify`, `nextCommand`, `setAgentOrder`.
 
 ## Watch out
