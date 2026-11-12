@@ -50,6 +50,7 @@ pub const SPEC: Spec = Spec {
         "GROK_AUTH",
         "GROK_AUTH_PATH",
     ],
+    own_args: &[],
     login_args: &["login"],
     rgb: (176, 184, 201),
 };

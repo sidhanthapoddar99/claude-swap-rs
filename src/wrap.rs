@@ -211,6 +211,16 @@ pub fn run(h: Harness, args: Vec<String>) -> Result<()> {
 
     let settings = Settings::load()?;
     let reg = Registry::load()?;
+    // A command about the program itself, such as `codex update`: no account
+    // is involved, and the program looks for its installation in its own
+    // home. So it runs there, whatever account was named.
+    if let Some(native) = rest
+        .first()
+        .filter(|first| h.spec().own_args.contains(&first.as_str()))
+        .and_then(|_| reg.of(h).find(|a| a.is_native()))
+    {
+        return launch(native.clone(), &hs, &rest, Via::Default, None, &settings);
+    }
     // Nothing was named: the agent's default.
     let (sel, via) = match (sel, via) {
         (_, Via::Default) => match hs.start.as_str() {

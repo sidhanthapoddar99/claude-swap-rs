@@ -224,6 +224,8 @@ Which account a launch uses, first match wins:
 
 cswap sets the variable of step 2 for the agent it starts, so a program that agent runs itself stays on the same account. herdr starts every terminal in the login environment instead, so a sub-agent started with `hc run` begins on its agent's default, whatever account its parent runs on. That holds for every pair of agents: a Codex under a Claude and a Claude under a Claude are treated alike. Name an account with `--cswap=` to put it somewhere else.
 
+One kind of command skips all of this: a command about the installed program itself, `codex update` and `claude update`. It involves no account, and Codex finds its installation under its own home, so on an account's home it fails with "Could not detect the Codex installation method". cswap runs it on the agent's own home, whatever account is the default or is named.
+
 All of this needs the launch to reach cswap. `cswap claude …` always does. A bare `claude` that no shell wraps, as in `hc run claude "<task>"`, reaches it only with [PATH shims](#path-shims) on; without them it runs on the root login.
 
 `cswap agent-info` prints a short guide written for the agents themselves: how to see the account they are on, how to start another agent on it or on another one, and what to leave to you. Point an agent at it, or put the line in its instructions.
