@@ -4,15 +4,14 @@
 //!
 //! This is the one page that lists the short windows too.
 
-use std::ops::Range;
-
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use super::boxes::{plan, scroll};
 use super::{dot, head, limit_lines, name_cell, paint_row, plan_text, row_style, LimitCols};
 use crate::harness::Harness;
 use crate::store::Account;
@@ -100,78 +99,6 @@ fn block(
         .collect()
 }
 
-/// One agent's box in the column the page scrolls: the accounts it holds,
-/// the line it starts on and how many lines it takes, borders included.
-#[derive(Debug, PartialEq)]
-struct Group {
-    harness: Harness,
-    accounts: Range<usize>,
-    y: usize,
-    h: usize,
-}
-
-/// Where everything sits when the whole page is laid out top to bottom.
-struct Plan {
-    groups: Vec<Group>,
-    /// The first line of each account.
-    at: Vec<usize>,
-    total: usize,
-}
-
-/// Lay the accounts out in boxes, one per agent. `lens` is how many lines
-/// each account takes, and `gap` the blank lines between two accounts.
-fn plan(agents: &[Harness], lens: &[usize], gap: usize) -> Plan {
-    let mut groups: Vec<Group> = Vec::new();
-    let mut at = Vec::with_capacity(lens.len());
-    let mut y = 0;
-    for (i, (h, len)) in agents.iter().zip(lens).enumerate() {
-        if groups.last().is_some_and(|g| g.harness == *h) {
-            y += gap;
-        } else {
-            // The bottom border of the box before, then the top of this one.
-            if let Some(g) = groups.last_mut() {
-                y += 1;
-                g.h = y - g.y;
-            }
-            groups.push(Group {
-                harness: *h,
-                accounts: i..i,
-                y,
-                h: 0,
-            });
-            y += 1;
-        }
-        if let Some(g) = groups.last_mut() {
-            g.accounts.end = i + 1;
-        }
-        at.push(y);
-        y += len;
-    }
-    if let Some(g) = groups.last_mut() {
-        y += 1;
-        g.h = y - g.y;
-    }
-    Plan {
-        groups,
-        at,
-        total: y,
-    }
-}
-
-/// The first line to show so that the selected account is whole on screen,
-/// with the border of its box when it is the first or the last one in it.
-fn scroll(plan: &Plan, lens: &[usize], sel: usize, view_h: usize) -> usize {
-    if plan.total <= view_h {
-        return 0;
-    }
-    let Some(g) = plan.groups.iter().find(|g| g.accounts.contains(&sel)) else {
-        return 0;
-    };
-    let top = plan.at[sel] - usize::from(g.accounts.start == sel);
-    let bottom = plan.at[sel] + lens[sel] + usize::from(g.accounts.end == sel + 1);
-    bottom.saturating_sub(view_h).min(top)
-}
-
 pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let t = &app.theme;
     let now = Utc::now();
@@ -216,18 +143,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let screen_y = |line: usize| area.y + 1 + (line - top) as u16;
 
     for g in &plan.groups {
-        let (from, to) = (g.y.max(top), (g.y + g.h).min(end));
-        if from >= to {
+        let Some((from, to, sides)) = g.shown(top, end) else {
             continue;
-        }
-        // A box cut by the edge of the page is drawn without that side.
-        let mut sides = Borders::LEFT | Borders::RIGHT;
-        if from == g.y {
-            sides |= Borders::TOP;
-        }
-        if to == g.y + g.h {
-            sides |= Borders::BOTTOM;
-        }
+        };
         // The box with the selection wears its agent's colour.
         let color = t.harness(g.harness);
         let border = if focused && g.accounts.contains(&sel) {
@@ -295,38 +213,5 @@ mod tests {
             assert_eq!(Cols::new(53, clock_24h).date, 0);
             assert!(Cols::new(100, clock_24h).date >= 18);
         }
-    }
-
-    #[test]
-    fn accounts_are_boxed_by_agent_and_the_selected_one_stays_whole() {
-        use Harness::{Claude, Codex, Grok};
-        let agents = [Claude, Claude, Codex, Grok];
-        let lens = [3, 2, 2, 2];
-        let p = plan(&agents, &lens, 1);
-        // Claude: border, 3 lines, a gap, 2 lines, border.
-        assert_eq!(
-            p.groups[0],
-            Group {
-                harness: Claude,
-                accounts: 0..2,
-                y: 0,
-                h: 8
-            }
-        );
-        assert_eq!(p.groups[1].accounts, 2..3);
-        assert_eq!((p.groups[1].y, p.groups[1].h), (8, 4));
-        assert_eq!((p.groups[2].y, p.groups[2].h), (12, 4));
-        assert_eq!(p.at, [1, 5, 9, 13]);
-        assert_eq!(p.total, 16);
-
-        // Everything fits: nothing scrolls.
-        assert_eq!(scroll(&p, &lens, 3, 16), 0);
-        // Ten lines: the first accounts need no scrolling.
-        assert_eq!(scroll(&p, &lens, 0, 10), 0);
-        assert_eq!(scroll(&p, &lens, 1, 10), 0);
-        // The last one is shown to the bottom border of its box.
-        assert_eq!(scroll(&p, &lens, 3, 10), 6);
-        // Codex is alone in its box, so both of its borders are in view.
-        assert_eq!(scroll(&p, &lens, 2, 10), 2);
     }
 }

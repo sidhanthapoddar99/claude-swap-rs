@@ -322,7 +322,15 @@ fn the_account_selected_on_the_accounts_page_is_spelled_out() {
         .iter()
         .position(|l| l.contains("+ Add account"))
         .unwrap();
-    assert!(rows[add + 1].contains('╰'), "{text}");
+    // The add button is the last line of the list, level with the bottom
+    // of the card beside it, and every agent has a box of its own above it.
+    assert!(rows[add].contains('╰'), "{text}");
+    let boxed = |title: &str, name: &str| {
+        let top = rows.iter().position(|l| l.contains(title)).unwrap();
+        assert!(rows[top + 1].contains(name) && top < add, "{text}");
+    };
+    boxed("╭ Claude Code ─", "work");
+    boxed("╭ Codex ─", "team");
 }
 
 #[test]
