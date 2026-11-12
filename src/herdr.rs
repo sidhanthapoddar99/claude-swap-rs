@@ -84,7 +84,7 @@ fn carried(h: Harness) -> &'static [(&'static str, bool)] {
 
 /// The carried options among the arguments of the old launch, in their order.
 /// Only a whole argument counts, so a task that mentions `--model` does not.
-fn kept_options(h: Harness, old_args: &[String]) -> Vec<String> {
+pub(crate) fn kept_options(h: Harness, old_args: &[String]) -> Vec<String> {
     let known = carried(h);
     let mut out = Vec::new();
     let mut args = old_args.iter().skip(1);
@@ -129,23 +129,33 @@ pub(crate) fn hc(args: &[&str]) -> Result<String> {
 }
 
 /// What herdr says about one terminal.
-struct Terminal {
-    address: String,
-    live: bool,
+pub(crate) struct Terminal {
+    pub(crate) address: String,
+    pub(crate) live: bool,
     /// `working`, `idle`, `blocked`, `done`; none for a plain program.
     status: Option<String>,
     /// The program in front, which is the agent while one runs.
-    front: Option<u32>,
+    pub(crate) front: Option<u32>,
     /// Is the program in front a shell, waiting at its prompt?
-    front_shell: bool,
+    pub(crate) front_shell: bool,
     /// Is the terminal's own program a shell, with the agent started in it?
-    shell: bool,
+    pub(crate) shell: bool,
     /// Does herdr put a shell in place of the program when it is killed?
-    keep: bool,
+    pub(crate) keep: bool,
+    /// The name it was given, if any.
+    pub(crate) name: Option<String>,
+    /// The folder it was started in.
+    pub(crate) cwd: Option<String>,
+    /// The terminal it was started from.
+    pub(crate) parent: Option<String>,
+    /// Does it go on when its parent's program ends?
+    pub(crate) outlive: bool,
+    /// Are notes about it typed into its parent?
+    pub(crate) notify: bool,
 }
 
 impl Terminal {
-    fn get(t: &str) -> Result<Terminal> {
+    pub(crate) fn get(t: &str) -> Result<Terminal> {
         let v: Value = serde_json::from_str(&hc(&["get", t, "--json"])?)
             .context("hc get did not print JSON")?;
         let name = |path: &str| {
@@ -155,6 +165,7 @@ impl Terminal {
                 .to_string_lossy()
                 .to_string()
         };
+        let text = |v: &Value| v.as_str().filter(|s| !s.is_empty()).map(str::to_string);
         let program = name(v["argv"][0].as_str().unwrap_or_default());
         let front = name(v["foreground"]["name"].as_str().unwrap_or_default());
         Ok(Terminal {
@@ -167,6 +178,11 @@ impl Terminal {
             front_shell: SHELLS.contains(&front.as_str()),
             shell: SHELLS.contains(&program.as_str()),
             keep: v["keep"] == true,
+            name: text(&v["name"]),
+            cwd: text(&v["cwd"]),
+            parent: text(&v["parent"]),
+            outlive: v["die_with_parent"] == false,
+            notify: v["notify"] != false,
         })
     }
 
@@ -226,7 +242,7 @@ fn working_under(all: &[Listed], t: &str) -> Vec<String> {
 
 /// The account whose agent is `pid`, or a parent of `pid`: a tool the agent
 /// runs can be the program in front for a while.
-fn agent_of(c: &Ctx, pid: u32) -> Option<(&Account, u32)> {
+pub(crate) fn agent_of(c: &Ctx, pid: u32) -> Option<(&Account, u32)> {
     agent_in(&c.reg, &c.live, pid)
 }
 
@@ -321,7 +337,7 @@ fn rows(c: &Ctx, h: Harness, current: Option<&str>) -> Vec<Value> {
 
 /// How `--cswap=` names an account in a line a person will read: its name
 /// when that is one plain word, its key otherwise.
-fn selector(acc: &Account) -> String {
+pub(crate) fn selector(acc: &Account) -> String {
     let plain = |s: &str| {
         !s.is_empty()
             && s.chars()
@@ -336,7 +352,7 @@ fn selector(acc: &Account) -> String {
     }
 }
 
-fn quote(arg: &str) -> String {
+pub(crate) fn quote(arg: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "-_=./:@,+".contains(c);
     if !arg.is_empty() && arg.chars().all(safe) {
         arg.to_string()
@@ -492,7 +508,7 @@ fn children_note(t: &str, working: &[String]) -> String {
 /// a while after the line, the prompt is cleared and the line typed again.
 /// A new shell is not cleared at first: a Ctrl+C would stop it reading its
 /// own rc file. False when the agent is not seen running in the end.
-fn launch(c: &Ctx, t: &str, line: &str, key: &str, clear: bool) -> Result<bool> {
+pub(crate) fn launch(c: &Ctx, t: &str, line: &str, key: &str, clear: bool) -> Result<bool> {
     // How long a shell may stay in front after the line before the line
     // counts as not run. A shell that was there runs it at once; one that
     // herdr has just started may still be loading.
@@ -616,7 +632,7 @@ pub fn menu_cmd() -> Result<()> {
 /// its terminal in `HC_TERMINAL_ID`, so nothing is asked of herdr here. An
 /// agent that another agent started in the same terminal is left out: the
 /// terminal's agent is the outer one.
-fn in_terminals(c: &Ctx) -> Vec<(String, u32, &Account)> {
+pub(crate) fn in_terminals(c: &Ctx) -> Vec<(String, u32, &Account)> {
     let mut found: Vec<(String, u32, &Account)> = Vec::new();
     for acc in &c.reg.accounts {
         for pid in c.live.get(&acc.key()).into_iter().flatten() {

@@ -303,7 +303,7 @@ cswap herdr status             whether it is installed and current
 
 Or open the dashboard's **Integrations** page (`i`) and press Enter. An install writes only `layouts/cswap.*` and `mods/cswap-*`. Your own layout and mods stay as they are, and you switch back in herdr's settings or with `ctrl-shift-l`. A file of yours that is in the way is kept beside the new one as `<file>.mine`, never overwritten. To remove it, switch to another layout and delete those files.
 
-Two keys you can bind in herdr's `keys.json`: `cswap-chrome.dashboard` opens the dashboard popup, and `cswap-agents.accounts` flips the accounts view.
+Three keys you can bind in herdr's `keys.json`: `cswap-chrome.dashboard` opens the dashboard popup, `cswap-chrome.restore` opens the restore dialog, and `cswap-agents.accounts` flips the accounts view.
 
 ### Moving or restarting a running agent from the command line
 
@@ -326,6 +326,33 @@ A restart is a switch onto the account the agent is already on. The agent comes 
 Both refuse when the agent is in the middle of a turn and when cswap cannot tell which conversation the agent is in. `--fresh` allows the second case and starts a new conversation.
 
 Both also refuse while sub-agents of the agent are still working. A sub-agent reports by having herdr type into its parent's terminal, and while the parent is stopped that terminal is a bare shell: the report is lost there. Wait for them, or pass `--force` and check on them afterwards; the layout asks first. `cswap herdr info` lists them. Before the launch is typed cswap clears the prompt, and it types the launch again if the shell swallowed it. Finding the conversation reads `/proc`, so this is Linux only for Codex and Antigravity; the Antigravity part is not yet tested against a running agy.
+
+### After herdr was stopped: save and restore
+
+`hc server stop` and a reboot end every program in every terminal. A terminal you opened comes back as an empty shell, a worker started with `hc run` does not come back, and herdr does not know which conversation was where. cswap writes that down while the agents run and puts it back afterwards:
+
+```
+cswap herdr save               write down which agent, account and conversation is in which terminal
+cswap herdr restore --dry-run  say what a restore would do
+cswap herdr restore            start them again, each in its conversation
+cswap herdr restore t1x build  only these, by saved address or name
+```
+
+The layout saves by itself, every 10 minutes unless you change it, so you do not have to think of it before a stop. The time between saves is **herdr save every** on the dashboard's Settings page, under Shell; off leaves only the saves you ask for. An agent started after the last save is not in the list. The list is `~/.cswap/herdr-saved.json`.
+
+In the layout, the row above the footer's line says when the agents were last saved and how many, with **Save** to do it now and **Restore** to open the list. After a stop the row reads "herdr was stopped · 20 agents to restore". The dialog shows what a restore would do with each agent. **Restore** brings one back, **Restore all** every one that is not running, and **Copy command** gives the line that starts an agent by hand, for when a restore does not work: paste it into any terminal.
+
+A restore goes through the list, parents before their sub-agents:
+
+- **Its terminal is there, at a shell:** the launch is typed into it, on the account it had, with its model and other options, in the folder it ran in and in the same conversation.
+- **Its terminal is gone:** a new one is started with `hc run`, with the name it had and under the parent it had. It gets a new address, and its sub-agents are started under that.
+- **Left alone:** a terminal where an agent or another program already runs, an account that is gone or signed out, a folder that is gone, and an agent whose conversation cswap could not tell when it saved. `--fresh` starts that last one in a new conversation.
+
+Every agent comes back idle: nothing is sent to it. A new terminal is not put in a tab; herdr's own commands show it. Run a restore twice and the second one finds everything running and does nothing.
+
+Right after a stop the automatic save would write an empty list over the one you need. So it leaves the file alone until you restore, or save by hand. `cswap herdr restore --dry-run` prints the same lines as Copy command. A restore then saves what runs now, and the list it used stays as `herdr-saved.prev.json`; `cswap herdr restore --previous` uses that one.
+
+To restart herdr without losing anything in the first place, use `hc server restart`: it keeps the programs running.
 
 ## Commands
 
@@ -358,6 +385,7 @@ shims [on|off]             PATH shims: agents other programs start use cswap too
 uninstall                  undo the shims and the lines in your shell files
 herdr ls|info|switch       agents in herdr terminals: account and switch
 herdr restart <terminal>   start a terminal's agent again, same conversation
+herdr save|restore         write down what runs in herdr; bring it back after a stop
 herdr install|status       the cswap layout for herdr
 agent-info                 how a coding agent uses cswap: a guide for the agent
 update                     install the latest release         (--check)
