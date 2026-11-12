@@ -220,10 +220,11 @@ Which account a launch uses, first match wins:
 
 1. `--cswap=<account>` on the command line
 2. `CSWAP_CLAUDE`, `CSWAP_CODEX`, `CSWAP_AGY` or `CSWAP_GROK` in the environment (`export CSWAP_CLAUDE=work` pins one terminal)
-3. in a herdr terminal that an agent started: the account of the nearest agent of the same kind above it, so a sub-agent stays on its parent's account
-4. the agent's default: its `root` login, an account, or `auto`. Set it with `d` in the dashboard or `cswap use <agent> <account>`
+3. the agent's default: its `root` login, an account, or `auto`. Set it with `d` in the dashboard or `cswap use <agent> <account>`
 
-cswap sets the variable of step 2 for the agent it starts, so a child process stays on the same account. herdr starts every terminal in the login environment instead, which is why step 3 looks the parent up. Both need the launch to reach cswap. `cswap claude …` always does. A bare `claude` that no shell wraps, as in `hc run claude "<task>"`, reaches it only with [PATH shims](#path-shims) on; without them it runs on the root login.
+cswap sets the variable of step 2 for the agent it starts, so a program that agent runs itself stays on the same account. herdr starts every terminal in the login environment instead, so a sub-agent started with `hc run` begins on its agent's default, whatever account its parent runs on. That holds for every pair of agents: a Codex under a Claude and a Claude under a Claude are treated alike. Name an account with `--cswap=` to put it somewhere else.
+
+All of this needs the launch to reach cswap. `cswap claude …` always does. A bare `claude` that no shell wraps, as in `hc run claude "<task>"`, reaches it only with [PATH shims](#path-shims) on; without them it runs on the root login.
 
 `cswap agent-info` prints a short guide written for the agents themselves: how to see the account they are on, how to start another agent on it or on another one, and what to leave to you. Point an agent at it, or put the line in its instructions.
 
@@ -285,12 +286,12 @@ The suggestion follows one idea: use what you would otherwise lose. An account w
 | Where | What you get |
 | --- | --- |
 | **+ menu** | Every agent has an arrow that opens its accounts, with how much of each is used. Pick one and the agent starts on it. "Best available" lets cswap choose. |
-| **Right-click an agent** | **Switch account** shows the account it runs on and moves it to another one: the agent stops and starts again there, in the same conversation. **Add sub-agent…** opens the + menu and starts your pick under that agent, which is told about it. **Restart agent** stops it and starts it again on the same account and conversation, so an update takes hold. |
-| **Ctrl+click agents** | Select several (Cmd+click on a Mac), then right-click one of them: move them all to one account, restart them, or close them all, one after the other. Switching needs agents of one kind; an agent in the middle of a turn stays where it is. |
+| **Right-click an agent** | **Switch account** shows the account it runs on and moves it to another one: the agent stops and starts again there, in the same conversation. **Add sub-agent…** opens the + menu and starts your pick under that agent, which is told about it. **Restart agent** stops it and starts it again on the same account and conversation, so an update takes hold. Both ask first when sub-agents of that agent are still working, because a report they send meanwhile would be lost. |
+| **Ctrl+click agents** | Select several (Cmd+click on a Mac), then right-click one of them: move them all to one account, restart them, or close them all, one after the other. Switching needs agents of one kind; an agent in the middle of a turn, or with sub-agents at work, stays where it is. |
 | **Agents list** | The ⇄ icon beside the sort icon shows each agent's account in place of its time and status. Click it again to go back. |
 | **Sidebar** | **cswap**, between Settings and Add machine, opens this dashboard in a popup over the window, on its Usage page. |
 
-A sub-agent started through cswap, from the menu or by the agent itself with `hc run … cswap claude "<task>"`, starts on its parent's account unless you pick another. Agents mostly type the bare `hc run … claude "<task>"`, which herdr starts without cswap: turn [PATH shims](#path-shims) on and that lands on the parent's account too. The Health page warns while herdr is here and the shims are off.
+A sub-agent starts on the default of its agent unless you pick another account, from the menu or with `--cswap=`. Agents mostly type the bare `hc run … claude "<task>"`, which herdr starts without cswap, on the root login: turn [PATH shims](#path-shims) on and that goes to the default too. The Health page warns while herdr is here and the shims are off.
 
 The picture is a drawing with made-up names. The layout is not part of the binary: it lives in this repository under [`integrations/herdr/`](integrations/herdr), and cswap fetches the files that go with its version.
 
@@ -322,7 +323,9 @@ An agent that a shell started is stopped with Ctrl+C, and the shell is there aga
 
 A restart is a switch onto the account the agent is already on. The agent comes back as the program on disk now and reads its settings again, so that is how an update to the agent or to cswap takes hold without losing the conversation.
 
-Both refuse when the agent is in the middle of a turn and when cswap cannot tell which conversation the agent is in. `--fresh` allows the second case and starts a new conversation. Finding the conversation reads `/proc`, so this is Linux only for Codex and Antigravity; the Antigravity part is not yet tested against a running agy.
+Both refuse when the agent is in the middle of a turn and when cswap cannot tell which conversation the agent is in. `--fresh` allows the second case and starts a new conversation.
+
+Both also refuse while sub-agents of the agent are still working. A sub-agent reports by having herdr type into its parent's terminal, and while the parent is stopped that terminal is a bare shell: the report is lost there. Wait for them, or pass `--force` and check on them afterwards; the layout asks first. `cswap herdr info` lists them. Before the launch is typed cswap clears the prompt, and it types the launch again if the shell swallowed it. Finding the conversation reads `/proc`, so this is Linux only for Codex and Antigravity; the Antigravity part is not yet tested against a running agy.
 
 ## Commands
 

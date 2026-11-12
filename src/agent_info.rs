@@ -25,7 +25,7 @@ Start it as `cswap <agent>`, never by its bare name. A bare `claude` reaches
 cswap only where the user turned PATH shims on (`cswap shims` says). Anywhere
 else it skips cswap and runs on the root login, whatever account you are on.
 
-  cswap claude "<task>"                    the account you are on (see below)
+  cswap claude "<task>"                    the default the user set
   cswap claude --cswap=work "<task>"       the account named work
   cswap codex --cswap=auto "<task>"        the account with the most room now
   cswap claude --cswap=work,side "<task>"  the first of these that is free
@@ -37,12 +37,14 @@ In herdr, put cswap in front of the agent's own start command:
 
 With no --cswap flag the account is, first match wins:
   1. CSWAP_CLAUDE, CSWAP_CODEX, CSWAP_GROK or CSWAP_AGY in the environment.
-     cswap sets it for the agent it starts, so a child process stays on the
-     same account.
-  2. In herdr: the account of the nearest agent of the same kind above the
-     new terminal. herdr does not pass your environment down, so cswap looks
-     it up. A claude you start under yourself lands on your account.
-  3. The agent's default, which the user set.
+     cswap sets it for the agent it starts, so a program you run yourself,
+     in your own shell tool, stays on your account.
+  2. The agent's default, which the user set.
+
+A terminal herdr starts (`hc run`) gets the login environment, not yours.
+So a sub-agent started there is on its agent's default, whatever account you
+are on and whatever kind of agent it is. To put it on your own account, name
+it: --cswap="$CSWAP_ACCOUNT" works for an agent of your own kind.
 
 Everything else on the command line goes to the agent untouched.
 
@@ -63,8 +65,10 @@ These read what cswap has stored and ask no vendor. `cswap usage -r` and
 
 A switch stops the agent and starts it again on the other account in the same
 conversation, in the same terminal. A restart does that on the account it is
-on. Both refuse in the middle of a turn. Never switch or restart your own
-terminal: it stops the agent in it, which is you.
+on. Both refuse in the middle of a turn, and while sub-agents of that agent
+are working: a report sent to it meanwhile is lost. Do not pass --force
+unless the user says so. Never switch or restart your own terminal: it stops
+the agent in it, which is you.
 
 ## Account names
 

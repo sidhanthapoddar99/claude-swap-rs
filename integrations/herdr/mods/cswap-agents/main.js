@@ -34,9 +34,21 @@ async function cswap(args, timeout = 30000) {
 // cswap's own words for a failure, without its name in front.
 const complaint = (r) => (r.stderr || r.stdout || "cswap failed").replace(/^cswap:\s*/, "").trim();
 
+// The sub-agents under an agent that are in a turn. They report to it by
+// having herdr type into its terminal, and while it is stopped that text
+// lands in a bare shell and is lost. So such an agent is asked about first,
+// and in a selection it stays as it is.
+const working = (info) => info?.children_working ?? [];
+
+// Why a selected agent stays where it is, if it does.
+const stays = (i) => i.error ?? i.why_not
+  ?? (i.conversation === "unknown" ? "conversation not found" : null)
+  ?? (working(i).length ? "sub-agents working" : null);
+
 // The selected agents a restart can take now: on this machine, known to
-// cswap, between turns, and in a conversation cswap can find.
-const restartable = (infos) => (infos ?? []).filter(i => !i.error && !i.why_not && i.conversation !== "unknown");
+// cswap, between turns, in a conversation cswap can find, and with no
+// sub-agent at work.
+const restartable = (infos) => (infos ?? []).filter(i => !stays(i));
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -266,7 +278,7 @@ export default class Agents extends View {
     const infos = this.groupInfo;
     const first = infos?.find(i => !i.error);
     if (!first) return;
-    const staying = infos.filter(i => i.error || i.why_not || i.conversation === "unknown").length;
+    const staying = infos.filter(stays).length;
     closeOverlay(props().overlay);
     openOverlay({
       mod: "cswap-agents", kind: "popup", width: 340,
@@ -280,7 +292,7 @@ export default class Agents extends View {
     cx.stop_propagation();
     const addresses = restartable(this.groupInfo).map(i => i.terminal);
     closeOverlay(props().overlay);
-    if (addresses.length) setShared(SWITCH, { id: Date.now(), addresses, restart: true, fresh: false });
+    if (addresses.length) setShared(SWITCH, { id: Date.now(), addresses, restart: true, fresh: false, force: false });
   }
 
   requestCloseGroup(cx) {
@@ -432,7 +444,7 @@ export default class Agents extends View {
     });
   }
 
-  // Hand the switch to the list. A conversation cswap cannot find is asked about first.
+  // Hand the switch to the list.
   requestSwitch(acc, cx) {
     cx.stop_propagation();
     const info = props().accounts;
@@ -441,36 +453,38 @@ export default class Agents extends View {
     if (props().infos) {
       // Only the agents that can move and are not there already.
       const addresses = props().infos
-        .filter(i => !i.error && !i.why_not && i.conversation !== "unknown" && i.account !== acc.key)
+        .filter(i => !stays(i) && i.account !== acc.key)
         .map(i => i.terminal);
-      if (addresses.length) setShared(SWITCH, { id: Date.now(), addresses, key: acc.key, name: acc.name, fresh: false });
+      if (addresses.length) setShared(SWITCH, { id: Date.now(), addresses, key: acc.key, name: acc.name, fresh: false, force: false });
       return;
     }
-    if (info.conversation === "unknown") {
-      openOverlay({
-        mod: "cswap-agents", kind: "dialog", width: 460, height: 210,
-        props: { agentAddress: address, accounts: info, confirmSwitch: { key: acc.key, name: acc.name } },
-      });
-      return;
-    }
-    setShared(SWITCH, { id: Date.now(), addresses: [address], key: acc.key, name: acc.name, fresh: false });
+    this.askOrGo(info, { addresses: [address], key: acc.key, name: acc.name });
   }
 
-  // Hand the restart to the list. A conversation cswap cannot find is asked about first.
+  // Hand a switch or a restart of one agent to the list, after asking when
+  // it would cost something: a conversation cswap cannot find is not carried
+  // over, and sub-agents at work can lose a report.
+  askOrGo(info, job) {
+    const fresh = info.conversation === "unknown";
+    const force = working(info).length > 0;
+    if (!fresh && !force) {
+      setShared(SWITCH, { id: Date.now(), ...job, fresh: false, force: false });
+      return;
+    }
+    openOverlay({
+      mod: "cswap-agents", kind: "dialog", width: 460, height: fresh && force ? 290 : force ? 230 : 210,
+      props: { agentAddress: info.terminal, accounts: info, confirmSwitch: { ...job, fresh, force } },
+    });
+  }
+
+  // Hand the restart to the list.
   requestRestart(cx) {
     cx.stop_propagation();
     const info = this.account;
     if (!info || info.why_not) return;
     const address = this.menuAddress();
     closeOverlay(props().overlay);
-    if (info.conversation === "unknown") {
-      openOverlay({
-        mod: "cswap-agents", kind: "dialog", width: 460, height: 210,
-        props: { agentAddress: address, accounts: info, confirmSwitch: { restart: true, name: info.name } },
-      });
-      return;
-    }
-    setShared(SWITCH, { id: Date.now(), addresses: [address], restart: true, name: info.name, fresh: false });
+    this.askOrGo(info, { addresses: [address], restart: true, name: info.name });
   }
 
   accountMenu(t) {
@@ -478,7 +492,6 @@ export default class Agents extends View {
     const rows = info.accounts;
     // For a selection: who is on each account, and who cannot move at all.
     const infos = props().infos;
-    const stays = (i) => i.error ?? i.why_not ?? (i.conversation === "unknown" ? "conversation not found" : null);
     const here = (acc) => (infos ?? []).filter(i => !i.error && i.account === acc.key).length;
     const all = (acc) => infos ? here(acc) === infos.length : acc.current;
     const can = (acc) => infos
@@ -527,9 +540,19 @@ export default class Agents extends View {
     const to = props().confirmSwitch;
     const cancel = () => closeOverlay(props().overlay);
     const go = () => {
-      setShared(SWITCH, { id: Date.now(), addresses: [this.menuAddress()], key: to.key, restart: Boolean(to.restart), name: to.name, fresh: true });
+      setShared(SWITCH, { ...to, id: Date.now() });
       closeOverlay(props().overlay);
     };
+    const kids = working(info);
+    const title = to.force
+      ? (to.restart ? `Restart ${info.terminal} while its sub-agents work?` : `Move ${info.terminal} while its sub-agents work?`)
+      : (to.restart ? `Restart ${info.terminal} with a new conversation?` : `Start a new conversation on ${to.name}?`);
+    const reasons = [];
+    if (to.force) reasons.push(`${kids.length === 1 ? "A sub-agent is" : `${kids.length} sub-agents are`} still working under it: ${kids.join(", ")}. They report to ${info.terminal} when they are done, and a report that arrives while it is stopped is typed into its shell and lost. Wait for them, or go ahead and check on them afterwards.`);
+    if (to.fresh) reasons.push(`cswap cannot find the conversation ${info.terminal} is in, so it cannot carry it over. ${info.agent_name} would ${to.restart ? "start again" : "start"} on ${to.name} with a new one; the old one stays in its history.`);
+    const yes = to.force
+      ? (to.restart ? "Restart anyway" : "Switch anyway")
+      : (to.restart ? "Restart, new conversation" : "Switch, new conversation");
     const button = (id, label, index, action) => h_flex()
       .id(id).h(32).px(14).items_center().rounded(5)
       .border_1().border_color(this.confirmIndex === index ? t.foreground : t.input)
@@ -552,12 +575,12 @@ export default class Agents extends View {
         cx.stop_propagation();
         cx.notify();
       })
-      .child(div().font_semibold().text_size(15).text_color(t.foreground).child(to.restart ? `Restart ${info.terminal} with a new conversation?` : `Start a new conversation on ${to.name}?`))
-      .child(div().text_color(t.muted).child(`cswap cannot find the conversation ${info.terminal} is in, so it cannot carry it over. ${info.agent_name} would ${to.restart ? "start again" : "start"} on ${to.name} with a new one; the old one stays in its history.`))
+      .child(div().font_semibold().text_size(15).text_color(t.foreground).child(title))
+      .children(reasons.map(text => div().text_color(t.muted).child(text)))
       .child(div().flex_1())
       .child(h_flex().justify_end().gap(8)
         .child(button("cancel-switch-account", "Cancel", 0, cancel))
-        .child(button("confirm-switch-account", to.restart ? "Restart, new conversation" : "Switch, new conversation", 1, go)));
+        .child(button("confirm-switch-account", yes, 1, go)));
   }
 
   // Move or restart one agent and say how it went.
@@ -565,7 +588,7 @@ export default class Agents extends View {
     const failed = job.restart ? `${address} was not restarted` : `${address} was not moved`;
     try {
       const what = job.restart ? ["restart", address] : ["switch", address, job.key];
-      const args = ["herdr", ...what, "--json", ...(job.fresh ? ["--fresh"] : [])];
+      const args = ["herdr", ...what, "--json", ...(job.fresh ? ["--fresh"] : []), ...(job.force ? ["--force"] : [])];
       // A send waits for a draft someone left in the terminal, so give it time.
       const r = await cswap(args, 120000);
       if (r.code !== 0) return { ok: false, title: failed, body: complaint(r), level: "error" };
@@ -745,7 +768,8 @@ export default class Agents extends View {
     const account = this.account ? this.account.name : this.accountError ?? "\u2026";
     // Stop it and start it again where it is: how an update takes hold.
     const canRestart = Boolean(this.account) && !this.account.why_not;
-    const restartNote = !this.account ? (this.accountError ?? "\u2026") : this.account.why_not ? "in a turn" : "";
+    const below = working(this.account).length;
+    const restartNote = !this.account ? (this.accountError ?? "\u2026") : this.account.why_not ? "in a turn" : below ? `${below} working below` : "";
     return v_flex()
       .id("agent-context-menu")
       .track_focus(this.menuHandle)

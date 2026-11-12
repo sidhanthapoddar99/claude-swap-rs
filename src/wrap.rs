@@ -10,8 +10,9 @@
 //!
 //! Without a flag the account is, in order: `$CSWAP_<HARNESS>` (set for
 //! everything started inside a wrapped session, or by hand for one terminal),
-//! then, in a herdr terminal started by an agent of the same kind, that
-//! agent's account, then the harness's default from the settings.
+//! then the harness's default from the settings. A sub-agent that herdr
+//! starts gets the login environment, so it starts on the default too,
+//! whatever account the agent that asked for it runs on.
 //!
 //! cswap then `exec`s the real binary, so signals, exit codes and the terminal
 //! are the agent's own. Nothing here touches the network.
@@ -87,8 +88,6 @@ pub fn split_args(args: Vec<String>) -> (Option<Selector>, Vec<String>) {
 enum Via {
     Flag,
     Env,
-    /// The account of the agent that started this one, in herdr.
-    Parent,
     Default,
     Auto,
     Picker,
@@ -176,7 +175,6 @@ fn announce(acc: &Account, via: Via, note: Option<&str>, settings: &Settings) {
     let how = match via {
         Via::Flag => "",
         Via::Env => " (this terminal)",
-        Via::Parent => " (its parent's account)",
         Via::Default => " (default)",
         Via::Auto => " (auto)",
         Via::Picker => "",
@@ -213,15 +211,11 @@ pub fn run(h: Harness, args: Vec<String>) -> Result<()> {
 
     let settings = Settings::load()?;
     let reg = Registry::load()?;
-    // Nothing was named: a sub-agent in herdr stays on its parent's account,
-    // and everything else starts on the agent's default.
+    // Nothing was named: the agent's default.
     let (sel, via) = match (sel, via) {
-        (_, Via::Default) => match crate::herdr::parent_account(&reg, h) {
-            Some(key) => (Selector::Named(vec![key]), Via::Parent),
-            None => match hs.start.as_str() {
-                "auto" => (Selector::Auto, Via::Auto),
-                other => (Selector::Named(vec![other.to_string()]), Via::Default),
-            },
+        (_, Via::Default) => match hs.start.as_str() {
+            "auto" => (Selector::Auto, Via::Auto),
+            other => (Selector::Named(vec![other.to_string()]), Via::Default),
         },
         named => named,
     };
@@ -230,7 +224,7 @@ pub fn run(h: Harness, args: Vec<String>) -> Result<()> {
         // A stored default that no longer resolves (the account was removed by
         // hand) must not lock the user out of the agent: fall back to its
         // default login.
-        Err(e) if matches!(via, Via::Default | Via::Env | Via::Parent) => {
+        Err(e) if matches!(via, Via::Default | Via::Env) => {
             let native = reg
                 .of(h)
                 .find(|a| a.is_native())

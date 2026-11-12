@@ -77,6 +77,9 @@ enum HerdrCmd {
         /// Start a new conversation when the running one cannot be told
         #[arg(long)]
         fresh: bool,
+        /// Go ahead while its sub-agents are still working
+        #[arg(long)]
+        force: bool,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -88,6 +91,9 @@ enum HerdrCmd {
         /// Start a new conversation when the running one cannot be told
         #[arg(long)]
         fresh: bool,
+        /// Go ahead while its sub-agents are still working
+        #[arg(long)]
+        force: bool,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -152,7 +158,7 @@ enum Cmd {
 
     /// Agents in herdr terminals: which account, switch it, restart it
     #[command(
-        after_help = "Examples:\n  cswap herdr ls                  which account each terminal's agent runs on\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr restart t7          stop it, start it again where it is, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n  cswap herdr install --show      put the cswap layout into herdr and show it\n  cswap herdr status              whether the layout is installed\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. A restart does the same on the account it\nis on, so an update takes hold. Both refuse in the middle of a turn."
+        after_help = "Examples:\n  cswap herdr ls                  which account each terminal's agent runs on\n  cswap herdr info t7              the account the agent in t7 runs on\n  cswap herdr switch t7 work      stop it, start it on `work`, same conversation\n  cswap herdr restart t7          stop it, start it again where it is, same conversation\n  cswap herdr menu                agents and accounts for a launch menu, as JSON\n  cswap herdr install --show      put the cswap layout into herdr and show it\n  cswap herdr status              whether the layout is installed\n\nA switch presses Ctrl+C until the agent leaves, then types the launch on the\nnew account at the shell behind it. A restart does the same on the account it\nis on, so an update takes hold. Both refuse in the middle of a turn, and while\nsub-agents of the agent are still working: a report they send meanwhile would\nbe lost. `--force` goes ahead anyway."
     )]
     Herdr {
         #[command(subcommand)]
@@ -591,13 +597,15 @@ fn run() -> Result<ExitCode> {
                 terminal,
                 account,
                 fresh,
+                force,
                 json,
-            } => herdr::switch_cmd(&terminal, &account, fresh, json)?,
+            } => herdr::switch_cmd(&terminal, &account, herdr::Allow { fresh, force }, json)?,
             HerdrCmd::Restart {
                 terminal,
                 fresh,
+                force,
                 json,
-            } => herdr::restart_cmd(&terminal, fresh, json)?,
+            } => herdr::restart_cmd(&terminal, herdr::Allow { fresh, force }, json)?,
             HerdrCmd::Install { show, json } => integration::install_cmd(show, json)?,
             HerdrCmd::Status { json } => ok = integration::status_cmd(json)?,
         },

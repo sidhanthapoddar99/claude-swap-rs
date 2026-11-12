@@ -132,7 +132,7 @@ pub fn run(reg: &Registry, live: &Live) -> Vec<Check> {
                 Level::Warn,
                 "shims",
                 "agents that herdr starts by a bare name skip cswap",
-                "herdr runs `claude`, `codex` and the rest straight from PATH, so a sub-agent an agent starts with `hc run claude …` lands on the root login, not on its parent's account. Turn PATH shims on: Settings > Shell > PATH shims, or `cswap shims on`. Without them, start sub-agents as `cswap claude …`.",
+                "herdr runs `claude`, `codex` and the rest straight from PATH, so a sub-agent an agent starts with `hc run claude …` lands on the root login, not on the default you set in cswap. Turn PATH shims on: Settings > Shell > PATH shims, or `cswap shims on`. Without them, start sub-agents as `cswap claude …`.",
             ));
         }
         for h in &chosen {

@@ -685,7 +685,10 @@ fn help_names_every_command_in_groups() {
 /// A stand-in for herdr's `hc`. The terminal `t7` has the process named in
 /// `hc/pid` in front; Ctrl+C ends it, and a send puts the next agent there.
 /// With `hc/direct` the agent is the terminal's own program until it dies,
-/// and a shell after that, as herdr does for a kept terminal.
+/// and a shell after that, as herdr does for a kept terminal. `hc/ls` is what
+/// `hc ls` lists: the terminals under `t7`. With `hc/swallow` the shell has
+/// text at its prompt that swallows the next line sent, until a Ctrl+C
+/// clears it.
 const FAKE_HC: &str = r#"#!/bin/sh
 dir="$HOME/hc"
 old=$(cat "$dir/pid")
@@ -696,17 +699,32 @@ case "$1" in
     else front=1; fi
     if [ -f "$dir/direct" ] && [ "$front" = "$old" ]; then argv=claude; else argv=/bin/zsh; fi
     if [ -f "$dir/keep" ]; then keep=true; else keep=false; fi
+    if [ "$front" = 1 ]; then name=zsh; else name=claude; fi
     printf '{"address":"t7","state":"live","keep":%s,"argv":["%s"],' "$keep" "$argv"
-    printf '"status":{"state":"%s"},"foreground":{"pid":%s}}\n' "$(cat "$dir/status")" "$front"
+    printf '"status":{"state":"%s"},' "$(cat "$dir/status")"
+    printf '"foreground":{"pid":%s,"name":"%s"}}\n' "$front" "$name"
     ;;
-  keys) echo "$*" >> "$dir/log"; kill "$old" ;;
+  ls)
+    if [ -f "$dir/ls" ]; then cat "$dir/ls"; else echo '{"terminals":[]}'; fi
+    ;;
+  keys)
+    echo "$*" >> "$dir/log"
+    if kill "$old" 2>/dev/null; then :
+    elif [ -f "$dir/swallow" ]; then
+      n=$(($(cat "$dir/swallow") - 1))
+      if [ "$n" -le 0 ]; then rm "$dir/swallow"; else echo "$n" > "$dir/swallow"; fi
+    fi
+    ;;
   keep) echo "$*" >> "$dir/log"; : > "$dir/keep" ;;
   send)
     echo "$*" >> "$dir/log"
-    mv "$dir/next-proc" "$HOME/proc/$(cat "$dir/next")"
-    : > "$dir/sent"
+    if [ ! -f "$dir/swallow" ]; then
+      mv "$dir/next-proc" "$HOME/proc/$(cat "$dir/next")"
+      : > "$dir/sent"
+    fi
     ;;
 esac
+exit 0
 "#;
 
 /// A process that lives until it is killed and belongs to nobody, so that it
@@ -836,6 +854,8 @@ fn a_herdr_terminal_moves_to_another_account_and_keeps_its_conversation() {
         log.lines().collect::<Vec<_>>(),
         [
             "keys t7 ctrl+c",
+            // The prompt is cleared before the launch is typed.
+            "keys t7 ctrl+c",
             &format!("send t7 cswap claude --cswap=work --resume {SESSION}"),
         ]
     );
@@ -874,6 +894,7 @@ fn a_herdr_terminal_restarts_its_agent_on_the_same_account() {
         log.lines().collect::<Vec<_>>(),
         [
             "keys t7 ctrl+c",
+            "keys t7 ctrl+c",
             &format!("send t7 cswap claude --cswap=root --model opus --resume {SESSION}"),
         ]
     );
@@ -881,6 +902,78 @@ fn a_herdr_terminal_restarts_its_agent_on_the_same_account() {
     assert_eq!(info["account"], "claude-0");
     assert_eq!(info["pid"], next);
 
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
+/// A sub-agent reports to its parent by having herdr type into the parent's
+/// terminal. While the parent is stopped that text lands in a bare shell.
+#[test]
+fn an_agent_whose_sub_agents_are_working_is_left_alone_unless_forced() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0");
+    let h = env.home();
+    fs::write(h.join("hc/next-proc/environ"), "HC_TERMINAL_ID=t7\0").unwrap();
+    // Under t7: one done, one working, and one working under the done one.
+    fs::write(
+        h.join("hc/ls"),
+        r#"{"terminals":[
+            {"address":"t7","state":"live","status":"idle"},
+            {"address":"t8","parent":"t7","state":"live","status":"done"},
+            {"address":"t9","parent":"t7","state":"live","status":"working"},
+            {"address":"t10","parent":"t8","state":"live","status":"blocked"},
+            {"address":"t11","state":"live","status":"working"}]}"#,
+    )
+    .unwrap();
+
+    let info: Value = serde_json::from_str(&env.ok(&["herdr", "info", "t7", "--json"])).unwrap();
+    assert_eq!(info["children_working"], serde_json::json!(["t10", "t9"]));
+    assert_eq!(info["why_not"], Value::Null);
+    for args in [
+        vec!["herdr", "restart", "t7"],
+        vec!["herdr", "switch", "t7", "work"],
+    ] {
+        let err = env.fails(&args);
+        assert!(err.contains("2 sub-agents still working: t10, t9"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+    }
+    assert!(!h.join("hc/log").exists(), "a refusal touched the terminal");
+
+    let done: Value =
+        serde_json::from_str(&env.ok(&["herdr", "restart", "t7", "--force", "--json"])).unwrap();
+    assert_eq!(done["started"], true);
+    assert_eq!(done["resumed"], true);
+    let _ = Command::new("kill").arg(next.to_string()).status();
+}
+
+/// Text that reached the shell before the launch, such as a report with an
+/// apostrophe in it, leaves the shell waiting for the end of a quote, and a
+/// line typed there never runs.
+#[test]
+fn a_launch_that_the_shell_swallowed_is_typed_again() {
+    let env = Env::new();
+    let next = herdr_terminal(&env, "claude\0");
+    let h = env.home();
+    fs::write(h.join("hc/next-proc/environ"), "HC_TERMINAL_ID=t7\0").unwrap();
+    // The text arrives after the prompt was cleared: it takes the Ctrl+C
+    // that stops the agent, the one that clears, and one more.
+    fs::write(h.join("hc/swallow"), "2").unwrap();
+
+    let done: Value = serde_json::from_str(&env.ok(&["herdr", "restart", "t7", "--json"])).unwrap();
+    assert_eq!(done["started"], true, "{done}");
+    let line = format!("send t7 cswap claude --cswap=root --resume {SESSION}");
+    let log = fs::read_to_string(h.join("hc/log")).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        [
+            "keys t7 ctrl+c",
+            "keys t7 ctrl+c",
+            // Swallowed: the shell is still in front, so cswap clears the
+            // prompt and types the line again.
+            &line,
+            "keys t7 ctrl+c",
+            &line,
+        ]
+    );
     let _ = Command::new("kill").arg(next.to_string()).status();
 }
 
@@ -1099,7 +1192,7 @@ fn the_guide_for_agents_names_only_real_commands() {
         "$CSWAP_ACCOUNT",
         "cswap claude --cswap=work",
         "hc run --bg --name w1 cswap claude",
-        "Never switch or restart your own\nterminal",
+        "Never switch or restart your own terminal",
         "Leave these to the user",
     ] {
         assert!(guide.contains(word), "the guide lacks {word:?}\n{guide}");
@@ -1121,93 +1214,52 @@ fn the_guide_for_agents_names_only_real_commands() {
     assert!(env.ok(&["usage", "-h"]).contains("--refresh"));
 }
 
-/// herdr starts a terminal in the login environment, so a sub-agent does not
-/// get its parent's account the way a child process does. cswap looks it up:
-/// the nearest agent of the same kind above the new terminal.
+/// herdr starts a new terminal in the login environment, so a sub-agent does
+/// not get its parent's account. It starts on the default of its own agent,
+/// which is one rule for every pair of agents: a Codex under a Claude has no
+/// account in common with it anyway.
 #[test]
-fn a_sub_agent_in_herdr_starts_on_its_parents_account() {
+fn a_sub_agent_in_herdr_starts_on_its_agents_default() {
     let env = Env::new();
     env.add_claude("work", "work@example.com");
+    env.add_claude("side", "side@example.com");
+    env.ok(&["use", "claude", "side"]);
     let h = env.home();
-    // t9 is the new terminal. Above it t8 runs Codex, and above that t7 runs
-    // Claude Code on `work`.
+    // herdr is never asked about the terminal above: this one would fail.
     let hc = h.join("bin/hc");
-    fs::write(
-        &hc,
-        r#"#!/bin/sh
-dir="$HOME/hc"
-[ "$1" = get ] || exit 0
-case "$2" in
-  t9) printf '{"address":"t9","state":"live","parent":"t8","argv":["claude"],"foreground":{"pid":1}}\n' ;;
-  t8) printf '{"address":"t8","state":"live","parent":"t7","argv":["codex"],"foreground":{"pid":%s}}\n' "$(cat "$dir/codex")" ;;
-  t7) printf '{"address":"t7","state":"live","argv":["/bin/zsh"],"foreground":{"pid":%s}}\n' "$(cat "$dir/claude")" ;;
-  *) exit 1 ;;
-esac
-"#,
-    )
-    .unwrap();
+    fs::write(&hc, "#!/bin/sh\necho asked >> \"$HOME/hc-asked\"\nexit 1\n").unwrap();
     fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
-    let (claude, codex) = (orphan(), orphan());
-    let work_dir = env.account_dir("claude-1").join("config_dir");
-    let proc_of = |pid: u32, comm: &str, environ: String| {
-        let dir = h.join("proc").join(pid.to_string());
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("comm"), format!("{comm}\n")).unwrap();
-        fs::write(dir.join("environ"), environ).unwrap();
-        fs::write(dir.join("cmdline"), format!("{comm}\0")).unwrap();
-    };
-    proc_of(
-        claude,
-        "claude",
-        format!("CLAUDE_CONFIG_DIR={}\0", work_dir.display()),
-    );
-    proc_of(codex, "codex", String::new());
-    fs::create_dir_all(h.join("hc")).unwrap();
-    fs::write(h.join("hc/claude"), claude.to_string()).unwrap();
-    fs::write(h.join("hc/codex"), codex.to_string()).unwrap();
-
-    let start = |terminal: Option<&str>, args: &[&str]| {
-        let mut c = env.cmd(args);
-        if let Some(t) = terminal {
-            c.env("HC_TERMINAL_ID", t);
-        }
-        let out = c.output().unwrap();
-        assert!(out.status.success(), "{}", text(&out.stderr));
-        env.log()
-    };
-    let on_work = format!("CLAUDE_CONFIG_DIR={}", work_dir.display());
-    // Forget the sign-in that made the account.
     env.log();
 
-    // Under the Claude agent, past the Codex one in between: `work`.
-    let log = start(Some("t9"), &["claude", "the task"]);
+    // In a terminal an agent on `work` started: the default, `side`.
+    let out = env
+        .cmd(&["claude", "the task"])
+        .env("HC_TERMINAL_ID", "t9")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let log = env.log();
     assert!(log.contains("arg: the task"), "{log}");
-    assert!(log.contains(&on_work), "{log}");
-    assert!(log.contains("CSWAP_ACCOUNT=claude-1"), "{log}");
+    assert!(log.contains("CSWAP_ACCOUNT=claude-2"), "{log}");
+    assert!(!h.join("hc-asked").exists());
+
+    // Another kind of agent there starts on its own default.
+    let out = env
+        .cmd(&["codex"])
+        .env("HC_TERMINAL_ID", "t9")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(env.log().contains("CSWAP_ACCOUNT=codex-0"));
 
     // An account named on the command line still wins.
-    let log = start(Some("t9"), &["claude", "--cswap=root"]);
-    assert!(!log.contains(&on_work), "{log}");
-
-    // A terminal with nothing above it, and one outside herdr, start on the
-    // agent's default as before.
-    for terminal in [Some("t7"), None] {
-        let log = start(terminal, &["claude"]);
-        assert!(!log.contains(&on_work), "{terminal:?}\n{log}");
-    }
-
-    // Codex has no Codex agent above it, so it starts on its own default.
-    let log = start(Some("t9"), &["codex"]);
-    assert!(log.contains("run: codex"), "{log}");
-    assert!(log.contains("CODEX_HOME=\n"), "{log}");
-
-    // herdr not answering never stops a launch.
-    fs::write(&hc, "#!/bin/sh\nexit 1\n").unwrap();
-    let log = start(Some("t9"), &["claude"]);
-    assert!(
-        log.contains("run: claude") && !log.contains(&on_work),
-        "{log}"
-    );
+    let out = env
+        .cmd(&["claude", "--cswap=work"])
+        .env("HC_TERMINAL_ID", "t9")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(env.log().contains("CSWAP_ACCOUNT=claude-1"));
 }
 
 // --------------------------------------------------------------- PATH shims
