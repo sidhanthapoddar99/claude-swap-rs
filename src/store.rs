@@ -43,6 +43,9 @@ pub struct Settings {
     /// The agents each shell wraps, by shell name. A shell that is not here
     /// has no list of its own yet: see `shell::chosen`.
     pub shells: BTreeMap<String, Vec<String>>,
+    /// Minutes between the saves of what runs in herdr that the layout asks
+    /// for. 0: no save unless you ask.
+    pub herdr_save_minutes: u64,
     /// The agents that have a PATH shim, by id. Empty: the feature is off.
     pub shims: Vec<String>,
     /// Login files cswap made itself to hold the shims' `PATH` line, so
@@ -64,6 +67,7 @@ impl Default for Settings {
             auto_skip_above_pct: 97.0,
             update_check: true,
             shells: BTreeMap::new(),
+            herdr_save_minutes: 10,
             shims: Vec::new(),
             shim_files_made: Vec::new(),
         }

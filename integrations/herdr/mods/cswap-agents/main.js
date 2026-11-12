@@ -142,10 +142,8 @@ export default class Agents extends View {
     this.accountOf = new Map();
     cx.timer.every(30000, (cx) => {
       if (this.showAccounts) this.loadAccounts(cx);
-      this.saveAgents(cx);
       cx.notify();
     });
-    this.saveAgents(cx);
     // A key can flip the view too: "<keys>": "cswap-agents.accounts" in keys.json.
     cx.spawn(async cx => {
       for (;;) {
@@ -356,15 +354,6 @@ export default class Agents extends View {
     this.showAccounts = !this.showAccounts;
     if (this.showAccounts) this.loadAccounts(cx);
     cx.notify();
-  }
-
-  // Write down which agent runs where, so `cswap herdr restore` can bring
-  // them back after herdr was stopped. `--auto` leaves the file alone when
-  // it is from before a stop. A cswap too old to know `save` just fails.
-  saveAgents(cx) {
-    cx.spawn(async () => {
-      try { await cswap(["herdr", "save", "--auto", "--json"], 15000); } catch {}
-    });
   }
 
   // Which account every agent runs on, from `cswap herdr ls`. It reads this

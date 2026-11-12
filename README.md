@@ -303,7 +303,7 @@ cswap herdr status             whether it is installed and current
 
 Or open the dashboard's **Integrations** page (`i`) and press Enter. An install writes only `layouts/cswap.*` and `mods/cswap-*`. Your own layout and mods stay as they are, and you switch back in herdr's settings or with `ctrl-shift-l`. A file of yours that is in the way is kept beside the new one as `<file>.mine`, never overwritten. To remove it, switch to another layout and delete those files.
 
-Two keys you can bind in herdr's `keys.json`: `cswap-chrome.dashboard` opens the dashboard popup, and `cswap-agents.accounts` flips the accounts view.
+Three keys you can bind in herdr's `keys.json`: `cswap-chrome.dashboard` opens the dashboard popup, `cswap-chrome.restore` opens the restore dialog, and `cswap-agents.accounts` flips the accounts view.
 
 ### Moving or restarting a running agent from the command line
 
@@ -338,7 +338,9 @@ cswap herdr restore            start them again, each in its conversation
 cswap herdr restore t1x build  only these, by saved address or name
 ```
 
-The layout saves by itself every 30 seconds, so you do not have to think of it before a stop. The list is `~/.cswap/herdr-saved.json`.
+The layout saves by itself, every 10 minutes unless you change it, so you do not have to think of it before a stop. The time between saves is **herdr save every** on the dashboard's Settings page, under Shell; off leaves only the saves you ask for. An agent started after the last save is not in the list. The list is `~/.cswap/herdr-saved.json`.
+
+In the layout, the row above the footer's line says when the agents were last saved and how many, with **Save** to do it now and **Restore** to open the list. After a stop the row reads "herdr was stopped · 20 agents to restore". The dialog shows what a restore would do with each agent. **Restore** brings one back, **Restore all** every one that is not running, and **Copy command** gives the line that starts an agent by hand, for when a restore does not work: paste it into any terminal.
 
 A restore goes through the list, parents before their sub-agents:
 
@@ -348,7 +350,7 @@ A restore goes through the list, parents before their sub-agents:
 
 Every agent comes back idle: nothing is sent to it. A new terminal is not put in a tab; herdr's own commands show it. Run a restore twice and the second one finds everything running and does nothing.
 
-Right after a stop the automatic save would write an empty list over the one you need. So it leaves the file alone until you restore, or save by hand. A restore then saves what runs now, and the list it used stays as `herdr-saved.prev.json`; `cswap herdr restore --previous` uses that one.
+Right after a stop the automatic save would write an empty list over the one you need. So it leaves the file alone until you restore, or save by hand. `cswap herdr restore --dry-run` prints the same lines as Copy command. A restore then saves what runs now, and the list it used stays as `herdr-saved.prev.json`; `cswap herdr restore --previous` uses that one.
 
 To restart herdr without losing anything in the first place, use `hc server restart`: it keeps the programs running.
 

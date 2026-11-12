@@ -9,10 +9,12 @@
 //! is there again is started in it, in its conversation, and a terminal that
 //! is gone is started again with `hc run`, under the parent it had.
 //!
-//! The layout saves on a timer, with `--auto`. Right after a stop that would
-//! write an empty list over the one save worth having, so an automatic save
-//! leaves the file alone when herdr's terminals are not the ones the file was
-//! written for. A restore, or a save by hand, starts the saving again.
+//! The layout asks for a save every minute, with `--auto`, and cswap writes
+//! one when the last is older than the setting says (ten minutes unless
+//! changed; 0 turns it off). Right after a stop that would write an empty
+//! list over the one save worth having, so an automatic save leaves the file
+//! alone when herdr's terminals are not the ones the file was written for.
+//! A restore, or a save by hand, starts the saving again.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -82,11 +84,46 @@ fn core() -> Result<String> {
         .to_string())
 }
 
-/// Does an automatic save leave the old file alone? It does when the file
-/// lists agents of terminals that a stop has ended since: they are what a
-/// restore needs, and what runs now is less.
-fn kept_from(old: Option<&Snapshot>, core: &str, auto: bool) -> bool {
-    auto && old.is_some_and(|o| o.core != core && !o.terminals.is_empty())
+/// What a save came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wrote {
+    Yes,
+    /// The file is from before a stop and lists agents: it is what a restore
+    /// needs, and what runs now is less.
+    Kept,
+    /// Automatic saving is turned off.
+    Off,
+    /// The last save is newer than the time between saves.
+    NotDue,
+}
+
+impl Wrote {
+    fn word(self) -> &'static str {
+        match self {
+            Wrote::Yes => "yes",
+            Wrote::Kept => "kept",
+            Wrote::Off => "off",
+            Wrote::NotDue => "not_due",
+        }
+    }
+}
+
+/// Is the file from before a stop, with agents that are not back yet?
+fn pending(old: Option<&Snapshot>, core: &str) -> bool {
+    old.is_some_and(|o| o.core != core && !o.terminals.is_empty())
+}
+
+/// What an automatic save does now, `minutes` being the time between saves.
+fn automatic(old: Option<&Snapshot>, core: &str, minutes: u64, now: i64) -> Wrote {
+    if pending(old, core) {
+        Wrote::Kept
+    } else if minutes == 0 {
+        Wrote::Off
+    } else if old.is_some_and(|o| o.core == core && now - o.saved_at < minutes as i64 * 60) {
+        Wrote::NotDue
+    } else {
+        Wrote::Yes
+    }
 }
 
 /// Every agent in a herdr terminal, as it runs now.
@@ -127,18 +164,28 @@ fn taken(c: &Ctx) -> Vec<Entry> {
 
 /// What a save did.
 pub struct Saved {
-    pub snapshot: Snapshot,
-    /// The old file was left as it is, and `snapshot` is that file.
-    pub kept: bool,
+    /// The file as it is now; none when there is none.
+    pub snapshot: Option<Snapshot>,
+    pub wrote: Wrote,
 }
 
 pub fn save(c: &Ctx, auto: bool) -> Result<Saved> {
     let core = core()?;
     let old: Option<Snapshot> = fsx::read_json(&file(false))?;
-    if kept_from(old.as_ref(), &core, auto) {
+    let wrote = if auto {
+        automatic(
+            old.as_ref(),
+            &core,
+            c.settings.herdr_save_minutes,
+            c.now.timestamp(),
+        )
+    } else {
+        Wrote::Yes
+    };
+    if wrote != Wrote::Yes {
         return Ok(Saved {
-            snapshot: old.expect("kept_from saw a file"),
-            kept: true,
+            snapshot: old,
+            wrote,
         });
     }
     let snapshot = Snapshot {
@@ -157,8 +204,8 @@ pub fn save(c: &Ctx, auto: bool) -> Result<Saved> {
     }
     fsx::write_json(&file(false), &snapshot)?;
     Ok(Saved {
-        snapshot,
-        kept: false,
+        snapshot: Some(snapshot),
+        wrote,
     })
 }
 
@@ -188,6 +235,21 @@ pub struct Outcome {
     pub did: Did,
     /// What was typed, or the `hc run` that was given.
     pub line: String,
+    /// The line that starts it by hand, in a shell of your own.
+    pub manual: String,
+}
+
+/// The line a person can paste into a shell to start the agent of `e`.
+fn manual_line(c: &Ctx, e: &Entry) -> String {
+    let selector = c
+        .reg
+        .get(&e.account)
+        .map_or_else(|| e.account.clone(), herdr::selector);
+    let launch = quoted(&launch_words(e, &selector));
+    match &e.cwd {
+        Some(cwd) => format!("cd {} && {launch}", herdr::quote(cwd)),
+        None => launch,
+    }
 }
 
 /// The entries with every parent before its children, in their saved order
@@ -263,10 +325,7 @@ fn restore_one(c: &Ctx, e: &Entry, moved: &HashMap<String, String>, how: How) ->
         if !term.front_shell {
             return skip("another program is running there".to_string());
         }
-        let line = match &e.cwd {
-            Some(cwd) => format!("cd {} && {}", herdr::quote(cwd), quoted(&words)),
-            None => quoted(&words),
-        };
+        let line = manual_line(c, e);
         if how.dry_run {
             return (Did::Typed { started: false }, line);
         }
@@ -375,6 +434,7 @@ pub fn restore(c: &Ctx, only: &[String], how: How) -> Result<(Snapshot, Vec<Outc
             }
         }
         out.push(Outcome {
+            manual: manual_line(c, e),
             entry: e.clone(),
             did,
             line,
@@ -412,36 +472,56 @@ fn called(e: &Entry) -> String {
 pub fn save_cmd(auto: bool, as_json: bool) -> Result<()> {
     let c = Ctx::load()?;
     let s = save(&c, auto)?;
+    let terminals = s.snapshot.as_ref().map_or(&[][..], |f| &f.terminals);
+    let saved_at = s.snapshot.as_ref().map(|f| f.saved_at);
     if as_json {
         let v = json!({
             "file": file(false),
-            "kept": s.kept,
-            "saved_at": s.snapshot.saved_at,
-            "terminals": s.snapshot.terminals,
+            "wrote": s.wrote.word(),
+            // Agents from before a stop that a restore would bring back.
+            "pending": s.wrote == Wrote::Kept,
+            "every_minutes": c.settings.herdr_save_minutes,
+            "saved_at": saved_at,
+            "now": c.now.timestamp(),
+            "agents": terminals.len(),
+            "terminals": terminals,
         });
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
     }
-    let n = s.snapshot.terminals.len();
+    let n = terminals.len();
     let agents = if n == 1 {
         "1 agent".to_string()
     } else {
         format!("{n} agents")
     };
-    if s.kept {
-        println!(
-            "Left the save of {agents} from {} as it is: herdr was stopped since, and they \
-             are not back yet.",
-            ago(&c, s.snapshot.saved_at)
-        );
-        println!(
-            "{}",
-            c.p.dim("`cswap herdr restore` brings them back; `cswap herdr save` without --auto saves what runs now.")
-        );
-        return Ok(());
+    let when = saved_at.map_or_else(|| "never".to_string(), |at| ago(&c, at));
+    match s.wrote {
+        Wrote::Yes => println!("Saved {agents} in {}.", file(false).display()),
+        Wrote::Kept => {
+            println!(
+                "Left the save of {agents} from {when} as it is: herdr was stopped since, and \
+                 they are not back yet."
+            );
+            println!(
+                "{}",
+                c.p.dim("`cswap herdr restore` brings them back; `cswap herdr save` without --auto saves what runs now.")
+            );
+            return Ok(());
+        }
+        Wrote::Off => {
+            println!("Automatic saving is off. Last save: {when}.");
+            return Ok(());
+        }
+        Wrote::NotDue => {
+            println!(
+                "Not due: the last save is from {when}, and cswap saves every {} min.",
+                c.settings.herdr_save_minutes
+            );
+            return Ok(());
+        }
     }
-    println!("Saved {agents} in {}.", file(false).display());
-    for e in &s.snapshot.terminals {
+    for e in terminals {
         let talk = match (&e.session, e.conversation.as_str()) {
             (Some(id), _) => format!("conversation {id}"),
             (None, "fresh") => "nothing said yet".to_string(),
@@ -494,6 +574,7 @@ pub fn restore_cmd(only: &[String], how: How, as_json: bool) -> Result<bool> {
                     "terminal": o.entry.terminal,
                     "name": o.entry.name,
                     "agent": o.entry.agent,
+                    "agent_name": agent_name(&o.entry),
                     "account": o.entry.account_name,
                     "session": o.entry.session,
                     "did": what,
@@ -501,12 +582,16 @@ pub fn restore_cmd(only: &[String], how: How, as_json: bool) -> Result<bool> {
                     "started": started,
                     "why": note,
                     "line": o.line,
+                    "manual": o.manual,
+                    "cwd": o.entry.cwd,
                 })
             })
             .collect();
         let v = json!({
             "saved_at": snapshot.saved_at,
+            "now": c.now.timestamp(),
             "dry_run": how.dry_run,
+            "previous": how.previous,
             "ok": ok,
             "terminals": rows,
         });
@@ -546,8 +631,14 @@ pub fn restore_cmd(only: &[String], how: How, as_json: bool) -> Result<bool> {
             Did::Failed(why) => c.p.warn(&format!("{who}: not started: {why}")),
         };
         println!("{}  {what}", c.p.bold(&format!("{:<wide$}", called(e))));
-        if how.dry_run && !o.line.is_empty() {
-            println!("{:<wide$}  {}", "", c.p.dim(&o.line));
+        // By hand: the same line works in any shell of your own.
+        if how.dry_run {
+            let line = if o.line.is_empty() {
+                &o.manual
+            } else {
+                &o.line
+            };
+            println!("{:<wide$}  {}", "", c.p.dim(line));
         }
     }
     if done.is_empty() {
@@ -590,15 +681,24 @@ mod tests {
     #[test]
     fn an_automatic_save_keeps_the_list_from_before_a_stop() {
         let full = snap("a", vec![entry("t1", None)]);
-        // herdr was stopped and started: other terminals now.
-        assert!(kept_from(Some(&full), "b", true));
-        // The same terminals: the list is brought up to date.
-        assert!(!kept_from(Some(&full), "a", true));
-        // A save by hand always writes.
-        assert!(!kept_from(Some(&full), "b", false));
+        // herdr was stopped and started: other terminals now. Kept even
+        // with the timer off, and however old the file is.
+        assert_eq!(automatic(Some(&full), "b", 10, 9999), Wrote::Kept);
+        assert_eq!(automatic(Some(&full), "b", 0, 9999), Wrote::Kept);
         // Nothing worth keeping.
-        assert!(!kept_from(Some(&snap("a", vec![])), "b", true));
-        assert!(!kept_from(None, "b", true));
+        assert_eq!(automatic(Some(&snap("a", vec![])), "b", 10, 0), Wrote::Yes);
+        assert_eq!(automatic(None, "b", 10, 0), Wrote::Yes);
+    }
+
+    #[test]
+    fn an_automatic_save_waits_for_the_time_between_saves() {
+        let full = snap("a", vec![entry("t1", None)]);
+        assert_eq!(automatic(Some(&full), "a", 10, 599), Wrote::NotDue);
+        assert_eq!(automatic(Some(&full), "a", 10, 600), Wrote::Yes);
+        assert_eq!(automatic(Some(&full), "a", 1, 60), Wrote::Yes);
+        // Turned off: only a save by hand writes.
+        assert_eq!(automatic(Some(&full), "a", 0, 99_999), Wrote::Off);
+        assert_eq!(automatic(None, "a", 0, 0), Wrote::Off);
     }
 
     #[test]

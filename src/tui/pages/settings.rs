@@ -49,6 +49,8 @@ pub enum Id {
     PaintBackground,
     Theme,
     UpdateCheck,
+    /// Minutes between the saves of what runs in herdr.
+    HerdrSave,
     /// Ask GitHub now whether a newer cswap is out.
     CheckNow,
     AutoPick(Harness),
@@ -366,6 +368,15 @@ fn shells(app: &App) -> Vec<Row> {
             .under("Other programs", None),
         );
     }
+    out.push(value(
+        Id::HerdrSave,
+        "herdr save every",
+        match app.settings.herdr_save_minutes {
+            0 => "off".to_string(),
+            n => format!("{n} min"),
+        },
+        "How often the cswap layout in herdr writes down which agent, account and conversation is in which terminal, so `cswap herdr restore` can bring them back after herdr was stopped or the machine restarted. An agent started after the last save is not in it. Off: only when you press Save in herdr or run `cswap herdr save`.",
+    ));
     out.push(
         note(
             "Pick an account once",
@@ -454,6 +465,16 @@ pub fn change(app: &mut App, dir: i32) {
         Id::AutoSkip => Settings::update(|s| {
             let d = if dir < 0 { -1.0 } else { 1.0 };
             s.auto_skip_above_pct = (s.auto_skip_above_pct + d).clamp(50.0, 100.0)
+        })
+        .map(|_| ()),
+        Id::HerdrSave => Settings::update(|s| {
+            let options = [0, 1, 2, 5, 10, 15, 30, 60];
+            s.herdr_save_minutes = match dir {
+                // Enter goes round.
+                0 if s.herdr_save_minutes >= 60 => 0,
+                0 => step(&options, s.herdr_save_minutes, 1),
+                _ => step(&options, s.herdr_save_minutes, dir),
+            }
         })
         .map(|_| ()),
         Id::HistoryDays => Settings::update(|s| {

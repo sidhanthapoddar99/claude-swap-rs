@@ -925,6 +925,12 @@ fn a_saved_agent_is_started_again_in_its_terminal_after_a_stop() {
     assert_eq!(e["account"], "claude-0");
     assert_eq!(e["session"], SESSION);
     assert_eq!(e["options"], serde_json::json!(["--model", "opus"]));
+    // The layout asks every minute; cswap writes only when a save is due.
+    let soon: Value =
+        serde_json::from_str(&env.ok(&["herdr", "save", "--auto", "--json"])).unwrap();
+    assert_eq!(soon["wrote"], "not_due");
+    assert_eq!(soon["every_minutes"], 10);
+    assert_eq!(soon["agents"], 1);
 
     // The stop: the agent ends, and herdr's terminals are another set.
     let old = fs::read_to_string(h.join("hc/pid")).unwrap();
@@ -943,7 +949,8 @@ fn a_saved_agent_is_started_again_in_its_terminal_after_a_stop() {
     // The layout's timer does not write an empty list over the one to keep.
     let auto: Value =
         serde_json::from_str(&env.ok(&["herdr", "save", "--auto", "--json"])).unwrap();
-    assert_eq!(auto["kept"], true);
+    assert_eq!(auto["wrote"], "kept");
+    assert_eq!(auto["pending"], true);
     assert_eq!(auto["terminals"][0]["session"], SESSION);
 
     let launch = format!("cswap claude --cswap=root --model opus --resume {SESSION}");
@@ -955,6 +962,7 @@ fn a_saved_agent_is_started_again_in_its_terminal_after_a_stop() {
         serde_json::from_str(&env.ok(&["herdr", "restore", "--dry-run", "--json"])).unwrap();
     assert_eq!(plan["terminals"][0]["did"], "typed");
     assert_eq!(plan["terminals"][0]["line"], line.as_str());
+    assert_eq!(plan["terminals"][0]["manual"], line.as_str());
     assert!(!h.join("hc/log").exists(), "a dry run touched the terminal");
 
     let done: Value = serde_json::from_str(&env.ok(&["herdr", "restore", "--json"])).unwrap();
