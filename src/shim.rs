@@ -105,21 +105,27 @@ pub fn state(h: Harness) -> State {
 /// `PATH`, if any, and whether that program is this cswap.
 pub type Seen = (Harness, Option<PathBuf>, bool);
 
+/// herdr's last answer, kept for a short while.
+struct Asked {
+    at: std::time::Instant,
+    agents: Vec<Harness>,
+    seen: Option<Vec<Seen>>,
+}
+static LAST: std::sync::Mutex<Option<Asked>> = std::sync::Mutex::new(None);
+
+/// Drop herdr's last answer: its `PATH` has just changed.
+pub fn forget_herdr() {
+    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// What herdr itself would start for a bare `claude`: the first program of
 /// that name on the `PATH` herdr's core runs with, which is the one it had
 /// when it started and not this process's. `None` when herdr cannot be asked.
 pub fn seen_by_herdr(agents: &[Harness]) -> Option<Vec<Seen>> {
-    use std::sync::Mutex;
     use std::time::{Duration, Instant};
-    struct Asked {
-        at: Instant,
-        agents: Vec<Harness>,
-        seen: Option<Vec<Seen>>,
-    }
     // The dashboard checks its health at every reload; herdr is asked at most
     // this often.
     const KEEP: Duration = Duration::from_secs(20);
-    static LAST: Mutex<Option<Asked>> = Mutex::new(None);
 
     if agents.is_empty() {
         return None;

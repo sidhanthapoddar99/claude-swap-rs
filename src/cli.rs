@@ -1142,9 +1142,13 @@ fn shim_when(p: &Paint) {
     );
     println!(
         "{}",
-        p.dim("herdr keeps the PATH it started with. To give it the new one now, run in a terminal outside herdr:")
+        p.dim("herdr keeps the PATH it started with. To give it the new one now, with its programs kept running:")
     );
-    println!("{}", p.dim("  hc server restart --fresh"));
+    println!("{}", p.dim("  cswap herdr path --fix"));
+    println!(
+        "{}",
+        p.dim("or, in a terminal outside herdr: hc server restart --fresh")
+    );
 }
 
 /// `cswap shims`: where the PATH shims stand.

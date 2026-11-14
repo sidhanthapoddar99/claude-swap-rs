@@ -116,7 +116,7 @@ What turning it on does, and nothing more:
 - It adds two lines, a comment and one `PATH` line, at the end of your login files (`~/.profile`, `~/.zprofile`, `~/.bash_profile`: the ones that exist, and your login shell's own). The line puts `~/.cswap/shims` first on `PATH`.
 - `cswap shell-init` puts the folder first again in every shell that loads it, after whatever your rc file added to `PATH`.
 
-When it takes hold: a new terminal sees it at once if its shell loads cswap; every other program sees it after your next login. herdr keeps the `PATH` it started with. To give it the new one now, run `hc server restart --fresh` in a terminal outside herdr.
+When it takes hold: a new terminal sees it at once if its shell loads cswap; every other program sees it after your next login. herdr keeps the `PATH` it started with, and after a reboot it may be started by something whose `PATH` has no shims. An agent herdr then starts by its bare name runs on the root login. `cswap herdr path` says whether that is so, and `cswap herdr path --fix` puts it right: it restarts herdr's core with the core's own environment and the shims folder first, and running programs keep running. The dashboard offers the same under Integrations, and the cswap layout tells you when herdr starts. By hand it is `hc server restart --fresh` in a terminal outside herdr.
 
 While an agent has a shim it runs through cswap in every shell, so its tick in the shell table is locked. The per-shell lists are kept and count again when the shim goes. The line in your rc file stays: it is what keeps the shims first in that shell.
 
@@ -338,6 +338,8 @@ cswap herdr save               write down which agent, account and conversation 
 cswap herdr restore --dry-run  say what a restore would do
 cswap herdr restore            start them again, each in its conversation
 cswap herdr restore t1x build  only these, by saved address or name
+cswap herdr path               does herdr start the agents through cswap?
+cswap herdr path --fix         make it: restart herdr's core with the shims first
 ```
 
 The layout saves by itself, every 10 minutes unless you change it, so you do not have to think of it before a stop. The time between saves is **herdr save every** on the dashboard's Settings page, under Shell; off leaves only the saves you ask for. An agent started after the last save is not in the list. The list is `~/.cswap/herdr-saved.json`.
@@ -388,6 +390,7 @@ uninstall                  undo the shims and the lines in your shell files
 herdr ls|info|switch       agents in herdr terminals: account and switch
 herdr restart <terminal>   start a terminal's agent again, same conversation
 herdr save|restore         write down what runs in herdr; bring it back after a stop
+herdr path [--fix]         does herdr start the agents through cswap; make it
 herdr install|status       the cswap layout for herdr
 agent-info                 how a coding agent uses cswap: a guide for the agent
 update                     install the latest release         (--check)
