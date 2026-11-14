@@ -693,7 +693,7 @@ const FAKE_HC: &str = r#"#!/bin/sh
 dir="$HOME/hc"
 old=$(cat "$dir/pid")
 case "$1" in
-  server) printf '{"holder":{"instance":"%s"}}\n' "$(cat "$dir/core" 2>/dev/null)" ;;
+  server) printf '{"uptime_ms":%s}\n' "$(cat "$dir/uptime" 2>/dev/null || echo 86400000)" ;;
   run) echo "$*" >> "$dir/log"; echo '{"address":"t9"}' ;;
   get)
     if [ -f "$dir/gone" ]; then echo "no terminal" >&2; exit 3; fi
@@ -915,7 +915,6 @@ fn a_saved_agent_is_started_again_in_its_terminal_after_a_stop() {
     let next = herdr_terminal(&env, "claude\0--model\0opus\0");
     let h = env.home();
     fs::write(h.join("hc/next-proc/environ"), "HC_TERMINAL_ID=t7\0").unwrap();
-    fs::write(h.join("hc/core"), "one").unwrap();
 
     let saved: Value = serde_json::from_str(&env.ok(&["herdr", "save", "--json"])).unwrap();
     let e = &saved["terminals"][0];
@@ -944,7 +943,8 @@ fn a_saved_agent_is_started_again_in_its_terminal_after_a_stop() {
     {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    fs::write(h.join("hc/core"), "two").unwrap();
+    fs::remove_dir_all(h.join("proc").join(old.trim())).unwrap();
+    fs::write(h.join("hc/uptime"), "0").unwrap();
 
     // The layout's timer does not write an empty list over the one to keep.
     let auto: Value =
@@ -1000,7 +1000,7 @@ fn a_saved_agent_whose_terminal_is_gone_gets_a_new_one() {
         })
     };
     let saved = serde_json::json!({
-        "saved_at": 0, "core": "one",
+        "saved_at": 0,
         "terminals": [entry("t7", "build", "open"), entry("t8", "lost", "unknown")],
     });
     fs::create_dir_all(env.cswap_home()).unwrap();

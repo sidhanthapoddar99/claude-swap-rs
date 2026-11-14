@@ -13,7 +13,8 @@
 //! one when the last is older than the setting says (ten minutes unless
 //! changed; 0 turns it off). Right after a stop that would write an empty
 //! list over the one save worth having, so an automatic save leaves the file
-//! alone when herdr's terminals are not the ones the file was written for.
+//! alone when herdr's core started after the file was written and an agent
+//! in it does not run where it did.
 //! A restore, or a save by hand, starts the saving again.
 
 use std::collections::HashMap;
@@ -59,9 +60,6 @@ pub struct Entry {
 pub struct Snapshot {
     /// Seconds since 1970.
     pub saved_at: i64,
-    /// Which set of terminals this was: it changes when herdr is stopped,
-    /// and stays when only its core is restarted.
-    pub core: String,
     pub terminals: Vec<Entry>,
 }
 
@@ -73,15 +71,17 @@ fn file(previous: bool) -> PathBuf {
     })
 }
 
-/// What tells one run of herdr's terminals from the next. Empty when herdr
-/// does not say.
-fn core() -> Result<String> {
+/// When herdr's core started, in seconds since 1970. A stop of herdr or of
+/// the machine ends every program, and the core that runs afterwards is a
+/// new one. An error when herdr does not say: a guess here would let an
+/// empty list replace the one a restore needs.
+fn core_started(now: i64) -> Result<i64> {
     let v: Value = serde_json::from_str(&hc(&["server", "status", "--json"])?)
         .context("hc server status did not print JSON")?;
-    Ok(v["holder"]["instance"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string())
+    let up = v["uptime_ms"]
+        .as_i64()
+        .context("hc server status did not say how long herdr has been running")?;
+    Ok(now - up / 1000)
 }
 
 /// What a save came to.
@@ -108,18 +108,38 @@ impl Wrote {
     }
 }
 
-/// Is the file from before a stop, with agents that are not back yet?
-fn pending(old: Option<&Snapshot>, core: &str) -> bool {
-    old.is_some_and(|o| o.core != core && !o.terminals.is_empty())
+/// What herdr and this machine say now, for an automatic save to go by.
+struct Seen {
+    now: i64,
+    /// When herdr's core started.
+    started: i64,
+    /// The agent in each terminal: address and agent id.
+    running: Vec<(String, String)>,
+}
+
+/// Is the file from before a stop, with agents that are not back yet? Both
+/// must hold. The core started after the file was written: nothing else
+/// ends every agent at once. And an agent in the file does not run where it
+/// did: a core that was only restarted keeps its programs, and after a
+/// restore by hand there is nothing left to bring back.
+fn pending(old: Option<&Snapshot>, seen: &Seen) -> bool {
+    old.is_some_and(|o| {
+        seen.started >= o.saved_at
+            && o.terminals.iter().any(|e| {
+                !seen
+                    .running
+                    .contains(&(e.terminal.clone(), e.agent.clone()))
+            })
+    })
 }
 
 /// What an automatic save does now, `minutes` being the time between saves.
-fn automatic(old: Option<&Snapshot>, core: &str, minutes: u64, now: i64) -> Wrote {
-    if pending(old, core) {
+fn automatic(old: Option<&Snapshot>, seen: &Seen, minutes: u64) -> Wrote {
+    if pending(old, seen) {
         Wrote::Kept
     } else if minutes == 0 {
         Wrote::Off
-    } else if old.is_some_and(|o| o.core == core && now - o.saved_at < minutes as i64 * 60) {
+    } else if old.is_some_and(|o| seen.now - o.saved_at < minutes as i64 * 60) {
         Wrote::NotDue
     } else {
         Wrote::Yes
@@ -170,15 +190,20 @@ pub struct Saved {
 }
 
 pub fn save(c: &Ctx, auto: bool) -> Result<Saved> {
-    let core = core()?;
+    let now = c.now.timestamp();
+    // Asked also for a save by hand: it fails here when herdr is not running.
+    let started = core_started(now)?;
     let old: Option<Snapshot> = fsx::read_json(&file(false))?;
     let wrote = if auto {
-        automatic(
-            old.as_ref(),
-            &core,
-            c.settings.herdr_save_minutes,
-            c.now.timestamp(),
-        )
+        let seen = Seen {
+            now,
+            started,
+            running: herdr::in_terminals(c)
+                .into_iter()
+                .map(|(address, _, acc)| (address, acc.harness.id().to_string()))
+                .collect(),
+        };
+        automatic(old.as_ref(), &seen, c.settings.herdr_save_minutes)
     } else {
         Wrote::Yes
     };
@@ -189,8 +214,7 @@ pub fn save(c: &Ctx, auto: bool) -> Result<Saved> {
         });
     }
     let snapshot = Snapshot {
-        saved_at: c.now.timestamp(),
-        core,
+        saved_at: now,
         terminals: taken(c),
     };
     // A save by hand, or the one after a restore, replaces a file that may
@@ -406,7 +430,7 @@ pub fn restore(c: &Ctx, only: &[String], how: How) -> Result<(Snapshot, Vec<Outc
         )
     })?;
     // Fails here when herdr is not running, before anything is tried.
-    core()?;
+    core_started(c.now.timestamp())?;
     let picked = |e: &Entry| {
         only.is_empty()
             || only
@@ -670,35 +694,78 @@ mod tests {
         }
     }
 
-    fn snap(core: &str, terminals: Vec<Entry>) -> Snapshot {
+    /// A file written at second 1000.
+    fn snap(terminals: Vec<Entry>) -> Snapshot {
         Snapshot {
-            saved_at: 0,
-            core: core.to_string(),
+            saved_at: 1000,
             terminals,
+        }
+    }
+
+    /// Herdr's core started at `started`, and Claude Code runs in `running`.
+    fn seen(now: i64, started: i64, running: &[&str]) -> Seen {
+        Seen {
+            now,
+            started,
+            running: running
+                .iter()
+                .map(|t| (t.to_string(), "claude".to_string()))
+                .collect(),
         }
     }
 
     #[test]
     fn an_automatic_save_keeps_the_list_from_before_a_stop() {
-        let full = snap("a", vec![entry("t1", None)]);
-        // herdr was stopped and started: other terminals now. Kept even
-        // with the timer off, and however old the file is.
-        assert_eq!(automatic(Some(&full), "b", 10, 9999), Wrote::Kept);
-        assert_eq!(automatic(Some(&full), "b", 0, 9999), Wrote::Kept);
+        let full = snap(vec![entry("t1", None), entry("t2", Some("t1"))]);
+        // herdr started after the save and an agent is not back: kept, with
+        // the timer off too, and however old the file is.
+        assert_eq!(
+            automatic(Some(&full), &seen(99_999, 2000, &["t1"]), 10),
+            Wrote::Kept
+        );
+        assert_eq!(
+            automatic(Some(&full), &seen(99_999, 2000, &[]), 0),
+            Wrote::Kept
+        );
+        // Everything is back, by a restore or by hand: saving goes on.
+        assert_eq!(
+            automatic(Some(&full), &seen(99_999, 2000, &["t1", "t2"]), 10),
+            Wrote::Yes
+        );
         // Nothing worth keeping.
-        assert_eq!(automatic(Some(&snap("a", vec![])), "b", 10, 0), Wrote::Yes);
-        assert_eq!(automatic(None, "b", 10, 0), Wrote::Yes);
+        assert_eq!(
+            automatic(Some(&snap(vec![])), &seen(99_999, 2000, &[]), 10),
+            Wrote::Yes
+        );
+        assert_eq!(automatic(None, &seen(99_999, 2000, &[]), 10), Wrote::Yes);
+    }
+
+    /// Saving once stopped for good: a file that only looked like one from
+    /// before a stop was never written over.
+    #[test]
+    fn an_agent_that_left_does_not_stop_the_saving() {
+        let full = snap(vec![entry("t1", None), entry("t2", Some("t1"))]);
+        // The same core as at the save: t2 just ended.
+        assert_eq!(
+            automatic(Some(&full), &seen(1600, 500, &["t1"]), 10),
+            Wrote::Yes
+        );
+        assert_eq!(
+            automatic(Some(&full), &seen(1600, 500, &[]), 10),
+            Wrote::Yes
+        );
     }
 
     #[test]
     fn an_automatic_save_waits_for_the_time_between_saves() {
-        let full = snap("a", vec![entry("t1", None)]);
-        assert_eq!(automatic(Some(&full), "a", 10, 599), Wrote::NotDue);
-        assert_eq!(automatic(Some(&full), "a", 10, 600), Wrote::Yes);
-        assert_eq!(automatic(Some(&full), "a", 1, 60), Wrote::Yes);
+        let full = snap(vec![entry("t1", None)]);
+        let at = |now| seen(now, 500, &["t1"]);
+        assert_eq!(automatic(Some(&full), &at(1599), 10), Wrote::NotDue);
+        assert_eq!(automatic(Some(&full), &at(1600), 10), Wrote::Yes);
+        assert_eq!(automatic(Some(&full), &at(1060), 1), Wrote::Yes);
         // Turned off: only a save by hand writes.
-        assert_eq!(automatic(Some(&full), "a", 0, 99_999), Wrote::Off);
-        assert_eq!(automatic(None, "a", 0, 0), Wrote::Off);
+        assert_eq!(automatic(Some(&full), &at(99_999), 0), Wrote::Off);
+        assert_eq!(automatic(None, &at(0), 0), Wrote::Off);
     }
 
     #[test]

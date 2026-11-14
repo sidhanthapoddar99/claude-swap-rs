@@ -352,7 +352,7 @@ A restore goes through the list, parents before their sub-agents:
 
 Every agent comes back idle: nothing is sent to it. A new terminal is not put in a tab; herdr's own commands show it. Run a restore twice and the second one finds everything running and does nothing.
 
-Right after a stop the automatic save would write an empty list over the one you need. So it leaves the file alone until you restore, or save by hand. `cswap herdr restore --dry-run` prints the same lines as Copy command. A restore then saves what runs now, and the list it used stays as `herdr-saved.prev.json`; `cswap herdr restore --previous` uses that one.
+Right after a stop the automatic save would write an empty list over the one you need. So it leaves the file alone while herdr's core is newer than the list and an agent in the list does not run where it did. Once you restore, save by hand, or have every agent back in its terminal, saving goes on. `cswap herdr restore --dry-run` prints the same lines as Copy command. A restore then saves what runs now, and the list it used stays as `herdr-saved.prev.json`; `cswap herdr restore --previous` uses that one.
 
 To restart herdr without losing anything in the first place, use `hc server restart`: it keeps the programs running.
 
