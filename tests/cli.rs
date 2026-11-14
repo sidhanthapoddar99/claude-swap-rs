@@ -1718,6 +1718,75 @@ fn health_asks_herdr_which_program_it_would_start() {
     );
 }
 
+/// The fix for a herdr that started without the shims on its PATH: its core
+/// is restarted with its own environment and the shims folder put first.
+#[test]
+fn herdr_is_given_the_shims_without_anything_else_of_this_environment() {
+    let env = Env::new();
+    let h = env.home();
+    // `exec` runs with herdr's PATH, and a fresh restart takes the caller's.
+    let hc = h.join("bin/hc");
+    fs::write(
+        &hc,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "server status") echo '{"pid":4242}' ;;
+  "server restart")
+    [ "$3" = --fresh ] || exit 1
+    printf '%s' "$PATH" > "$HOME/hc-path"
+    /usr/bin/env > "$HOME/hc-env" ;;
+  exec*) shift 3; PATH=$(cat "$HOME/hc-path") exec "$@" ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
+    let old = format!("{}:/usr/bin:/bin", h.join("bin").display());
+    fs::write(h.join("hc-path"), &old).unwrap();
+    fs::create_dir_all(h.join("proc/4242")).unwrap();
+    fs::write(
+        h.join("proc/4242/environ"),
+        format!("HOME={}\0PATH={old}\0CORE=yes\0", h.display()),
+    )
+    .unwrap();
+    env.ok(&["shims", "on", "claude"]);
+
+    let run = |args: &[&str]| {
+        let out = env
+            .cmd(args)
+            .env("PATH", env.shim_path())
+            .env("CLAUDE_CONFIG_DIR", "/an/agents/account")
+            .output()
+            .unwrap();
+        (out.status.success(), text(&out.stdout))
+    };
+    let (ok, out) = run(&["herdr", "path"]);
+    assert!(!ok && out.contains("herdr starts ~/bin/claude"), "{out}");
+    assert!(out.contains("cswap herdr path --fix"), "{out}");
+
+    let (ok, out) = run(&["herdr", "path", "--fix", "--json"]);
+    let done: Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        ok && done["state"] == "fine" && done["fixed"] == true,
+        "{out}"
+    );
+    assert_eq!(
+        fs::read_to_string(h.join("hc-path")).unwrap(),
+        format!("{}:{old}", env.shims().display())
+    );
+    // The core's own environment came along, and this one's account did not.
+    let given = fs::read_to_string(h.join("hc-env")).unwrap();
+    assert!(given.contains("CORE=yes"), "{given}");
+    assert!(!given.contains("CLAUDE_CONFIG_DIR"), "{given}");
+
+    // Nothing is left to do, so nothing is restarted again.
+    fs::remove_file(h.join("hc-env")).unwrap();
+    let (ok, out) = run(&["herdr", "path", "--fix"]);
+    assert!(ok && out.contains("through cswap"), "{out}");
+    assert!(!h.join("hc-env").exists());
+}
+
 #[test]
 fn uninstall_undoes_what_cswap_wrote_outside_its_folder() {
     let env = Env::new();

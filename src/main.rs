@@ -16,6 +16,7 @@ mod fsx;
 mod harness;
 mod health;
 mod herdr;
+mod herdr_path;
 mod herdr_saved;
 mod history;
 mod http;
@@ -121,6 +122,15 @@ enum HerdrCmd {
         /// Use the save before the last one
         #[arg(long)]
         previous: bool,
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Does herdr start the agents through cswap? `--fix` makes it
+    Path {
+        /// Restart herdr's core with cswap's shims first; agents keep running
+        #[arg(long)]
+        fix: bool,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -638,6 +648,7 @@ fn run() -> Result<ExitCode> {
                 json,
             } => herdr::restart_cmd(&terminal, herdr::Allow { fresh, force }, json)?,
             HerdrCmd::Save { auto, json } => herdr_saved::save_cmd(auto, json)?,
+            HerdrCmd::Path { fix, json } => ok = herdr_path::path_cmd(fix, json)?,
             HerdrCmd::Restore {
                 terminals,
                 dry_run,

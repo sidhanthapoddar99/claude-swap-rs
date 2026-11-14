@@ -70,6 +70,13 @@ are working: a report sent to it meanwhile is lost. Do not pass --force
 unless the user says so. Never switch or restart your own terminal: it stops
 the agent in it, which is you.
 
+## When herdr skips cswap
+
+  cswap herdr path                 does a bare `claude` in herdr reach cswap?
+
+If it does not, start agents as `cswap <agent>` and tell the user:
+`cswap herdr path --fix` restarts herdr's core, so it is theirs to run.
+
 ## After herdr was stopped
 
   cswap herdr restore --dry-run    what would be started again

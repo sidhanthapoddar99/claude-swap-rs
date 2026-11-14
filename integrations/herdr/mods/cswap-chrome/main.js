@@ -57,6 +57,7 @@ export default class WorkspaceChrome extends View {
     // between saves is its own setting.
     this.checkSave(cx, false);
     cx.timer.every(60000, (cx) => this.checkSave(cx, false));
+    this.checkPath(cx);
     cx.spawn(async cx => {
       for (;;) {
         const command = await nextCommand();
@@ -70,6 +71,22 @@ export default class WorkspaceChrome extends View {
     this.bin ??= await cswapPath();
     if (!this.bin) throw new Error("cswap is not installed");
     return exec(this.bin, args, { timeout });
+  }
+  // herdr keeps the PATH it started with. Without cswap's shims on it, an
+  // agent started by its bare name runs on its own login: say so, once.
+  checkPath(cx) {
+    cx.spawn(async () => {
+      try {
+        const r = await this.cswap(["herdr", "path", "--json"]);
+        const p = JSON.parse(r.stdout);
+        if (p.state !== "skips") return;
+        notify({
+          title: `herdr skips cswap for ${p.skips.map(s => s.bin).join(", ")}`,
+          body: "An agent herdr starts runs on its own login. Fix it in cswap, under Integrations, or run: cswap herdr path --fix",
+          level: "error",
+        });
+      } catch {}
+    });
   }
   // Ask cswap to save: when one is due, or now when the button asks.
   checkSave(cx, byHand) {

@@ -201,7 +201,7 @@ pub fn run(reg: &Registry, live: &Live) -> Vec<Check> {
                 "shims",
                 format!("{what}, not cswap's shim"),
                 format!(
-                    "herdr keeps the PATH it started with, and that one does not have {} first. Until it does, `hc run {bin} …` skips cswap. Give herdr the new PATH: run `hc server restart --fresh` in a terminal outside herdr, or log in again.",
+                    "herdr keeps the PATH it started with, and that one does not have {} first. Until it does, `hc run {bin} …` skips cswap. Give herdr the new PATH with `cswap herdr path --fix`, which restarts herdr's core and keeps its programs running, or run `hc server restart --fresh` in a terminal outside herdr.",
                     paths::tilde(&crate::shim::dir())
                 ),
             ));

@@ -175,6 +175,8 @@ pub enum Action {
     InstallHerdr,
     /// Ask the running herdr to show the cswap layout.
     ShowHerdr,
+    /// Restart herdr's core with cswap's shims first on its PATH.
+    FixHerdrPath,
     /// One step back: from the page to the menu, from the menu out.
     Back,
 }
@@ -857,7 +859,13 @@ impl App {
         let state = &self.integration;
         let there = *state != State::NoHerdr;
         let installed = matches!(state, State::Installed { .. });
-        let items = vec![
+        // Only offered when it would change something: shims are on and
+        // herdr still starts an agent's own program for its bare name.
+        let skips = match crate::herdr_path::state() {
+            crate::herdr_path::State::Skips(s) => s,
+            _ => Vec::new(),
+        };
+        let mut items = vec![
             ChoiceItem {
                 heading: None,
                 label: if installed {
@@ -889,10 +897,28 @@ impl App {
                 action: Action::ShowHerdr,
             },
         ];
+        if !skips.is_empty() {
+            let bins: Vec<&str> = skips.iter().map(|(h, _)| h.spec().bins[0]).collect();
+            items.push(ChoiceItem {
+                heading: None,
+                label: "Start agents through cswap".to_string(),
+                detail: format!(
+                    "herdr skips cswap for {} · restarts its core, agents keep running",
+                    bins.join(", ")
+                ),
+                enabled: true,
+                key: Some('p'),
+                action: Action::FixHerdrPath,
+            });
+        }
         self.modal = Some(Modal::Choice {
             title: "herdr".to_string(),
-            hint: "herdr keeps your own layout · switch back in its settings, or with ctrl-shift-l"
-                .to_string(),
+            hint: if skips.is_empty() {
+                "herdr keeps your own layout · switch back in its settings, or with ctrl-shift-l"
+            } else {
+                "herdr's PATH misses cswap's shims: an agent it starts runs on the root login"
+            }
+            .to_string(),
             items,
             sel: 0,
         });
@@ -1351,6 +1377,18 @@ impl App {
                     Ok(()) => self.say(Tone::Good, "herdr shows the cswap layout now.".to_string()),
                     Err(e) => self.say(Tone::Warn, format!("{e:#}")),
                 }
+            }
+            Action::FixHerdrPath => {
+                self.modal = None;
+                match crate::herdr_path::fix() {
+                    Ok(_) => self.say(
+                        Tone::Good,
+                        "herdr starts the agents through cswap now. Running agents kept running."
+                            .to_string(),
+                    ),
+                    Err(e) => self.say(Tone::Warn, format!("{e:#}")),
+                }
+                self.reload();
             }
             // To the Help page, and from it back to where `?` was pressed.
             Action::Help => {
