@@ -8,11 +8,15 @@
 // close them.
 
 import { View, div, image, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, hc, notify, exec, home, nextCommand } from "herdr";
 
 // A sub-agent a menu asked for: started under an agent, which is told about it.
 const SPAWN = "cswap.spawn";
+// Names given to sub-agents by Rename: { address: name }. A top-level agent
+// is named by its tab, so herdr's own tab name holds it.
+const NAMES = "cswap.names";
+const nameOf = (address) => shared(NAMES)?.[address] || null;
 
 // A switch or a restart a menu asked for. The list does the work, because it
 // stays when the menu closes; whichever copy of the list sees the request
@@ -115,6 +119,17 @@ function icon(p, size, color) {
 
 export default class Agents extends View {
   init(_props, cx) {
+    if (props()?.rename) {
+      this.text = props().value ?? "";
+      this.input = InputState.new({ value: this.text });
+      if (this.text) this.input.set_selected_range({ start: 0, end: this.text.length });
+      this.input.on("change", (_e, cx) => { this.text = this.input.value(); cx.notify(); });
+      this.input.on("submit", () => this.saveName());
+      this.input.focus();
+      cx.timer.after(600, () => this.input.focus());
+      this.menuHandle = cx.focus_handle();
+      return;
+    }
     if (props()?.agentAddress) {
       this.menuIndex = -1;
       this.confirmIndex = 0;
@@ -243,7 +258,7 @@ export default class Agents extends View {
       return;
     }
     if (this.selected.size) { this.selected.clear(); cx.notify(); }
-    openOverlay({ mod: "cswap-agents", kind: "popup", width: 264, height: 177, props: { agentAddress: address } });
+    openOverlay({ mod: "cswap-agents", kind: "popup", width: 264, height: 208, props: { agentAddress: address } });
   }
 
   // Ctrl+click (Cmd on a Mac) puts an agent in the selection or takes it
@@ -641,6 +656,51 @@ export default class Agents extends View {
     return address;
   }
 
+  // A top-level agent is renamed as its tab is: herdr asks for the name, and
+  // the tab bar and this list both show it. A sub-agent shares its parent's
+  // tab or has none, so its name is kept here and shown on its row.
+  rename(cx) {
+    cx.stop_propagation();
+    const address = this.menuAddress();
+    const all = terminals();
+    const k = all.find(x => x.address === address);
+    const sub = Boolean(k?.parent && all.some(p => p.address === k.parent && p.state === "live"));
+    const tab = agents().find(a => a.address === address)?.tab;
+    closeOverlay(props().overlay);
+    if (!sub && tab) { run("tab.rename", { id: tab }); return; }
+    openOverlay({ mod: "cswap-agents", kind: "dialog", width: 420, height: 196,
+      props: { rename: address, value: nameOf(address) ?? k?.name ?? "" } });
+  }
+
+  saveName() {
+    const address = props().rename;
+    const names = { ...(shared(NAMES) ?? {}) };
+    const name = this.text.trim();
+    if (name) names[address] = name; else delete names[address];
+    setShared(NAMES, names);
+    closeOverlay(props().overlay);
+  }
+
+  renameDialog(t) {
+    const cancel = () => closeOverlay(props().overlay);
+    const button = (id, label, primary, action) => h_flex().id(id).h(32).px(14).items_center().rounded(8)
+      .border_1().border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.raised)
+      .text_color(primary ? t.solid_foreground : t.foreground).text_size(12.5).font_medium().cursor_pointer()
+      .hover(s => s.opacity(0.88)).on_click(action).child(label);
+    return v_flex().id("rename-sub-agent").track_focus(this.menuHandle)
+      .on_key_down((e, cx) => { if (e.key === "escape") { cancel(); cx.stop_propagation(); } })
+      .w_full().min_h(0).p(18).bg(t.popover).text_color(t.foreground)
+      .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().child(`Rename ${props().rename}`))
+        .child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(div().pt(16).pb(7).text_size(11.5).text_color(t.dim).child("Name in the agents list"))
+      .child(Input.new(this.input).h(36).px(10).rounded(9).border_1().border_color(t.accent).bg(t.background).text_size(12.8).text_color(t.foreground))
+      .child(div().pt(6).text_size(11.5).text_color(t.dim).child("Empty: its own name again."))
+      .child(div().flex_1())
+      .child(h_flex().gap(8).justify_end()
+        .child(button("rename-cancel", "Cancel", false, cancel))
+        .child(button("rename-save", "Save", true, () => this.saveName())));
+  }
+
   copyAgentId(cx) {
     cx.stop_propagation();
     cx.write_to_clipboard(this.menuAddress());
@@ -778,13 +838,14 @@ export default class Agents extends View {
       .bg(t.popover)
       .text_size(12.8)
       .on_key_down((e, cx) => {
-        if (e.key === "down") this.menuIndex = (this.menuIndex + 1) % 5;
-        else if (e.key === "up") this.menuIndex = this.menuIndex <= 0 ? 4 : this.menuIndex - 1;
+        if (e.key === "down") this.menuIndex = (this.menuIndex + 1) % 6;
+        else if (e.key === "up") this.menuIndex = this.menuIndex <= 0 ? 5 : this.menuIndex - 1;
         else if (e.key === "enter" || e.key === "space") {
-          if (this.menuIndex === 4) this.requestCloseAgentTree(cx);
-          else if (this.menuIndex === 3) this.requestRestart(cx);
-          else if (this.menuIndex === 2) { if (local) this.requestSubAgent(cx); }
-          else if (this.menuIndex === 1) this.openAccountMenu(cx);
+          if (this.menuIndex === 5) this.requestCloseAgentTree(cx);
+          else if (this.menuIndex === 4) this.requestRestart(cx);
+          else if (this.menuIndex === 3) { if (local) this.requestSubAgent(cx); }
+          else if (this.menuIndex === 2) this.openAccountMenu(cx);
+          else if (this.menuIndex === 1) this.rename(cx);
           else this.copyAgentId(cx);
         }
         else if (e.key === "escape") closeOverlay(props().overlay);
@@ -793,11 +854,12 @@ export default class Agents extends View {
         cx.notify();
       })
       .child(item("copy-agent-id", "Copy agent ID", 0, cx => this.copyAgentId(cx), this.menuAddress()))
-      .child(item("switch-account", "Switch account", 1, cx => this.openAccountMenu(cx), account, Boolean(this.account)))
-      .child(item("add-sub-agent", "Add sub-agent\u2026", 2, cx => this.requestSubAgent(cx), local ? "" : "other machine", local))
+      .child(item("rename-agent", "Rename\u2026", 1, cx => this.rename(cx), ""))
+      .child(item("switch-account", "Switch account", 2, cx => this.openAccountMenu(cx), account, Boolean(this.account)))
+      .child(item("add-sub-agent", "Add sub-agent\u2026", 3, cx => this.requestSubAgent(cx), local ? "" : "other machine", local))
       .child(div().mx(4).my(4).h(1).bg(t.border))
-      .child(item("restart-agent", "Restart agent", 3, cx => this.requestRestart(cx), restartNote, canRestart))
-      .child(item("close-agent-tree", "Close agent tree…", 4, cx => this.requestCloseAgentTree(cx)));
+      .child(item("restart-agent", "Restart agent", 4, cx => this.requestRestart(cx), restartNote, canRestart))
+      .child(item("close-agent-tree", "Close agent tree…", 5, cx => this.requestCloseAgentTree(cx)));
   }
 
   peek(addr) {
@@ -841,7 +903,7 @@ export default class Agents extends View {
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
-      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
+      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(nameOf(k.address) || k.name || k.template || k.program?.name || k.address))
       .when(picked, el => el.child(svg("mods/workspace-chrome/check.svg").size(13).mr(4).flex_none().text_color(t.foreground)))
       .child(this.showAccounts ? this.accountLabel(t, k.address) : this.status(t, { status: st }, compact));
   }
@@ -859,6 +921,7 @@ export default class Agents extends View {
 
   render(cx) {
     const t = theme();
+    if (props()?.rename) return this.renameDialog(t);
     if (props()?.agentAddress) {
       if (props().confirmClose) return this.closeConfirmation(t);
       if (props().confirmSwitch) return this.switchConfirmation(t);
@@ -877,6 +940,12 @@ export default class Agents extends View {
     // An agent that ended is no longer selected.
     for (const address of this.selected) if (!all.some(k => k.address === address && k.state === "live")) this.selected.delete(address);
     this.migratePins(all);
+    // A name outlives nothing: drop the ones of terminals that are gone.
+    const names = shared(NAMES);
+    if (names && all.length) {
+      const left = Object.fromEntries(Object.entries(names).filter(([a]) => all.some(k => k.address === a && k.state === "live")));
+      if (Object.keys(left).length !== Object.keys(names).length) setShared(NAMES, left);
+    }
     const shown = focused()?.agent;
     const now = Date.now();
     this.track(list, now);
@@ -1027,7 +1096,7 @@ export default class Agents extends View {
       const r = rankOf(a) || RANK.idle;
       const id = byPriority ? `sec-${r}` : `sp-${a.space}`;
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
-      else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
+      else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", space: a.space, status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
     }
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
@@ -1053,6 +1122,16 @@ export default class Agents extends View {
         .child(div().truncate().text_color(t[g.status] ?? t.dim).child(g.label))
         .when(byPriority || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
         .child(div().flex_1())
+        // A space's own +: the start menu, with the new tab in this space.
+        .when(!byPriority, (el) => el.child(div().id(`${g.id}-new`).flex_none().px(4).rounded(4)
+          .text_size(14).text_color(t.dim).cursor_pointer()
+          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .tooltip(`New tab in ${g.label}`)
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            openOverlay({ mod: "cswap-new-menu", kind: "popup", width: 300, height: 512, props: { space: g.space } });
+          })
+          .child("+")))
         .when(!open, (el) => el
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
           .child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
