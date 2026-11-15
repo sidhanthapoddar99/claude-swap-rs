@@ -39,9 +39,12 @@ function shortcut(name) {
   }).join(" ");
 }
 
+// The space the + was clicked in, else the shown one.
+const target = () => spaces().find(s => s.id === props()?.space) ?? spaces().find(s => s.active);
+
 export default class NewMenu extends View {
   init(_props, cx) {
-    const machine = spaces().find(s => s.active)?.machine;
+    const machine = target()?.machine;
     const where = machine ?? "";
     this.agents = shared(KNOWN)?.[where] ?? [];
     this.handle = cx.focus_handle();
@@ -76,7 +79,7 @@ export default class NewMenu extends View {
     const argv = e ? ["cswap", e.agent, ...(account ? [`--cswap=${account}`] : []), ...a.run.slice(1)] : a.run;
     const parent = props()?.parent;
     if (parent) setShared(SPAWN, { id: Date.now(), parent, argv, label: a.name });
-    else run("tab.new", { name: a.name, space: spaces().find(s => s.active)?.id, argv });
+    else run("tab.new", { name: a.name, space: target()?.id, argv });
   }
   // Where a plain start of this agent goes: the default account's name.
   startsOn(e) {
@@ -124,7 +127,7 @@ export default class NewMenu extends View {
   }
   render() {
     const t = theme();
-    const space = spaces().find(s => s.active);
+    const space = target();
     const installed = this.agents.filter(a => a.installed);
     const choices = this.failed ? installed : [...installed, ...this.agents.filter(a => !a.installed).slice(0, 2)];
     const opened = this.open ? installed.find(a => a.key === this.open) : null;

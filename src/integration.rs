@@ -40,6 +40,8 @@ pub const HERDR: Integration = Integration {
         "right-click an agent: move it to another account, same conversation",
         "Ctrl+click agents: move or close several at once",
         "right-click an agent: start a sub-agent under it",
+        "right-click an agent: rename it, as a tab is renamed",
+        "+ on a space in the agents list: a new tab there",
         "agents list: show each agent's account",
         "sidebar: this dashboard in a popup",
     ],
