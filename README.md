@@ -255,7 +255,7 @@ The pages are numbered in the order of the menu, so `1` is Overview; `i` is Inte
 | **Settings** | Three tabs; `t` and `T` move between them. General: the theme, refresh and updates, with a row that checks for an update now. Harness: every agent's options in one list. Shell: each shell with the agents it wraps, and a list of boxes to wrap or unwrap them. |
 | **Help** | How to start an agent on an account with every flag, what cswap's words mean, and every key. |
 
-Every bar, percent and countdown sits in the same column on every page. A countdown is as short as it can be: `3d` when it is more than two days off, `1d 6h` within two days, `4h 25m` within one. The exact date is on the Usage and Resets pages, always as a date such as `Sat 14 Nov`, with the time of day when it is within two days.
+Every bar, percent and countdown sits in the same column on every page. A countdown shows days and hours, such as `2d 14h`, when it is a day or more off, hours and minutes such as `4h 25m` within a day, and minutes alone within an hour. The exact date is on the Usage and Resets pages, always as a date such as `Sat 14 Nov`, with the time of day when it is within two days.
 
 The colour of the dot in front of an account's name tells its agent, so the agent is not written again beside the name. The dot stays a dot on every page: the default account of an agent is marked with a ★ on the Accounts page only, and in the Overview's DEFAULT column. The `grey` theme has no colours, so there the agent's command follows the name, except on the Usage page, where each agent has its own box.
 
