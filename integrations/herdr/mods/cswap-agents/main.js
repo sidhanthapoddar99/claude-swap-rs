@@ -17,6 +17,12 @@ const SPAWN = "cswap.spawn";
 // is named by its tab, so herdr's own tab name holds it.
 const NAMES = "cswap.names";
 const nameOf = (address) => shared(NAMES)?.[address] || null;
+// The space a terminal was last shown in: herdr keeps "space / tab" in its
+// `where` label after its pane is gone.
+const spaceOf = (k) => {
+  const name = (k?.labels?.where ?? "").split(" / ")[0];
+  return name ? spaces().find(s => s.name === name) ?? null : null;
+};
 
 // A switch or a restart a menu asked for. The list does the work, because it
 // stays when the menu closes; whichever copy of the list sees the request
@@ -155,6 +161,9 @@ export default class Agents extends View {
     // Off at every start: it is something to glance at, not a way to work.
     this.showAccounts = false;
     this.accountOf = new Map();
+    // Hidden agents (no pane, still running) show greyed under their space;
+    // the eye in the header leaves them out. Kept across restarts.
+    this.showHidden = localStorage.getItem("showHidden") !== "false";
     cx.timer.every(30000, (cx) => {
       if (this.showAccounts) this.loadAccounts(cx);
       cx.notify();
@@ -258,7 +267,7 @@ export default class Agents extends View {
       return;
     }
     if (this.selected.size) { this.selected.clear(); cx.notify(); }
-    openOverlay({ mod: "cswap-agents", kind: "popup", width: 264, height: 208, props: { agentAddress: address } });
+    openOverlay({ mod: "cswap-agents", kind: "popup", width: 264, height: 319, props: { agentAddress: address } });
   }
 
   // Ctrl+click (Cmd on a Mac) puts an agent in the selection or takes it
@@ -701,6 +710,35 @@ export default class Agents extends View {
         .child(button("rename-save", "Save", true, () => this.saveName())));
   }
 
+  // Put the agent beside the pane you are on. One that has a pane elsewhere
+  // leaves it first: herdr gives a pane only to a terminal without one.
+  showBeside(place, cx) {
+    cx.stop_propagation();
+    const address = this.menuAddress();
+    closeOverlay(props().overlay);
+    if (panes().some(p => p.terminal === address)) run("terminal.park", { terminal: address });
+    run("terminal.keep", { terminal: address, place });
+  }
+
+  // Hide: the pane goes, the agent keeps running. herdr's park turns keep
+  // off; a top-level agent gets it back, so it returns after herdr stops.
+  // Unhide: a tab in the space it was last in.
+  toggleHidden(cx) {
+    cx.stop_propagation();
+    const address = this.menuAddress();
+    closeOverlay(props().overlay);
+    if (panes().some(p => p.terminal === address)) {
+      run("terminal.park", { terminal: address });
+      const all = terminals();
+      const k = all.find(x => x.address === address);
+      if (!(k?.parent && all.some(p => p.address === k.parent && p.state === "live"))) cx.spawn(async () => { await hc(["keep", address]); });
+      return;
+    }
+    const space = spaceOf(terminals().find(x => x.address === address));
+    if (space && !space.active) run("space.select", { id: space.id });
+    run("terminal.keep", { terminal: address, place: "tab" });
+  }
+
   copyAgentId(cx) {
     cx.stop_propagation();
     cx.write_to_clipboard(this.menuAddress());
@@ -829,6 +867,9 @@ export default class Agents extends View {
     // Stop it and start it again where it is: how an update takes hold.
     const canRestart = Boolean(this.account) && !this.account.why_not;
     const below = working(this.account).length;
+    // Beside the pane you are on: not the one it is in already.
+    const here = panes().some(p => p.terminal === this.menuAddress() && p.focused);
+    const shownNow = panes().some(p => p.terminal === this.menuAddress());
     const restartNote = !this.account ? (this.accountError ?? "\u2026") : this.account.why_not ? "in a turn" : below ? `${below} working below` : "";
     return v_flex()
       .id("agent-context-menu")
@@ -838,11 +879,14 @@ export default class Agents extends View {
       .bg(t.popover)
       .text_size(12.8)
       .on_key_down((e, cx) => {
-        if (e.key === "down") this.menuIndex = (this.menuIndex + 1) % 6;
-        else if (e.key === "up") this.menuIndex = this.menuIndex <= 0 ? 5 : this.menuIndex - 1;
+        if (e.key === "down") this.menuIndex = (this.menuIndex + 1) % 9;
+        else if (e.key === "up") this.menuIndex = this.menuIndex <= 0 ? 8 : this.menuIndex - 1;
         else if (e.key === "enter" || e.key === "space") {
-          if (this.menuIndex === 5) this.requestCloseAgentTree(cx);
-          else if (this.menuIndex === 4) this.requestRestart(cx);
+          if (this.menuIndex === 8) this.requestCloseAgentTree(cx);
+          else if (this.menuIndex === 7) this.requestRestart(cx);
+          else if (this.menuIndex === 6) this.toggleHidden(cx);
+          else if (this.menuIndex === 5) { if (!here) this.showBeside("down", cx); }
+          else if (this.menuIndex === 4) { if (!here) this.showBeside("right", cx); }
           else if (this.menuIndex === 3) { if (local) this.requestSubAgent(cx); }
           else if (this.menuIndex === 2) this.openAccountMenu(cx);
           else if (this.menuIndex === 1) this.rename(cx);
@@ -858,8 +902,13 @@ export default class Agents extends View {
       .child(item("switch-account", "Switch account", 2, cx => this.openAccountMenu(cx), account, Boolean(this.account)))
       .child(item("add-sub-agent", "Add sub-agent\u2026", 3, cx => this.requestSubAgent(cx), local ? "" : "other machine", local))
       .child(div().mx(4).my(4).h(1).bg(t.border))
-      .child(item("restart-agent", "Restart agent", 4, cx => this.requestRestart(cx), restartNote, canRestart))
-      .child(item("close-agent-tree", "Close agent tree…", 5, cx => this.requestCloseAgentTree(cx)));
+      .child(div().mx(4).my(4).h(1).bg(t.border))
+      .child(item("show-right", "Show on the right", 4, cx => this.showBeside("right", cx), here ? "shown here" : "", !here))
+      .child(item("show-below", "Show below", 5, cx => this.showBeside("down", cx), here ? "shown here" : "", !here))
+      .child(item("hide-agent", shownNow ? "Hide" : "Unhide", 6, cx => this.toggleHidden(cx), shownNow ? "keeps running" : ""))
+      .child(div().mx(4).my(4).h(1).bg(t.border))
+      .child(item("restart-agent", "Restart agent", 7, cx => this.requestRestart(cx), restartNote, canRestart))
+      .child(item("close-agent-tree", "Close agent tree…", 8, cx => this.requestCloseAgentTree(cx)));
   }
 
   peek(addr) {
@@ -876,6 +925,58 @@ export default class Agents extends View {
         ...this.tree(all, k.address, [...lead, last ? "" : "│"]),
       ];
     });
+  }
+
+  // A tab with no agent: its program's icon and the tab's name. A click shows
+  // it; a right-click opens herdr's own tab menu (rename, close and the rest).
+  tabRow(t, { tab, space }, named) {
+    const lead = panes().find(p => p.tab === tab.id && p.focused) ?? panes().find(p => p.tab === tab.id);
+    const pic = icon(lead?.program, 16, t.foreground);
+    const name = tab.named ? tab.name : lead?.program?.name || lead?.title || "Terminal";
+    const on = space.active && tab.active;
+    return h_flex()
+      .id(`tabrow-${tab.id}`)
+      .px(8)
+      .h(30)
+      .flex_none()
+      .rounded(8)
+      .items_center()
+      .gap(9)
+      .when(on, (el) => el.bg(t.selected))
+      .cursor_pointer()
+      .hover((s) => s.bg(t.hover))
+      .on_click(() => { if (!space.active) run("space.select", { id: space.id }); run("tab.select", { id: tab.id }); })
+      .on_mouse_down("right", (_e, cx) => {
+        cx.stop_propagation();
+        openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: tab.id, space: space.id } } });
+      })
+      .child(pic ?? div().size(16).flex_none())
+      .child(div().flex_1().min_w(0).truncate().text_color(on ? t.foreground : t.muted).child(named ? `${space.name} \u00b7 ${name}` : name));
+  }
+
+  // A hidden agent: greyed, under the space it was last in. A click peeks at
+  // it; the agent menu unhides it or shows it beside a pane.
+  hiddenRow(t, k, named) {
+    const pic = icon(k.program, 16, t.foreground);
+    const name = nameOf(k.address) || k.name || k.program?.name || k.address;
+    const where = spaceOf(k)?.name;
+    return h_flex()
+      .id(`hidden-${k.address}`)
+      .px(8)
+      .h(30)
+      .flex_none()
+      .rounded(8)
+      .items_center()
+      .gap(9)
+      .opacity(0.45)
+      .cursor_pointer()
+      .hover((s) => s.bg(t.hover).opacity(0.8))
+      .tooltip("Hidden: it keeps running. Right-click to unhide.")
+      .on_click((e, cx) => { if (!this.pick(k.address, e, cx)) this.peek(k.address); })
+      .on_mouse_down("right", (_e, cx) => this.openAgentMenu(k.address, cx))
+      .child(pic ?? div().size(16).flex_none())
+      .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(named && where ? `${where} \u00b7 ${name}` : name))
+      .child(this.status(t, { status: kidStatus(k, this.listed) }, named));
   }
 
   subRow(t, s, shown, compact) {
@@ -1091,12 +1192,38 @@ export default class Agents extends View {
 
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
     // space are next to each other in agents(), so neighbours make a group.
-    const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
+    let groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
     for (const a of rest) {
       const r = rankOf(a) || RANK.idle;
       const id = byPriority ? `sec-${r}` : `sp-${a.space}`;
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
       else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", space: a.space, status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
+    }
+
+    // Tabs with no agent in them (a shell, a program) get a row too: under their
+    // space, or in a Terminals group when the list is by priority.
+    const withAgent = new Set(list.map(a => a.tab));
+    const plainOf = (sp) => sp.tabs.filter(tb => !withAgent.has(tb.id)).map(tb => ({ tab: tb, space: sp }));
+    // Hidden agents: running, with no pane and no live parent to list them under.
+    const withPane = new Set(panes().map(p => p.terminal).filter(Boolean));
+    const liveSet = new Set(all.filter(k => k.state === "live").map(k => k.address));
+    const hidden = all.filter(k => k.state === "live" && k.program?.agent && !withPane.has(k.address) && !(k.parent && liveSet.has(k.parent)));
+    const shownHidden = this.showHidden ? hidden : [];
+    if (!collapsed) {
+      if (byPriority) {
+        const plain = spaces().flatMap(plainOf);
+        if (plain.length || shownHidden.length) groups.push({ id: "terminals", label: "Terminals", status: null, members: [], tabs: plain, hidden: shownHidden });
+      } else {
+        const bySpace = new Map(groups.filter(g => g.id.startsWith("sp-")).map(g => [g.space, g]));
+        const homeless = shownHidden.filter(k => !spaceOf(k));
+        groups = [...groups.filter(g => !g.id.startsWith("sp-")), ...spaces().map(sp => {
+          const tabs = plainOf(sp);
+          const gone = shownHidden.filter(k => spaceOf(k)?.id === sp.id);
+          const g = bySpace.get(sp.id) ?? (tabs.length || gone.length ? { id: `sp-${sp.id}`, label: sp.name, space: sp.id, status: null, members: [] } : null);
+          if (g) { g.tabs = tabs; g.hidden = gone; }
+          return g;
+        }).filter(Boolean), ...(homeless.length ? [{ id: "elsewhere", label: "No space", status: null, members: [], hidden: homeless }] : [])];
+      }
     }
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
@@ -1120,10 +1247,10 @@ export default class Agents extends View {
           cx.notify();
         })
         .child(div().truncate().text_color(t[g.status] ?? t.dim).child(g.label))
-        .when(byPriority || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
+        .when(byPriority || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length + (g.tabs?.length ?? 0) + (g.hidden?.length ?? 0)))))
         .child(div().flex_1())
         // A space's own +: the start menu, with the new tab in this space.
-        .when(!byPriority, (el) => el.child(div().id(`${g.id}-new`).flex_none().px(4).rounded(4)
+        .when(!byPriority && Boolean(g.space), (el) => el.child(div().id(`${g.id}-new`).flex_none().px(4).rounded(4)
           .text_size(14).text_color(t.dim).cursor_pointer()
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
           .tooltip(`New tab in ${g.label}`)
@@ -1136,9 +1263,10 @@ export default class Agents extends View {
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
           .child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
     };
-    const rows = collapsed
+    let rows = collapsed
       ? list.flatMap(withKids)
-      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);
+      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : [...g.members.flatMap(withKids), ...(g.tabs ?? []).map(p => this.tabRow(t, p, byPriority)),
+        ...(g.hidden ?? []).flatMap(k => [this.hiddenRow(t, k, byPriority), ...this.tree(all, k.address).map(s => this.subRow(t, s, shown, byPriority))])])]);
 
     return v_flex()
       .size_full()
@@ -1176,6 +1304,19 @@ export default class Agents extends View {
                     .on_click((_e, cx) => this.toggleAccounts(cx))
                     .tooltip(this.showAccounts ? "Back to time and status" : "Show each agent's account")
                     .child(svg("mods/cswap-chrome/cswap.svg").size(14)),
+                )
+                .child(
+                  div()
+                    .id("ag-hidden")
+                    .text_color(this.showHidden ? t.dim : t.foreground)
+                    .hover((s) => s.text_color(t.foreground))
+                    .on_click((_e, cx) => {
+                      this.showHidden = !this.showHidden;
+                      localStorage.setItem("showHidden", String(this.showHidden));
+                      cx.notify();
+                    })
+                    .tooltip(this.showHidden ? "Leave hidden agents out of the list" : `Show hidden agents${hidden.length ? ` (${hidden.length})` : ""}`)
+                    .child(svg(`mods/cswap-agents/${this.showHidden ? "eye" : "eye-off"}.svg`).size(14)),
                 )
                 .child(
                   div()

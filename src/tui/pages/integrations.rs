@@ -85,7 +85,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, hits: &mut Hits) {
     let home = paths::tilde(&integration::herdr_home());
     lines.push(Line::from(Span::styled(
         format!(
-            "Goes into {home} as the layout \"{}\" and four mods named cswap-…. Your own layout and mods are left as they are, and a file of yours that is in the way is kept as <file>.mine.",
+            "Goes into {home} as the layout \"{}\" and five mods named cswap-…. Your own layout and mods are left as they are, and a file of yours that is in the way is kept as <file>.mine.",
             integration::LAYOUT
         ),
         t.s_dim(),
