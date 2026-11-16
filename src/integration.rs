@@ -42,6 +42,8 @@ pub const HERDR: Integration = Integration {
         "right-click an agent: start a sub-agent under it",
         "right-click an agent: rename it, as a tab is renamed",
         "+ on a space in the agents list: a new tab there",
+        "right-click an agent: show it beside the pane you are on",
+        "a pane's ✕ hides an agent and leaves it running",
         "agents list: show each agent's account",
         "sidebar: this dashboard in a popup",
     ],

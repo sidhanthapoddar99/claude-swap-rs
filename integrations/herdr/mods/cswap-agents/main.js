@@ -258,7 +258,7 @@ export default class Agents extends View {
       return;
     }
     if (this.selected.size) { this.selected.clear(); cx.notify(); }
-    openOverlay({ mod: "cswap-agents", kind: "popup", width: 264, height: 208, props: { agentAddress: address } });
+    openOverlay({ mod: "cswap-agents", kind: "popup", width: 264, height: 288, props: { agentAddress: address } });
   }
 
   // Ctrl+click (Cmd on a Mac) puts an agent in the selection or takes it
@@ -701,6 +701,16 @@ export default class Agents extends View {
         .child(button("rename-save", "Save", true, () => this.saveName())));
   }
 
+  // Put the agent beside the pane you are on. One that has a pane elsewhere
+  // leaves it first: herdr gives a pane only to a terminal without one.
+  showBeside(place, cx) {
+    cx.stop_propagation();
+    const address = this.menuAddress();
+    closeOverlay(props().overlay);
+    if (panes().some(p => p.terminal === address)) run("terminal.park", { terminal: address });
+    run("terminal.keep", { terminal: address, place });
+  }
+
   copyAgentId(cx) {
     cx.stop_propagation();
     cx.write_to_clipboard(this.menuAddress());
@@ -829,6 +839,8 @@ export default class Agents extends View {
     // Stop it and start it again where it is: how an update takes hold.
     const canRestart = Boolean(this.account) && !this.account.why_not;
     const below = working(this.account).length;
+    // Beside the pane you are on: not the one it is in already.
+    const here = panes().some(p => p.terminal === this.menuAddress() && p.focused);
     const restartNote = !this.account ? (this.accountError ?? "\u2026") : this.account.why_not ? "in a turn" : below ? `${below} working below` : "";
     return v_flex()
       .id("agent-context-menu")
@@ -838,11 +850,13 @@ export default class Agents extends View {
       .bg(t.popover)
       .text_size(12.8)
       .on_key_down((e, cx) => {
-        if (e.key === "down") this.menuIndex = (this.menuIndex + 1) % 6;
-        else if (e.key === "up") this.menuIndex = this.menuIndex <= 0 ? 5 : this.menuIndex - 1;
+        if (e.key === "down") this.menuIndex = (this.menuIndex + 1) % 8;
+        else if (e.key === "up") this.menuIndex = this.menuIndex <= 0 ? 7 : this.menuIndex - 1;
         else if (e.key === "enter" || e.key === "space") {
-          if (this.menuIndex === 5) this.requestCloseAgentTree(cx);
-          else if (this.menuIndex === 4) this.requestRestart(cx);
+          if (this.menuIndex === 7) this.requestCloseAgentTree(cx);
+          else if (this.menuIndex === 6) this.requestRestart(cx);
+          else if (this.menuIndex === 5) { if (!here) this.showBeside("down", cx); }
+          else if (this.menuIndex === 4) { if (!here) this.showBeside("right", cx); }
           else if (this.menuIndex === 3) { if (local) this.requestSubAgent(cx); }
           else if (this.menuIndex === 2) this.openAccountMenu(cx);
           else if (this.menuIndex === 1) this.rename(cx);
@@ -858,8 +872,12 @@ export default class Agents extends View {
       .child(item("switch-account", "Switch account", 2, cx => this.openAccountMenu(cx), account, Boolean(this.account)))
       .child(item("add-sub-agent", "Add sub-agent\u2026", 3, cx => this.requestSubAgent(cx), local ? "" : "other machine", local))
       .child(div().mx(4).my(4).h(1).bg(t.border))
-      .child(item("restart-agent", "Restart agent", 4, cx => this.requestRestart(cx), restartNote, canRestart))
-      .child(item("close-agent-tree", "Close agent tree…", 5, cx => this.requestCloseAgentTree(cx)));
+      .child(div().mx(4).my(4).h(1).bg(t.border))
+      .child(item("show-right", "Show on the right", 4, cx => this.showBeside("right", cx), here ? "shown here" : "", !here))
+      .child(item("show-below", "Show below", 5, cx => this.showBeside("down", cx), here ? "shown here" : "", !here))
+      .child(div().mx(4).my(4).h(1).bg(t.border))
+      .child(item("restart-agent", "Restart agent", 6, cx => this.requestRestart(cx), restartNote, canRestart))
+      .child(item("close-agent-tree", "Close agent tree…", 7, cx => this.requestCloseAgentTree(cx)));
   }
 
   peek(addr) {
@@ -1123,7 +1141,7 @@ export default class Agents extends View {
         .when(byPriority || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
         .child(div().flex_1())
         // A space's own +: the start menu, with the new tab in this space.
-        .when(!byPriority, (el) => el.child(div().id(`${g.id}-new`).flex_none().px(4).rounded(4)
+        .when(!byPriority && Boolean(g.space), (el) => el.child(div().id(`${g.id}-new`).flex_none().px(4).rounded(4)
           .text_size(14).text_color(t.dim).cursor_pointer()
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
           .tooltip(`New tab in ${g.label}`)
@@ -1136,9 +1154,20 @@ export default class Agents extends View {
           .when(!byPriority && top && top !== "idle", (el) => el.child(this.status(t, { status: top }, true)))
           .child(svg("mods/workspace-chrome/chevron-right.svg").size(11).flex_none().text_color(t.dim)));
     };
-    const rows = collapsed
+    let rows = collapsed
       ? list.flatMap(withKids)
       : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);
+    // Agents hidden from the layout (the pane's ✕): running, with no pane and
+    // no live parent to list them under. A click peeks; the menu shows them.
+    if (!collapsed) {
+      const withPane = new Set(panes().map(p => p.terminal).filter(Boolean));
+      const live = new Set(all.filter(k => k.state === "live").map(k => k.address));
+      const hidden = all.filter(k => k.state === "live" && k.program?.agent && !withPane.has(k.address) && !(k.parent && live.has(k.parent)));
+      if (hidden.length) {
+        rows = [...rows, header({ id: "hidden", label: "Hidden", members: hidden.map(k => ({ ...k, status: kidStatus(k, this.listed) })) }),
+          ...(this.folded.has("hidden") ? [] : hidden.flatMap(k => [{ t: k, lines: [] }, ...this.tree(all, k.address)].map(s => this.subRow(t, s, shown, byPriority))))];
+      }
+    }
 
     return v_flex()
       .size_full()

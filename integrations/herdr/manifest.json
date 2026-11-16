@@ -12,6 +12,8 @@
     "mods/cswap-chrome/mod.json",
     "mods/cswap-new-menu/main.js",
     "mods/cswap-new-menu/mod.json",
+    "mods/cswap-pane/main.js",
+    "mods/cswap-pane/mod.json",
     "mods/cswap-tabs/main.js",
     "mods/cswap-tabs/mod.json"
   ]
