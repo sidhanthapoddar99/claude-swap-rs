@@ -10,7 +10,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, layout, hc } from "herdr";
+import { panes, terminals, props, run, theme, home, layout, hc } from "herdr";
 
 // Match the first visible tab frame, including the active child of a stack.
 function paneFrame(node) {
@@ -70,12 +70,15 @@ export default class Pane extends View {
       .p(3)
       .rounded(4)
       .text_color(t.dim)
-      .tooltip("Hide: it keeps running in the agents list")
+      .tooltip("Hide: it keeps running, greyed in the agents list")
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_click((_e, cx) => {
         cx.stop_propagation();
         run("terminal.park", { terminal });
-        cx.spawn(async () => { await hc(["keep", terminal]); });
+        // A sub-agent goes back under its parent, as it was before it had a pane.
+        const all = terminals();
+        const k = all.find(x => x.address === terminal);
+        if (!(k?.parent && all.some(p => p.address === k.parent && p.state === "live"))) cx.spawn(async () => { await hc(["keep", terminal]); });
       })
       .child(svg("mods/pane/close.svg").size(14));
   }

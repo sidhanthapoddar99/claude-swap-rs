@@ -5,6 +5,8 @@
   "files": [
     "layouts/cswap.json",
     "layouts/cswap.svg",
+    "mods/cswap-agents/eye-off.svg",
+    "mods/cswap-agents/eye.svg",
     "mods/cswap-agents/main.js",
     "mods/cswap-agents/mod.json",
     "mods/cswap-chrome/cswap.svg",
