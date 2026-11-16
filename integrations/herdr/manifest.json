@@ -1,6 +1,6 @@
 {
   "name": "herdr",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "layout": "cswap",
   "files": [
     "layouts/cswap.json",
