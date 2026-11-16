@@ -10,7 +10,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, layout } from "herdr";
+import { panes, props, run, theme, home, layout, hc } from "herdr";
 
 // Match the first visible tab frame, including the active child of a stack.
 function paneFrame(node) {
@@ -61,6 +61,25 @@ export default class Pane extends View {
       .child(svg(`mods/pane/${icon}.svg`).size(14));
   }
 
+  // Hide an agent: its pane goes and it keeps running. herdr's park turns the
+  // terminal's keep off; it goes back on, so that a hidden agent comes back
+  // after herdr stops, as one with a pane does.
+  hideButton(t, pane, terminal) {
+    return div()
+      .id(`ph-x-${pane}`)
+      .p(3)
+      .rounded(4)
+      .text_color(t.dim)
+      .tooltip("Hide: it keeps running in the agents list")
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        run("terminal.park", { terminal });
+        cx.spawn(async () => { await hc(["keep", terminal]); });
+      })
+      .child(svg("mods/pane/close.svg").size(14));
+  }
+
   render(cx) {
     const t = theme();
     const p = this.me();
@@ -94,7 +113,7 @@ export default class Pane extends View {
         .child(this.button(t, `ph-d-${pane}`, "split-down", "pane.split", { direction: "down", pane }))
         .child(this.button(t, `ph-z-${pane}`, p.zoomed ? "unzoom" : "zoom", "pane.zoom", { pane }))
         .child(p.program?.agent && p.terminal
-          ? this.button(t, `ph-x-${pane}`, "close", "terminal.park", { terminal: p.terminal }, "Hide: it keeps running in the agents list")
+          ? this.hideButton(t, pane, p.terminal)
           : this.button(t, `ph-x-${pane}`, "close", "pane.close", { pane })));
   }
 }

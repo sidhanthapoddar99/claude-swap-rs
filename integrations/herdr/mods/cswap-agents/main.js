@@ -896,6 +896,33 @@ export default class Agents extends View {
     });
   }
 
+  // A tab with no agent: its program's icon and the tab's name. A click shows
+  // it; a right-click opens herdr's own tab menu (rename, close and the rest).
+  tabRow(t, { tab, space }, named) {
+    const lead = panes().find(p => p.tab === tab.id && p.focused) ?? panes().find(p => p.tab === tab.id);
+    const pic = icon(lead?.program, 16, t.foreground);
+    const name = tab.named ? tab.name : lead?.program?.name || lead?.title || "Terminal";
+    const on = space.active && tab.active;
+    return h_flex()
+      .id(`tabrow-${tab.id}`)
+      .px(8)
+      .h(30)
+      .flex_none()
+      .rounded(8)
+      .items_center()
+      .gap(9)
+      .when(on, (el) => el.bg(t.selected))
+      .cursor_pointer()
+      .hover((s) => s.bg(t.hover))
+      .on_click(() => { if (!space.active) run("space.select", { id: space.id }); run("tab.select", { id: tab.id }); })
+      .on_mouse_down("right", (_e, cx) => {
+        cx.stop_propagation();
+        openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: tab.id, space: space.id } } });
+      })
+      .child(pic ?? div().size(16).flex_none())
+      .child(div().flex_1().min_w(0).truncate().text_color(on ? t.foreground : t.muted).child(named ? `${space.name} \u00b7 ${name}` : name));
+  }
+
   subRow(t, s, shown, compact) {
     const k = s.t;
     const st = kidStatus(k, this.listed);
@@ -1109,12 +1136,31 @@ export default class Agents extends View {
 
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
     // space are next to each other in agents(), so neighbours make a group.
-    const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
+    let groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
     for (const a of rest) {
       const r = rankOf(a) || RANK.idle;
       const id = byPriority ? `sec-${r}` : `sp-${a.space}`;
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
       else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", space: a.space, status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
+    }
+
+    // Tabs with no agent in them (a shell, a program) get a row too: under their
+    // space, or in a Terminals group when the list is by priority.
+    const withAgent = new Set(list.map(a => a.tab));
+    const plainOf = (sp) => sp.tabs.filter(tb => !withAgent.has(tb.id)).map(tb => ({ tab: tb, space: sp }));
+    if (!collapsed) {
+      if (byPriority) {
+        const plain = spaces().flatMap(plainOf);
+        if (plain.length) groups.push({ id: "terminals", label: "Terminals", status: null, members: [], tabs: plain });
+      } else {
+        const bySpace = new Map(groups.filter(g => g.id.startsWith("sp-")).map(g => [g.space, g]));
+        groups = [...groups.filter(g => !g.id.startsWith("sp-")), ...spaces().map(sp => {
+          const tabs = plainOf(sp);
+          const g = bySpace.get(sp.id) ?? (tabs.length ? { id: `sp-${sp.id}`, label: sp.name, space: sp.id, status: null, members: [] } : null);
+          if (g) g.tabs = tabs;
+          return g;
+        }).filter(Boolean)];
+      }
     }
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
@@ -1138,7 +1184,7 @@ export default class Agents extends View {
           cx.notify();
         })
         .child(div().truncate().text_color(t[g.status] ?? t.dim).child(g.label))
-        .when(byPriority || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length))))
+        .when(byPriority || !open, (el) => el.child(div().text_color(t.dim).child(String(g.members.length + (g.tabs?.length ?? 0)))))
         .child(div().flex_1())
         // A space's own +: the start menu, with the new tab in this space.
         .when(!byPriority && Boolean(g.space), (el) => el.child(div().id(`${g.id}-new`).flex_none().px(4).rounded(4)
@@ -1156,7 +1202,7 @@ export default class Agents extends View {
     };
     let rows = collapsed
       ? list.flatMap(withKids)
-      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);
+      : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : [...g.members.flatMap(withKids), ...(g.tabs ?? []).map(p => this.tabRow(t, p, byPriority))])]);
     // Agents hidden from the layout (the pane's ✕): running, with no pane and
     // no live parent to list them under. A click peeks; the menu shows them.
     if (!collapsed) {
