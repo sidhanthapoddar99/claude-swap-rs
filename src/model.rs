@@ -239,15 +239,12 @@ pub fn ago(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-/// How long until `at`, at the precision that matters: whole days when it is
-/// more than two days off, days and hours within two days, hours and minutes
-/// within one.
+/// How long until `at`: days and hours (`2d 14h`) when it is a day or more
+/// off, hours and minutes (`14h 05m`) within a day, minutes within an hour.
 pub fn until(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let secs = (at - now).num_seconds().max(0);
     let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
-    if secs > 2 * 86400 {
-        format!("{d}d")
-    } else if secs >= 86400 {
+    if d > 0 {
         format!("{d}d {h}h")
     } else if h > 0 {
         format!("{h}h {m:02}m")
@@ -303,6 +300,17 @@ mod tests {
         assert_eq!(in_days(118), "Tue 9 Mar");
         // Next October could be read as last month.
         assert_eq!(in_days(348), "Mon 25 Oct 2027");
+    }
+
+    #[test]
+    fn days_come_with_hours_and_minutes_only_within_a_day() {
+        let now = Utc::now();
+        let at = |mins: i64| until(now + Duration::minutes(mins), now);
+        assert_eq!(at(2 * 1440 + 14 * 60 + 30), "2d 14h");
+        assert_eq!(at(9 * 1440), "9d 0h");
+        assert_eq!(at(1440), "1d 0h");
+        assert_eq!(at(14 * 60 + 5), "14h 05m");
+        assert_eq!(at(47), "47m");
     }
 
     fn win(pct: f64, reset_in_h: i64, secs: i64) -> Window {
