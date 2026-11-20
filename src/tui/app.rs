@@ -859,10 +859,12 @@ impl App {
         let state = &self.integration;
         let there = *state != State::NoHerdr;
         let installed = matches!(state, State::Installed { .. });
-        // Only offered when it would change something: shims are on and
-        // herdr still starts an agent's own program for its bare name.
-        let skips = match crate::herdr_path::state() {
-            crate::herdr_path::State::Skips(s) => s,
+        // Always in the list, so it is plain where herdr stands. It can be
+        // chosen when it would change something: shims are on and herdr
+        // still starts an agent's own program for its bare name.
+        let path = crate::herdr_path::state();
+        let skips = match &path {
+            crate::herdr_path::State::Skips(s) => s.clone(),
             _ => Vec::new(),
         };
         let mut items = vec![
@@ -897,20 +899,25 @@ impl App {
                 action: Action::ShowHerdr,
             },
         ];
-        if !skips.is_empty() {
-            let bins: Vec<&str> = skips.iter().map(|(h, _)| h.spec().bins[0]).collect();
-            items.push(ChoiceItem {
-                heading: None,
-                label: "Start agents through cswap".to_string(),
-                detail: format!(
+        let bins: Vec<&str> = skips.iter().map(|(h, _)| h.spec().bins[0]).collect();
+        items.push(ChoiceItem {
+            heading: None,
+            label: "Start agents through cswap".to_string(),
+            detail: match &path {
+                crate::herdr_path::State::Skips(_) => format!(
                     "herdr skips cswap for {} · restarts its core, agents keep running",
                     bins.join(", ")
                 ),
-                enabled: true,
-                key: Some('p'),
-                action: Action::FixHerdrPath,
-            });
-        }
+                crate::herdr_path::State::Fine => "herdr already does · nothing to fix".to_string(),
+                crate::herdr_path::State::Off => {
+                    "PATH shims are off · turn them on in Settings, under Shell".to_string()
+                }
+                crate::herdr_path::State::NoHerdr => "herdr does not answer".to_string(),
+            },
+            enabled: !skips.is_empty(),
+            key: Some('p'),
+            action: Action::FixHerdrPath,
+        });
         self.modal = Some(Modal::Choice {
             title: "herdr".to_string(),
             hint: if skips.is_empty() {
