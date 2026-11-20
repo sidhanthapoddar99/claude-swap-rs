@@ -131,6 +131,9 @@ enum HerdrCmd {
         /// Restart herdr's core with cswap's shims first; agents keep running
         #[arg(long)]
         fix: bool,
+        /// The same, when the setting allows it: what the layout asks by itself
+        #[arg(long, conflicts_with = "fix")]
+        auto: bool,
         /// Print JSON
         #[arg(long)]
         json: bool,
@@ -648,7 +651,14 @@ fn run() -> Result<ExitCode> {
                 json,
             } => herdr::restart_cmd(&terminal, herdr::Allow { fresh, force }, json)?,
             HerdrCmd::Save { auto, json } => herdr_saved::save_cmd(auto, json)?,
-            HerdrCmd::Path { fix, json } => ok = herdr_path::path_cmd(fix, json)?,
+            HerdrCmd::Path { fix, auto, json } => {
+                let ask = match (fix, auto) {
+                    (true, _) => herdr_path::Ask::Fix,
+                    (_, true) => herdr_path::Ask::Auto,
+                    _ => herdr_path::Ask::Look,
+                };
+                ok = herdr_path::path_cmd(ask, json)?
+            }
             HerdrCmd::Restore {
                 terminals,
                 dry_run,
