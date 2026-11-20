@@ -3,6 +3,9 @@
 //! agent lands on the root login. herdr can take a new environment without
 //! ending a program (`hc server restart --fresh`), so cswap gives it its own
 //! old one back with the shims folder put first, and nothing else changed.
+//!
+//! The cswap layout asks for that by itself (`cswap herdr path --auto`), so a
+//! reboot does not leave herdr skipping cswap until someone notices.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -11,7 +14,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::harness::Harness;
-use crate::{paths, shim, store};
+use crate::{fsx, paths, shim, store};
 
 /// Do the agents herdr starts by a bare name go through cswap?
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,13 +108,38 @@ fn environ_of(_pid: u64) -> Result<Vec<(OsString, OsString)>> {
 /// What to do by hand when cswap cannot do it.
 const BY_HAND: &str = "Run `hc server restart --fresh` in a terminal outside herdr instead";
 
-/// Restart herdr's core with the shims folder first on its `PATH`. Running
-/// programs keep running; terminals started from now on find cswap.
-pub fn fix() -> Result<State> {
-    match state() {
-        State::Skips(_) => {}
-        other => return Ok(other),
-    }
+/// What herdr still started after a restart that should have put it right,
+/// one `bin=path` each. The automatic fix does not restart herdr for the
+/// same again: it would do so at every check and never help.
+fn failed_file() -> PathBuf {
+    paths::root().join("herdr-path-failed.json")
+}
+
+fn told(skips: &[(Harness, Option<PathBuf>)]) -> Vec<String> {
+    skips
+        .iter()
+        .map(|(h, first)| {
+            format!(
+                "{}={}",
+                h.spec().bins[0],
+                first
+                    .as_deref()
+                    .map_or(String::new(), |p| p.display().to_string())
+            )
+        })
+        .collect()
+}
+
+/// Did a restart leave herdr exactly like this before?
+fn failed_before(skips: &[(Harness, Option<PathBuf>)]) -> bool {
+    fsx::read_json::<Vec<String>>(&failed_file())
+        .ok()
+        .flatten()
+        .is_some_and(|was| was == told(skips))
+}
+
+/// Give herdr's core its own environment back with the shims folder first.
+fn restart() -> Result<()> {
     let status = crate::herdr::hc(&["server", "status", "--json"])?;
     let pid = serde_json::from_str::<serde_json::Value>(&status)
         .ok()
@@ -146,8 +174,20 @@ pub fn fix() -> Result<State> {
         );
     }
     shim::forget_herdr();
+    Ok(())
+}
+
+/// Restart herdr's core with the shims folder first on its `PATH`. Running
+/// programs keep running; terminals started from now on find cswap.
+pub fn fix() -> Result<State> {
+    match state() {
+        State::Skips(_) => {}
+        other => return Ok(other),
+    }
+    restart()?;
     match state() {
         State::Skips(left) => {
+            let _ = fsx::write_json(&failed_file(), &told(&left));
             let (h, first) = &left[0];
             bail!(
                 "herdr restarted its core and still starts {} for a bare {}",
@@ -160,12 +200,69 @@ pub fn fix() -> Result<State> {
     }
 }
 
-/// `cswap herdr path`: say where herdr stands, and with `fix` put it right.
-/// False when a bare name still skips cswap.
-pub fn path_cmd(fix_it: bool, json: bool) -> Result<bool> {
+/// How `cswap herdr path` is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    /// Only say where herdr stands.
+    Look,
+    /// Put it right.
+    Fix,
+    /// Put it right when the setting allows it, and not twice in vain: what
+    /// the cswap layout asks, unseen, when it starts and every few minutes.
+    Auto,
+}
+
+/// What became of one asking.
+struct Outcome {
+    now: State,
+    /// herdr's core was restarted.
+    fixed: bool,
+    /// An automatic fix was held back: the last restart left herdr as it is.
+    gave_up: bool,
+}
+
+fn answer(ask: Ask) -> Result<Outcome> {
     let before = state();
-    let fixed = fix_it && matches!(before, State::Skips(_));
+    let State::Skips(skips) = &before else {
+        if before == State::Fine {
+            let _ = std::fs::remove_file(failed_file());
+        }
+        return Ok(Outcome {
+            now: before,
+            fixed: false,
+            gave_up: false,
+        });
+    };
+    let gave_up = ask == Ask::Auto && failed_before(skips);
+    let fixed = match ask {
+        Ask::Look => false,
+        Ask::Fix => true,
+        Ask::Auto => !gave_up && store::Settings::load().unwrap_or_default().herdr_fix_path,
+    };
     let now = if fixed { fix()? } else { before };
+    if now == State::Fine {
+        let _ = std::fs::remove_file(failed_file());
+    }
+    Ok(Outcome {
+        now,
+        fixed,
+        gave_up,
+    })
+}
+
+/// `cswap herdr path`: say where herdr stands, and with `Ask::Fix` or
+/// `Ask::Auto` put it right. False when a bare name still skips cswap.
+pub fn path_cmd(ask: Ask, json: bool) -> Result<bool> {
+    // One at a time: two windows of the layout ask at the same moment, and
+    // the second must find herdr already put right.
+    let Outcome {
+        now,
+        fixed,
+        gave_up,
+    } = match ask {
+        Ask::Look => answer(ask)?,
+        _ => fsx::with_lock(&paths::root(), || answer(ask))?,
+    };
     let skips: Vec<(Harness, Option<PathBuf>)> = match &now {
         State::Skips(s) => s.clone(),
         _ => Vec::new(),
@@ -189,7 +286,13 @@ pub fn path_cmd(fix_it: bool, json: bool) -> Result<bool> {
             .collect();
         println!(
             "{}",
-            serde_json::json!({ "state": word, "fixed": fixed, "skips": rows })
+            serde_json::json!({
+                "state": word,
+                "fixed": fixed,
+                "gave_up": gave_up,
+                "auto": store::Settings::load().unwrap_or_default().herdr_fix_path,
+                "skips": rows,
+            })
         );
         return Ok(skips.is_empty());
     }
@@ -205,6 +308,9 @@ pub fn path_cmd(fix_it: bool, json: bool) -> Result<bool> {
                     Some(first) => println!("herdr starts {} for a bare {bin}, not cswap's shim", paths::tilde(first)),
                     None => println!("herdr finds no {bin} at all"),
                 }
+            }
+            if gave_up {
+                println!("The last restart of herdr's core left it like this, so cswap does not restart it again by itself.");
             }
             println!("An agent started that way runs on the root login. Put it right with:\n  cswap herdr path --fix");
         }

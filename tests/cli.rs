@@ -1787,6 +1787,130 @@ esac
     assert!(!h.join("hc-env").exists());
 }
 
+/// What the layout asks by itself: the same fix, when the setting allows it,
+/// and never a second restart for a herdr that the first one did not change.
+#[test]
+fn the_automatic_fix_goes_by_the_setting_and_gives_up_after_a_restart_in_vain() {
+    let env = Env::new();
+    let h = env.home();
+    // A restart takes the caller's PATH, unless herdr is stuck with its own.
+    let hc = h.join("bin/hc");
+    fs::write(
+        &hc,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "server status") echo '{"pid":4242}' ;;
+  "server restart")
+    echo again >> "$HOME/hc-restarts"
+    [ -e "$HOME/hc-stuck" ] || printf '%s' "$PATH" > "$HOME/hc-path" ;;
+  exec*) shift 3; PATH=$(cat "$HOME/hc-path") exec "$@" ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
+    let old = format!("{}:/usr/bin:/bin", h.join("bin").display());
+    fs::write(h.join("hc-path"), &old).unwrap();
+    fs::create_dir_all(h.join("proc/4242")).unwrap();
+    fs::write(
+        h.join("proc/4242/environ"),
+        format!("HOME={}\0PATH={old}\0", h.display()),
+    )
+    .unwrap();
+    env.ok(&["shims", "on", "claude"]);
+
+    let auto = || {
+        let out = env
+            .cmd(&["herdr", "path", "--auto", "--json"])
+            .env("PATH", env.shim_path())
+            .output()
+            .unwrap();
+        let said: Value = serde_json::from_str(&text(&out.stdout))
+            .unwrap_or_else(|_| panic!("{}", text(&out.stderr)));
+        (out.status.success(), said)
+    };
+    let restarts = || {
+        fs::read_to_string(h.join("hc-restarts"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    };
+    let set = |on: bool| {
+        let file = env.cswap_home().join("settings.json");
+        let mut settings: Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        settings["herdr_fix_path"] = on.into();
+        fs::write(&file, settings.to_string()).unwrap();
+    };
+
+    // Switched off, the layout is only told.
+    set(false);
+    let (ok, said) = auto();
+    assert!(
+        !ok && said["state"] == "skips" && said["auto"] == false,
+        "{said}"
+    );
+    assert!(said["fixed"] == false && said["gave_up"] == false, "{said}");
+    assert_eq!(restarts(), 0);
+
+    // On, which it is unless switched off, herdr is put right, once.
+    set(true);
+    let (ok, said) = auto();
+    assert!(
+        ok && said["state"] == "fine" && said["fixed"] == true,
+        "{said}"
+    );
+    let (ok, said) = auto();
+    assert!(
+        ok && said["state"] == "fine" && said["fixed"] == false,
+        "{said}"
+    );
+    assert_eq!(restarts(), 1);
+
+    // After a reboot herdr skips cswap again, and this time a restart does
+    // not change that. It is tried once and then left alone.
+    fs::write(h.join("hc-path"), &old).unwrap();
+    fs::write(h.join("hc-stuck"), "").unwrap();
+    let out = env
+        .cmd(&["herdr", "path", "--auto", "--json"])
+        .env("PATH", env.shim_path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("still starts"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(restarts(), 2);
+    for _ in 0..2 {
+        let (ok, said) = auto();
+        assert!(
+            !ok && said["gave_up"] == true && said["fixed"] == false,
+            "{said}"
+        );
+    }
+    assert_eq!(restarts(), 2);
+
+    // Asked by hand it is tried again, and once that helps the automatic fix
+    // is back for the next time.
+    fs::remove_file(h.join("hc-stuck")).unwrap();
+    let out = env
+        .cmd(&["herdr", "path", "--fix"])
+        .env("PATH", env.shim_path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(restarts(), 3);
+    fs::write(h.join("hc-path"), &old).unwrap();
+    let (ok, said) = auto();
+    assert!(
+        ok && said["fixed"] == true && said["gave_up"] == false,
+        "{said}"
+    );
+    assert_eq!(restarts(), 4);
+}
+
 #[test]
 fn uninstall_undoes_what_cswap_wrote_outside_its_folder() {
     let env = Env::new();

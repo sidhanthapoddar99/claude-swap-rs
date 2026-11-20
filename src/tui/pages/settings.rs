@@ -51,6 +51,8 @@ pub enum Id {
     UpdateCheck,
     /// Minutes between the saves of what runs in herdr.
     HerdrSave,
+    /// The layout restarts herdr's core when it started without the shims.
+    HerdrFixPath,
     /// Ask GitHub now whether a newer cswap is out.
     CheckNow,
     AutoPick(Harness),
@@ -377,6 +379,12 @@ fn shells(app: &App) -> Vec<Row> {
         },
         "How often the cswap layout in herdr writes down which agent, account and conversation is in which terminal, so `cswap herdr restore` can bring them back after herdr was stopped or the machine restarted. An agent started after the last save is not in it. Off: only when you press Save in herdr or run `cswap herdr save`.",
     ));
+    out.push(toggle(
+        Id::HerdrFixPath,
+        "herdr keeps to cswap",
+        app.settings.herdr_fix_path,
+        "herdr keeps the PATH it started with, and after a reboot that one may not have cswap's shims first: an agent herdr then starts by a bare name, as in `hc run claude …`, runs on the root login. With this on, the cswap layout in herdr puts that right by itself when it starts and every few minutes: it restarts herdr's core with the shims first, as `cswap herdr path --fix` does, and running agents keep running. It needs PATH shims on. Off: the layout only tells you.",
+    ));
     out.push(
         note(
             "Pick an account once",
@@ -477,6 +485,7 @@ pub fn change(app: &mut App, dir: i32) {
             }
         })
         .map(|_| ()),
+        Id::HerdrFixPath => Settings::update(|s| s.herdr_fix_path = !s.herdr_fix_path).map(|_| ()),
         Id::HistoryDays => Settings::update(|s| {
             s.history_days = step(&[14, 30, 60, 90, 180, 365], s.history_days as u64, dir) as u32
         })

@@ -74,8 +74,10 @@ the agent in it, which is you.
 
   cswap herdr path                 does a bare `claude` in herdr reach cswap?
 
-If it does not, start agents as `cswap <agent>` and tell the user:
-`cswap herdr path --fix` restarts herdr's core, so it is theirs to run.
+If it does not, start agents as `cswap <agent>` and tell the user. The cswap
+layout in herdr puts it right by itself within ten minutes, unless the user
+turned that off. `cswap herdr path --fix` restarts herdr's core, so it is
+theirs to run.
 
 ## After herdr was stopped
 

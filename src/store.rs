@@ -46,6 +46,9 @@ pub struct Settings {
     /// Minutes between the saves of what runs in herdr that the layout asks
     /// for. 0: no save unless you ask.
     pub herdr_save_minutes: u64,
+    /// The layout puts herdr right by itself when herdr's core started
+    /// without the shims first on its `PATH`. Off: it only says so.
+    pub herdr_fix_path: bool,
     /// The agents that have a PATH shim, by id. Empty: the feature is off.
     pub shims: Vec<String>,
     /// Login files cswap made itself to hold the shims' `PATH` line, so
@@ -68,6 +71,7 @@ impl Default for Settings {
             update_check: true,
             shells: BTreeMap::new(),
             herdr_save_minutes: 10,
+            herdr_fix_path: true,
             shims: Vec::new(),
             shim_files_made: Vec::new(),
         }

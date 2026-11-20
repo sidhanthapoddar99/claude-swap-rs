@@ -58,6 +58,7 @@ export default class WorkspaceChrome extends View {
     this.checkSave(cx, false);
     cx.timer.every(60000, (cx) => this.checkSave(cx, false));
     this.checkPath(cx);
+    cx.timer.every(600000, (cx) => this.checkPath(cx));
     cx.spawn(async cx => {
       for (;;) {
         const command = await nextCommand();
@@ -73,19 +74,41 @@ export default class WorkspaceChrome extends View {
     return exec(this.bin, args, { timeout });
   }
   // herdr keeps the PATH it started with. Without cswap's shims on it, an
-  // agent started by its bare name runs on its own login: say so, once.
+  // agent started by its bare name runs on its own login. cswap puts that
+  // right when its setting allows: it restarts herdr's core, and the programs
+  // keep running. Each outcome is said once.
   checkPath(cx) {
+    if (this.pathBusy) return;
+    this.pathBusy = true;
     cx.spawn(async () => {
+      let said = null;
       try {
-        const r = await this.cswap(["herdr", "path", "--json"]);
+        const r = await this.cswap(["herdr", "path", "--auto", "--json"], 60000);
+        if (!r.stdout.trim()) throw new Error(r.stderr.trim() || "cswap did not answer");
         const p = JSON.parse(r.stdout);
-        if (p.state !== "skips") return;
-        notify({
-          title: `herdr skips cswap for ${p.skips.map(s => s.bin).join(", ")}`,
-          body: "An agent herdr starts runs on its own login. Fix it in cswap, under Integrations, or run: cswap herdr path --fix",
-          level: "error",
-        });
-      } catch {}
+        if (p.state === "skips") {
+          said = {
+            title: `herdr skips cswap for ${p.skips.map(s => s.bin).join(", ")}`,
+            body: p.gave_up
+              ? "An agent herdr starts runs on its own login. cswap restarted herdr's core and that did not help, so it does not try again by itself. Run: cswap herdr path --fix"
+              : "An agent herdr starts runs on its own login. Fix it in cswap, under Integrations, or run: cswap herdr path --fix. cswap does it by itself with \"herdr keeps to cswap\" on in its settings.",
+            level: "error",
+          };
+        } else if (p.fixed) {
+          said = {
+            title: "herdr starts agents through cswap again",
+            body: "herdr's core had started without cswap's shims on its PATH, so cswap restarted it. Running agents kept running.",
+            level: "success",
+          };
+        }
+      } catch (e) {
+        said = { title: "cswap could not check how herdr starts agents", body: String(e?.message ?? e), level: "error" };
+      }
+      const key = said && said.title + said.body;
+      if (said && key !== this.pathSaid) notify(said);
+      // A fix is news every time; a complaint is not, until it has gone away.
+      this.pathSaid = said?.level === "error" ? key : null;
+      this.pathBusy = false;
     });
   }
   // Ask cswap to save: when one is due, or now when the button asks.
